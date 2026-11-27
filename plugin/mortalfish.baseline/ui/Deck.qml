@@ -1515,12 +1515,23 @@ Item {
                     Layout.alignment: Qt.AlignTop
                     Layout.rightMargin: 8
                     visible: !!root.now
-                    active: root.seen && !!root.now
+                    active: root.seen && !!root.now && !root.stageOn
                     playing: root.deck.playing
                     live: !root.inSonos
+                    mic: root.deck.micViz === true
                     amber: root.amber
                     teal: root.teal
                     ground: root.ground
+                    // In a room: let the bars hear it through the microphone (or not).
+                    HeadLink {
+                      visible: root.inSonos
+                      anchors.right: parent.right; anchors.top: parent.top
+                      glyph: root.deck.micViz ? "󰍬" : "󰍭"
+                      text: root.deck.micViz ? strings.t("deck.micOn") : strings.t("deck.micOff")
+                      tip: strings.t("deck.micTip")
+                      on: root.deck.micViz === true
+                      onTapped: root.run(["deck", "mic", root.deck.micViz ? "off" : "on"])
+                    }
                   }
                 }
                 // progress
@@ -2860,6 +2871,7 @@ Item {
           active: stageView.visible && !!root.now
           playing: root.deck.playing
           live: !root.inSonos
+          mic: root.deck.micViz === true
           amber: root.amber; teal: root.teal; ground: root.ground
         }
 

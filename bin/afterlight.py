@@ -3896,7 +3896,8 @@ DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kin
               "paused": False, "sleep": None, "crossfade": False, "autodj": False, "autodjAt": 0, "handoff": "",
               "pushed": [], "pushedFrom": 1, "expect": None, "was": None, "updated": 0,
               "lock": False, "requests": [], "guests": None, "requestsAuto": False, "votes": {}, "lastCall": 0,
-              "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": ""}
+              "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": "",
+              "micViz": False}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -6102,6 +6103,8 @@ def deck_command(settings, args):
             toast("Last call", "Requests close at " + time.strftime("%H:%M", time.localtime(closes)), glyph="󰄜")
     elif action == "requests" and len(args) == 3 and args[1] == "auto" and args[2] in {"on", "off"}:
         deck_update(lambda d: d.update(requestsAuto=args[2] == "on"))
+    elif action == "mic" and len(args) == 2 and args[1] in {"on", "off"}:
+        deck_update(lambda d: d.update(micViz=args[1] == "on"))
     elif action == "voice" and len(args) == 2 and args[1] in {"on", "off"}:
         deck_update(lambda d: d.update(voice=args[1] == "on"))
     elif action == "voice" and len(args) == 3 and args[1] == "make":

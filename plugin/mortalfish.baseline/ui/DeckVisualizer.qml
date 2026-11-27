@@ -6,14 +6,16 @@ import qs.Commons
 // The Deck's equalizer, "the Skyline": bars from the look's accent (bass) to
 // its cyan (treble), peak caps that hang and fall, a soft halo and a reflection
 // on the floor. With `live` it shows the laptop's real sound
-// (cava, reading PipeWire's output); otherwise (a Sonos room, or no cava) a
-// pulse that moves like music. Resting, it breathes. It does nothing at all
+// (cava, reading PipeWire's output); in a Sonos room with `mic`, the room's
+// sound through the laptop's microphone; otherwise (or with no cava) a pulse
+// that moves like music. Resting, it breathes. It does nothing at all
 // while `active` is false.
 Item {
   id: viz
   property bool active: false       // on screen
   property bool playing: false
   property bool live: false         // the sound is on this laptop
+  property bool mic: false          // not live: listen to the room through the microphone
   property color amber: "#ff5aa5"
   property color teal: "#62b6ff"
   property color ground: "#130c15"
@@ -25,6 +27,7 @@ Item {
   property var holds: []
   property bool haveCava: false
   readonly property bool listening: active && playing && live && haveCava
+  readonly property bool hearing: active && playing && !live && mic && haveCava
 
   function blank() { const a = []; for (let i = 0; i < count; i++) a.push(0); return a }
   Component.onCompleted: { levels = blank(); peaks = blank(); holds = blank(); probe.running = true }
@@ -39,6 +42,21 @@ Item {
     id: cava
     running: viz.listening
     command: ["cava", "-p", String(Qt.resolvedUrl("cava.conf")).replace(/^file:\/\//, "")]
+    stdout: SplitParser {
+      onRead: function(line) {
+        const parts = line.split(";")
+        if (parts.length < viz.count) return
+        const next = []
+        for (let i = 0; i < viz.count; i++) next.push(Math.max(0, Math.min(1, (parseInt(parts[i]) || 0) / 100)))
+        viz.take(next)
+      }
+    }
+  }
+
+  Process {
+    id: cavaMic
+    running: viz.hearing
+    command: ["cava", "-p", String(Qt.resolvedUrl("cava-mic.conf")).replace(/^file:\/\//, "")]
     stdout: SplitParser {
       onRead: function(line) {
         const parts = line.split(";")
@@ -68,7 +86,7 @@ Item {
   Timer {
     interval: 33
     repeat: true
-    running: viz.active && !viz.listening
+    running: viz.active && !viz.listening && !viz.hearing
     onTriggered: {
       viz.phase += 0.033
       const t = viz.phase
