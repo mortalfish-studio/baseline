@@ -111,6 +111,20 @@ Item {
   readonly property real tileWidth: strip.tileWidth
   readonly property bool open: seen
   readonly property Item stageItem: stage
+  // One quiet tooltip for the whole Deck: a word under a glyph you rest on.
+  property Item tipFor: null
+  property string tipText: ""
+  property point tipAt: Qt.point(0, 0)
+  property bool tipShown: false
+  function hint(item, text, on) {
+    if (on && text !== "") {
+      tipFor = item; tipText = text
+      const at = item.mapToItem(stage, item.width / 2, item.height + 6)
+      tipAt = Qt.point(at.x, at.y)
+      tipDelay.restart()
+    } else if (tipFor === item) { tipDelay.stop(); tipShown = false; tipFor = null }
+  }
+  Timer { id: tipDelay; interval: 450; onTriggered: root.tipShown = true }
   property var roomList: []
   property string roomText: ""
   readonly property var partyRooms: roomList.filter(r => r.here).sort((a, b) => (b.lead ? 1 : 0) - (a.lead ? 1 : 0))
@@ -296,6 +310,9 @@ Item {
   property bool crateFolded: false
   // A song picked in the crate to grow a set (or Auto-DJ) from.
   property var seed: null
+  // The Build card stays a single line until you open it (or pick a seed).
+  property bool buildOpen: false
+  readonly property bool buildShown: buildOpen || !!seed
   property string seedService: ""
   readonly property bool crateOpen: !crateFolded
   function applyCrate() {
@@ -798,7 +815,7 @@ Item {
               Behavior on opacity { NumberAnimation { duration: Style.duration(160) } }
               RoundButton { glyph: "󰅂"; tip: strings.t("deck.crateOpen"); onClicked: root.setCrate(true) }
               RoundButton { glyph: "󰍉"; tip: strings.t("deck.search"); onClicked: { root.setCrate(true); query.forceActiveFocus() } }
-              RoundButton { glyph: "✦"; tip: strings.t("deck.build"); onClicked: { root.setCrate(true); brief.forceActiveFocus() } }
+              RoundButton { glyph: "✦"; tip: strings.t("deck.build"); onClicked: { root.setCrate(true); root.buildOpen = true; brief.forceActiveFocus() } }
             }
 
           ColumnLayout {
@@ -832,8 +849,29 @@ Item {
                 anchors.margins: 10
                 spacing: 8
                 property int minutes: 60
-                Label { text: "✦  " + strings.t("deck.build").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.amber }
+                RowLayout {
+                  Layout.fillWidth: true
+                  Label { text: "✦  " + strings.t("deck.build").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.amber }
+                  Label {
+                    Layout.fillWidth: true
+                    visible: !root.buildShown
+                    text: strings.t("deck.buildTeaser")
+                    elide: Text.ElideRight
+                    font.pixelSize: Style.font.caption
+                    opacity: 0.5
+                  }
+                  Item { Layout.fillWidth: root.buildShown }
+                  Label { text: root.buildShown ? "󰅃" : "󰅀"; font.family: "Iosevka Nerd Font Propo"; color: root.amber; opacity: 0.8 }
+                  HoverHandler { cursorShape: Qt.PointingHandCursor }
+                  TapHandler {
+                    onTapped: {
+                      if (root.buildShown) { root.buildOpen = false; root.seed = null }
+                      else { root.buildOpen = true; brief.forceActiveFocus() }
+                    }
+                  }
+                }
                 Rectangle {
+                  visible: root.buildShown
                   Layout.fillWidth: true
                   implicitHeight: Math.max(54, brief.implicitHeight + 12)
                   radius: Style.cornerRadius > 0 ? 4 : 0
@@ -860,6 +898,7 @@ Item {
                   }
                 }
                 RowLayout {
+                  visible: root.buildShown
                   Layout.fillWidth: true
                   spacing: 6
                   Repeater {
@@ -897,6 +936,7 @@ Item {
                       args.push("--service", root.seed ? root.seedService : root.service)
                       root.runLong(args)
                       root.seed = null
+                      root.buildOpen = false
                     }
                   }
                 }
@@ -936,6 +976,7 @@ Item {
                   }
                 }
                 Label {
+                  visible: root.buildShown
                   Layout.fillWidth: true
                   wrapMode: Text.Wrap
                   text: root.seed ? strings.t("deck.seedNote")
@@ -1386,7 +1427,7 @@ Item {
                   // Sleep: off, 15, 30, 60 minutes, the end of this song.
                   ActionButton {
                     icon: "󰒲"
-                    text: !root.sleep ? "" : root.sleep.song ? strings.t("deck.sleepSong") : strings.t("deck.sleepIn").arg(root.sleepMinutes)
+                    text: !root.sleep ? strings.t("deck.sleep") : root.sleep.song ? strings.t("deck.sleepSong") : strings.t("deck.sleepIn").arg(root.sleepMinutes)
                     tone: root.sleep ? root.amber : root.teal
                     onClicked: root.nextSleep()
                   }
@@ -1440,17 +1481,17 @@ Item {
               }
               HeadLink {
                 visible: root.selectedUids.length === 0
-                glyph: "󰍉"; on: root.filterOpen
+                glyph: "󰍉"; on: root.filterOpen; tip: strings.t("deck.findInSet")
                 onTapped: { root.filterOpen = !root.filterOpen; if (!root.filterOpen) root.filter = ""; root.saving = false }
               }
               HeadLink {
                 visible: root.selectedUids.length === 0
-                glyph: root.wall ? "󰉹" : "󰕰"; on: root.wall
+                glyph: root.wall ? "󰉹" : "󰕰"; on: root.wall; tip: strings.t("deck.wallTip")
                 onTapped: root.wall = !root.wall
               }
               HeadLink {
                 visible: root.selectedUids.length === 0 && (root.deck.set || []).length > 0
-                glyph: "󰆴"; text: strings.t("deck.clear"); onTapped: root.run(["deck", "clear"])
+                glyph: "󰆴"; tip: strings.t("deck.clearTip"); onTapped: root.run(["deck", "clear"])
               }
             }
             // Shape the set: reorder it by tempo, key and energy (pinned songs stay).
@@ -2369,6 +2410,21 @@ Item {
         }
       }
 
+      // ---- the tooltip
+      Rectangle {
+        z: 1000
+        visible: root.tipShown && !root.dragging && !root.bloomOpen
+        width: tipLabel.implicitWidth + 14
+        height: tipLabel.implicitHeight + 8
+        x: Math.max(4, Math.min(stage.width - width - 4, root.tipAt.x - width / 2))
+        y: root.tipAt.y + height + 4 > stage.height ? root.tipAt.y - height - 40 : root.tipAt.y
+        radius: Style.cornerRadius > 0 ? 4 : 0
+        color: Qt.tint(root.ground, Util.alpha(root.ink, 0.08))
+        border.width: 1
+        border.color: Util.alpha(root.amber, 0.45)
+        Label { id: tipLabel; anchors.centerIn: parent; text: root.tipText; font.pixelSize: Style.font.caption }
+      }
+
       // ---- a cover flying to where it landed, and the glow it leaves
       Rectangle {
         id: landing
@@ -2540,10 +2596,10 @@ Item {
           Layout.fillWidth: true
           text: tile.here ? (root.now ? (root.deck.playing ? root.now.title : strings.t("deck.paused")) : strings.t("deck.here"))
                 : tile.busy ? "●  " + strings.t("deck.busy")
-                : strings.t("deck.dropHere")
+                : tileHover.hovered || root.dragging ? strings.t("deck.dropHere") : ""
           font.pixelSize: Style.font.caption
           color: tile.here ? root.amber : tile.busy ? root.teal : root.ink
-          opacity: tile.here || tile.busy ? 0.95 : 0.4
+          opacity: tile.here || tile.busy ? 0.95 : 0.5
           elide: Text.ElideRight
         }
       }
@@ -2681,6 +2737,7 @@ Item {
     property string glyph: ""
     property string text: ""
     property bool on: false
+    property string tip: ""
     signal tapped()
     implicitWidth: hlRow.implicitWidth
     implicitHeight: hlRow.implicitHeight
@@ -2691,8 +2748,8 @@ Item {
       Label { visible: hl.text !== ""; text: hl.text; font.pixelSize: Style.font.caption; color: hl.on ? root.amber : root.ink }
     }
     opacity: hlHover.hovered || hl.on ? 1 : 0.55
-    HoverHandler { id: hlHover; cursorShape: Qt.PointingHandCursor }
-    TapHandler { onTapped: hl.tapped() }
+    HoverHandler { id: hlHover; cursorShape: Qt.PointingHandCursor; onHoveredChanged: root.hint(hl, hl.tip, hovered) }
+    TapHandler { onTapped: { root.hint(hl, "", false); hl.tapped() } }
   }
 
   // A floating pill over the list: back to the top, on to the end.
@@ -2809,7 +2866,7 @@ Item {
       color: rb.on ? root.amber : root.ink
       opacity: rbHover.hovered || rb.on ? 1 : 0.6
     }
-    HoverHandler { id: rbHover; cursorShape: Qt.PointingHandCursor }
-    TapHandler { onTapped: rb.clicked() }
+    HoverHandler { id: rbHover; cursorShape: Qt.PointingHandCursor; onHoveredChanged: root.hint(rb, rb.tip, hovered) }
+    TapHandler { onTapped: { root.hint(rb, "", false); rb.clicked() } }
   }
 }

@@ -603,5 +603,9 @@
     "one": "%1 song: pick some, or take it all",
     "other": "%1 songs: pick some, or take them all"
   },
-  "deck.listOpen": "Open it and pick songs"
+  "deck.listOpen": "Open it and pick songs",
+  "deck.buildTeaser": "a set from a brief or a song",
+  "deck.wallTip": "Cover wall (W)",
+  "deck.clearTip": "Clear the set (Undo brings it back)",
+  "deck.sleep": "Sleep"
 }

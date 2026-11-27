@@ -5075,6 +5075,42 @@ def deck_command(settings, args):
         print(json.dumps(deck_mine(args[1])))
     elif action == "search" and len(args) >= 3 and args[1] in DECK_SERVICES:
         print(json.dumps(deck_search(args[1], " ".join(args[2:]))))
+    elif action == "grab":
+        # The song you're hearing goes in the set (next with --next).
+        song, inside = deck_playing_song(settings)
+        if inside:
+            toast("It's already on the Deck", song["title"], glyph="󰐒")
+        elif not song:
+            toast("Couldn't find what's playing", "Nothing playing, or it isn't on your music service", glyph="󰀦")
+        else:
+            deck_edit(lambda d: d["set"].insert(0, song) if "--next" in args else d["set"].append(song))
+            deck_after_edit()
+            toast("Added to the Deck" + (", next" if "--next" in args else ""), f"{song['title']} · {song['artist']}", glyph="󰐒")
+    elif action == "find-add" and len(args) >= 2:
+        # A song by name, the best match on your music service, into the set.
+        words = " ".join(a for a in args[1:] if a != "--next").strip()[:200]
+        service = (settings.get("music") or {}).get("service", "ytmusic")
+        hits = [i for i in deck_search(service, words) if i.get("kind") == "song"] if words else []
+        if not hits:
+            toast("Couldn't find that song", words, glyph="󰀦")
+            return
+        song = deck_item(service, hits[0])
+        deck_edit(lambda d: d["set"].insert(0, song) if "--next" in args else d["set"].append(song))
+        deck_after_edit()
+        toast("Added to the Deck" + (", next" if "--next" in args else ""), f"{song['title']} · {song['artist']}", glyph="󰐒")
+    elif action == "build-from-playing":
+        # A set grown from the song you're hearing.
+        minutes = int(args[1]) if len(args) > 1 and args[1].isdigit() else 60
+        song, _ = deck_playing_song(settings)
+        if not song:
+            toast("Couldn't find what's playing", "Play a song first, then ask again", glyph="󰀦")
+            return
+        seed = {k: v for k, v in song.items() if k not in {"from", "why", "chapter"}}
+        seed["uid"] = os.urandom(4).hex()
+        settings = {**settings, "music": {**(settings.get("music") or {}), "service": seed["service"]}}
+        deck_build(settings, minutes, "", seed=seed, replace=not deck_read()["set"])
+    elif action == "next-up":
+        deck_whats_next()
     elif action == "songs" and len(args) == 3 and args[1] in DECK_SERVICES:
         # An album's or playlist's songs, as search results: to look inside it
         # in the crate and pick some, instead of adding the lot.
@@ -5116,7 +5152,7 @@ def deck_command(settings, args):
     else:
         sys.exit("Usage: afterlight deck [state|add <ytmusic|applemusic> <item json> [--next|--play|--at <n>|--scatter]|move <uid> <index>|"
                  "remove <uid>…|place <now|next|end> <uid>…|chapter <uid> [name]|move-chapter <uid> <index>|undo|"
-                 "save <name> [--played|--all]|sets|load <name> [--replace]|forget <name>|shape <tempo|smooth|energy|arc|harmonic>|autodj <on|off>|autodj from <service> <item json>|export <service> <name> [--played|--all|--saved]|crossfade <on|off>|sleep <minutes|song|off>|details|"
+                 "save <name> [--played|--all]|sets|load <name> [--replace]|grab [--next]|find-add <words> [--next]|build-from-playing [minutes]|next-up|songs <service> <album or playlist json>|forget <name>|shape <tempo|smooth|energy|arc|harmonic>|autodj <on|off>|autodj from <service> <item json>|export <service> <name> [--played|--all|--saved]|crossfade <on|off>|sleep <minutes|song|off>|details|"
                  "pin <uid>|shuffle|clear|play [uid]|pause|next|previous|where <laptop|room id>|rooms|join <room id>|"
                  "leave <room id>|everywhere|volume <room id> <0-100>|search <service> <words>|mine <service>|fill [--service <s>]|"
                  "build <minutes> [what it's for] [--start <song>|--seed <item json>] [--replace] [--service <s>]|run]")
@@ -5130,6 +5166,35 @@ def deck_as_result(song):
         if song.get(key):
             out[key] = song[key]
     return out
+
+
+def deck_playing_song(settings):
+    """The song you're hearing, as a Deck song: the Deck's own, or what an app
+    plays (MPRIS), found on your music service. (song, already in the Deck)."""
+    deck = deck_read()
+    if deck.get("playing") and deck.get("now"):
+        return deck["now"], True
+    track = playing_track()
+    if not track or not track.get("title"):
+        return None, False
+    service = (settings.get("music") or {}).get("service", "ytmusic")
+    [(idea, match)] = find_songs(service, [{"t": track["title"], "a": track.get("artist", ""), "w": ""}])
+    if not match:
+        return None, False
+    song = deck_item(service, match)
+    song["from"] = "Playing"
+    return song, False
+
+
+def deck_whats_next():
+    """What's next on the Deck, in the music popup."""
+    deck = deck_with_details(deck_read())
+    if not deck["set"]:
+        toast("Nothing next on the Deck", "Add songs, or say “fill the deck”", glyph="󰐒")
+        return
+    song = deck["set"][0]
+    left = len(deck["set"]) - 1
+    toast(f"Next: {song['title']}", song["artist"] + (f" · then {left} more" if left else " · the last one"), glyph="󰒭")
 
 
 def deck_seed(service, text):

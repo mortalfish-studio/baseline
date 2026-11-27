@@ -682,6 +682,21 @@ class DeckTests(TempCase):
         with self.assertRaises(SystemExit):
             self.deck("songs", "applemusic", json.dumps(self.apple(1)))
 
+    def test_voice_helpers_add_what_plays_a_named_song_and_say_whats_next(self):
+        toasts = []
+        self.patch("toast", lambda title, detail="", art="", glyph="": toasts.append((title, detail)))
+        self.patch("playing_track", lambda: {"title": "Heard", "artist": "Band", "album": "", "art": ""})
+        self.patch("find_songs", lambda service, wanted: [(wanted[0], self.apple(4, "Heard", "Band"))])
+        self.deck("add", "applemusic", json.dumps(self.apple(1)))
+        al.deck_command({"music": {"service": "applemusic"}}, ["grab", "--next"])
+        d = al.deck_read()
+        self.assertEqual([(s["title"], s.get("from")) for s in d["set"]], [("Heard", "Playing"), ("Song 1", None)])
+        self.patch("deck_search", lambda service, words: [{"kind": "playlist", "title": "x"}, self.apple(6, "Blue Monday", "New Order")])
+        al.deck_command({"music": {"service": "applemusic"}}, ["find-add", "blue", "monday"])
+        self.assertEqual(al.deck_read()["set"][-1]["title"], "Blue Monday")
+        al.deck_command({}, ["next-up"])
+        self.assertEqual(toasts[-1], ("Next: Heard", "Band · then 2 more"))
+
     def test_mix_in_scatters_songs_after_the_next_one(self):
         for n in range(6):
             self.deck("add", "applemusic", json.dumps(self.apple(n)))
