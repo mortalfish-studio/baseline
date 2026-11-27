@@ -1865,6 +1865,25 @@ class SoftSkipTest(unittest.TestCase):
         update.assert_called_once()
 
 
+class LaptopVolumeTest(unittest.TestCase):
+    def test_the_deck_sets_the_laptops_own_output(self):
+        with mock.patch.object(al, "quiet_out") as out:
+            al.deck_laptop_volume("30")
+            al.deck_laptop_volume("-5")
+            al.deck_room_volume("laptop", "140")
+        calls = [c.args for c in out.call_args_list]
+        self.assertIn(("wpctl", "set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", "30%"), calls)
+        self.assertIn(("wpctl", "set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", "5%-"), calls)
+        self.assertIn(("wpctl", "set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", "100%"), calls)
+        self.assertEqual(sum(c[1] == "set-mute" for c in calls), 2)       # turning it down doesn't unmute
+
+    def test_state_says_what_the_laptop_plays_through(self):
+        outs = {"outputs": [{"name": "a", "label": "Speaker", "kind": "speaker", "default": False, "volume": 50, "muted": False},
+                            {"name": "b", "label": "Headphones", "kind": "headphones", "default": True, "volume": 35, "muted": False}]}
+        with mock.patch.object(al, "audio_outputs", return_value=outs):
+            self.assertEqual(al.deck_laptop_out(), {"kind": "headphones", "label": "Headphones", "volume": 35, "muted": False})
+
+
 class AutoDJTowardTest(unittest.TestCase):
     def test_ask_bridges_to_the_destination_then_stays(self):
         deck = {"played": [], "now": {"uid": "n", "title": "Now", "artist": "B"}, "set": [], "votes": {}, "skipped": [],

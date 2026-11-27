@@ -6332,6 +6332,8 @@ def deck_command(settings, args):
         if room:
             level = (sonos_call(room["ip"], "GroupRenderingControl", "GetGroupVolume", {"InstanceID": 0}, timeout=1.5) or {}).get("CurrentVolume")
             deck["roomVolume"] = int(level) if str(level or "").isdigit() else None
+        else:
+            deck["laptopOut"] = deck_laptop_out()
         deck["voiceReady"] = voice_ready()
         deck["voiceName"] = deck_voice_name(deck)
         if deck.get("recapAt") and time.time() - deck["recapAt"] < RECAP_MINUTES * 60:
@@ -6483,7 +6485,8 @@ def deck_command(settings, args):
         # The room the Deck plays in (not Baseline's Sonos card, which may be another).
         room = deck_where_room(deck_read())
         if not room:
-            sys.exit("The Deck isn't playing in a Sonos room.")
+            deck_laptop_volume(args[1])       # on the laptop: its speaker or headphones
+            return
         if args[1][0] in "+-":
             sonos_call(room["ip"], "GroupRenderingControl", "SetRelativeGroupVolume", {"InstanceID": 0, "Adjustment": int(args[1])})
         else:
@@ -7246,7 +7249,30 @@ def deck_everywhere():
           art=(deck.get("now") or {}).get("thumb", ""), glyph="󰓃")
 
 
+def deck_laptop_out():
+    """What the laptop plays through, for the Deck: {kind, label, volume, muted}."""
+    try:
+        out = next((o for o in audio_outputs()["outputs"] if o["default"]), None)
+    except Exception:
+        return None
+    return out and {k: out[k] for k in ("kind", "label", "volume", "muted")}
+
+
+def deck_laptop_volume(value):
+    """Set the laptop's own output (speaker or headphones): 0-100, or +n/-n."""
+    value = str(value)
+    if not re.fullmatch(r"[+-]?\d{1,3}", value):
+        sys.exit("Usage: afterlight deck volume <0-100|+n|-n>")
+    level = f"{abs(int(value))}%{value[0]}" if value[0] in "+-" else f"{max(0, min(100, int(value)))}%"
+    quiet_out("wpctl", "set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", level)
+    if value[0] != "-" and int(value.lstrip("+")) > 0:
+        quiet_out("wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0")
+
+
 def deck_room_volume(speaker_id, value):
+    if speaker_id == "laptop":
+        deck_laptop_volume(value)
+        return
     speaker = next((s for s in sonos_speakers() if s["id"] == speaker_id), None)
     if speaker is None or not str(value).isdigit():
         sys.exit("Usage: afterlight deck volume <room id> <0-100>")

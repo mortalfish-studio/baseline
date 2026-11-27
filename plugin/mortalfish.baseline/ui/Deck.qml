@@ -129,6 +129,13 @@ Item {
   property string roomText: ""
   readonly property var partyRooms: roomList.filter(r => r.here).sort((a, b) => (b.lead ? 1 : 0) - (a.lead ? 1 : 0))
   readonly property var otherRooms: roomList.filter(r => !r.here)
+  // The laptop's output (speaker, headphones), while the Deck plays there.
+  readonly property var laptopOut: root.deck.laptopOut || null
+  readonly property string outGlyph: !laptopOut ? "󰕾" : laptopOut.kind === "headphones" ? "󰋋"
+                                     : laptopOut.kind === "bluetooth" ? "󰂰" : laptopOut.muted ? "󰝟" : "󰕾"
+  readonly property var hereVolume: root.inSonos
+      ? (root.deck.roomVolume !== undefined && root.deck.roomVolume !== null ? root.deck.roomVolume : null)
+      : (laptopOut && laptopOut.volume !== null && laptopOut.volume !== undefined ? laptopOut.volume : null)
   property bool roomHeld: false            // a volume being dragged: hold the list still
   function roomById(id) { for (const r of roomList) if (r.id === id) return r; return null }
   function readRooms() { if (!roomReader.running) roomReader.running = true }
@@ -1662,9 +1669,10 @@ Item {
                     tone: root.deck.crossfade ? root.amber : root.teal
                     onClicked: root.run(["deck", "crossfade", root.deck.crossfade ? "off" : "on"])
                   }
-                  // The room's volume (the room the Deck plays in), centred on the buttons.
+                  // The volume where the Deck plays: the Sonos room, or the
+                  // laptop's speaker or headphones. Centred on the buttons.
                   Item {
-                    visible: root.inSonos && root.deck.roomVolume !== undefined && root.deck.roomVolume !== null
+                    visible: root.hereVolume !== null
                     width: volRow.implicitWidth + 12
                     height: crossfadeButton.implicitHeight
                     Row {
@@ -1672,13 +1680,13 @@ Item {
                       id: volRow
                       anchors.verticalCenter: parent.verticalCenter
                       spacing: 8
-                      Label { text: "󰜟"; font.family: "Iosevka Nerd Font Propo"; color: root.amber; anchors.verticalCenter: parent.verticalCenter }
+                      Label { text: root.inSonos ? "󰜟" : root.outGlyph; font.family: "Iosevka Nerd Font Propo"; color: root.amber; anchors.verticalCenter: parent.verticalCenter }
                       ThemedSlider {
                         id: roomVol
                         anchors.verticalCenter: parent.verticalCenter
                         width: 170
                         label: ""; valueText: ""
-                        value: root.deck.roomVolume || 0
+                        value: root.hereVolume || 0
                         minimum: 0; maximum: 100; step: 2
                         fromColor: root.amber; toColor: root.teal
                         onCommitted: function(v) { root.run(["deck", "volume", String(Math.round(v))]) }
@@ -2595,7 +2603,8 @@ Item {
               anchors.bottom: parent.bottom
               spacing: 8
 
-              RoomTile { Layout.alignment: Qt.AlignBottom; roomId: "laptop"; name: strings.t("deck.laptop"); laptop: true; here: !root.inSonos }
+              RoomTile { Layout.alignment: Qt.AlignBottom; roomId: "laptop"; name: strings.t("deck.laptop"); laptop: true; here: !root.inSonos
+                         volume: root.laptopOut ? root.laptopOut.volume : null }
 
               // ---- the capsule: every room the Deck plays in
               Rectangle {
@@ -4418,7 +4427,7 @@ Item {
         Layout.fillWidth: true
         spacing: 6
         Label {
-          text: tile.laptop ? "󰌢" : tile.lead && root.partyRooms.length > 1 ? "󰴸" : "󰓃"
+          text: tile.laptop ? (tile.here && root.laptopOut && root.laptopOut.kind !== "speaker" ? root.outGlyph : "󰌢") : tile.lead && root.partyRooms.length > 1 ? "󰴸" : "󰓃"
           font.family: "Iosevka Nerd Font Propo"
           color: tile.here ? root.amber : root.teal
         }
@@ -4444,7 +4453,7 @@ Item {
       Item {
         Layout.fillWidth: true
         implicitHeight: 12
-        visible: tile.here && !tile.laptop && tile.volume !== null && tile.volume !== undefined
+        visible: tile.here && tile.volume !== null && tile.volume !== undefined
         Rectangle {
           anchors.verticalCenter: parent.verticalCenter
           width: parent.width
