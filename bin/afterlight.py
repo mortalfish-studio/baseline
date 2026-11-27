@@ -3541,8 +3541,19 @@ AM_CLASS = "chrome-music.apple.com__-Default"
 AM_SAID = re.compile(r"\b(?:on|from|in|with|using)\s+(?:apple music|apple|i ?tunes)\b|\bapple music\b", re.I)
 
 
+AM_STOREFRONT = STATE.parent / "applemusic-storefront"
+
+
 def am_country():
-    """The catalogue to search: the storefront of your region (en_GB: gb)."""
+    """The catalogue to search: your Apple Music account's own storefront (the
+    player says which; a song from another country's catalogue may not play),
+    else your region's (en_GB: gb)."""
+    try:
+        front = AM_STOREFRONT.read_text().strip()
+        if re.fullmatch(r"[a-z]{2}", front):
+            return front
+    except OSError:
+        pass
     for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
         m = re.match(r"^[a-z]{2,3}_([A-Z]{2})", os.environ.get(var, ""))
         if m:
@@ -3688,6 +3699,10 @@ def am_now():
     """What the Apple Music app is playing, from its player: item, time,
     signed in. None when the app or add-on isn't there."""
     reply = am_bridge({"action": "now"}, timeout=3)
+    front = str((reply or {}).get("storefront") or "")
+    if re.fullmatch(r"[a-z]{2}", front) and front != am_country():
+        AM_STOREFRONT.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic(AM_STOREFRONT, front + "\n")
     return reply if reply and reply.get("ok") else None
 
 
@@ -3904,7 +3919,7 @@ DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kin
               "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": "",
               "micViz": False, "speaking": None, "asks": [], "awoke": False, "phoneSeen": 0, "ready": None,
               "recapAt": 0, "closedAt": 0, "skipped": [], "direction": "", "toward": None,
-              "autoTidy": True, "autodjSettle": None, "autodjBusy": None, "softSkip": True, "unplayable": None}
+              "autoTidy": True, "autodjSettle": None, "autodjBusy": None, "softSkip": True, "unplayable": None, "silent": None, "batteryWarned": 0}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -4201,6 +4216,14 @@ def deck_play_laptop(song, start_at=0):
                                  stderr=subprocess.DEVNULL, start_new_session=True)
                 give_up = time.time() + 40          # the window has to open first
             time.sleep(0.5)
+        if not (reply and reply.get("ok")) and refused:
+            # Maybe it's another country's catalogue number: the same song in
+            # your own Apple Music, by title and artist.
+            other = deck_apple_id({"title": song.get("title", ""), "artist": song.get("artist", "")})
+            if other and other != str(song.get("id")):
+                reply = am_bridge({"action": "queue", "kind": "song", "id": other}, timeout=12)
+                if reply and reply.get("ok"):
+                    song["id"] = other
         if not (reply and reply.get("ok")):
             note = STATE.parent / "deck-errors.log"
             with open(note, "a") as log:
@@ -4232,13 +4255,15 @@ def deck_status(deck):
                 "playing": state in {"PLAYING", "TRANSITIONING"}, "track": int(position.get("Track") or 0)}
     song = deck.get("now") or {}
     if song.get("service") == "applemusic":
-        now = am_now() or {}
+        reached = am_now()
+        now = reached or {}
         item = now.get("item") or {}
         return {"time": now.get("time", 0), "length": now.get("duration", 0), "playing": bool(now.get("playing")),
-                "id": str(item.get("id", "")), "title": str(item.get("title", ""))}
-    track = laptop_track() or {}
+                "id": str(item.get("id", "")), "title": str(item.get("title", "")), "reach": reached is not None}
+    reached = laptop_track()
+    track = reached or {}
     return {"time": track.get("position", 0), "length": track.get("length", 0), "playing": bool(track.get("playing")),
-            "title": track.get("title", "")}
+            "title": track.get("title", ""), "reach": reached is not None}
 
 
 DECK_UNPLAYABLE_TRIES = 3     # songs in a row that won't play before the Deck stops
@@ -4261,6 +4286,7 @@ def deck_start(deck, song=None, start_at=0, tries=0):
     deck["set"] = [s for s in deck["set"] if s["uid"] != song["uid"]]
     deck["playing"] = True
     deck["paused"] = False
+    deck["silent"] = None
     room = deck_where_room(deck)
     if room:
         sn = sonos_apple_sn()
@@ -4395,7 +4421,12 @@ def deck_tick(last):
         uids = set(deck["autodjSettle"]["uids"])
         deck_edit(lambda d: (deck_tidy(d, uids), d.update(autodjSettle=None)))
         deck_after_edit()
+    deck_fade_heal()
+    deck_battery_watch(deck)
     if not deck["playing"] or not deck.get("now"):
+        DECK_OUT.clear()        # unplugged while paused: Play carries on through the speaker
+        return None
+    if deck_unplugged(deck):
         return None
     if deck_autodj_due(deck):
         deck_update(lambda d: d.update(autodjAt=time.time()))
@@ -4454,6 +4485,9 @@ def deck_tick(last):
         return status
     if last is None or time.time() - (deck.get("expect") or {}).get("since", 0) < 6:
         return status       # give a song a moment to start
+    stall = deck_stalled(deck, status, last)
+    if stall is not None:
+        return stall or None
     song = deck["now"]
     started = (deck.get("expect") or {}).get("since")
     def same(d):
@@ -4468,6 +4502,7 @@ def deck_tick(last):
         if was is not None:
             deck_update(lambda d: deck_start(d) if same(d) else None)
             deck_app_volume(song, was)
+            deck_fade_mark(None)
             return None
     ran_out = last.get("length", 0) and last.get("time", 0) >= last["length"] - 12
     if song["service"] == "applemusic":
@@ -4501,6 +4536,9 @@ def deck_run():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
+        deck_fade_heal()
+        DECK_STALL.clear()
+        DECK_OUT.clear()
         last, idle = None, 0
         while idle < 3:
             try:
@@ -6263,6 +6301,7 @@ def deck_handoff(song, left):
     was = deck_app_volume(song)
     if not was:
         return None
+    deck_fade_mark(song, was)
     steps = 10
     for i in range(1, steps + 1):
         deck_app_volume(song, round(was * max(0.08, (1 - i / steps) ** 2), 3))
@@ -6309,6 +6348,7 @@ def deck_soft(deck, change, rise=True):
         lock.close()
         deck_update(change)
         return
+    deck_fade_mark(song, was)
     try:
         deck_ramp(song, was, 0, SOFT_SKIP_OUT, curve=0.5)
         deck_update(change)
@@ -6318,6 +6358,7 @@ def deck_soft(deck, change, rise=True):
             deck_ramp(song, 0.05 * was, was, SOFT_SKIP_IN, curve=1.5)
     finally:
         deck_app_volume(song, was)
+        deck_fade_mark(None)
         lock.close()
 
 
@@ -6332,6 +6373,7 @@ def deck_soft_resume(deck, resume):
     if not was:
         deck_update(resume)
         return
+    deck_fade_mark(song, was)
     try:
         deck_app_volume(song, round(0.05 * was, 3))
         deck_update(resume)
@@ -6339,6 +6381,148 @@ def deck_soft_resume(deck, resume):
         deck_ramp(song, 0.05 * was, was, SOFT_SKIP_IN, curve=1.5)
     finally:
         deck_app_volume(song, was)
+        deck_fade_mark(None)
+
+
+DECK_FADE = STATE.parent / "deck-fade.json"
+DECK_FADE_STALE = 20         # seconds: no fade runs longer, so one older was cut off
+
+
+def deck_fade_mark(song, level=None):
+    """A fade is starting (the app's real level, to put back) or is over (None)."""
+    if song is None:
+        DECK_FADE.unlink(missing_ok=True)
+        return
+    DECK_FADE.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(DECK_FADE, json.dumps({"service": song.get("service"), "level": level, "at": time.time()}))
+
+
+def deck_fade_heal():
+    """A fade or voice dip that was cut off (a restart, a crash) left the
+    music quiet: put its real level back."""
+    for path, stale in ((DECK_FADE, DECK_FADE_STALE), (DECK_DUCK, 120)):
+        held = read_json(path, {})
+        if not path.exists():
+            continue
+        if not isinstance(held, dict) or not isinstance(held.get("level"), (int, float)):
+            path.unlink(missing_ok=True)
+            continue
+        if time.time() - held.get("at", 0) < stale:
+            continue
+        service = held.get("service") or (deck_read().get("now") or {}).get("service") or "applemusic"
+        if deck_app_volume({"service": service}, held["level"]) is not None:
+            path.unlink(missing_ok=True)
+
+
+DECK_STALL = {}               # the watcher's view of a song that stopped moving
+DECK_STALL_TRY = 10           # seconds of silence before it tries to get the song going again
+DECK_STALL_GIVE_UP = 30       # and before it stops and says so
+
+
+def deck_stalled(deck, status, last):
+    """The song stopped moving while the Deck says it's playing: the app's
+    window went, it lost the network, or it was signed out. After a few
+    seconds it's started again where it was (reopening its window); if that
+    doesn't take, the Deck stops and says why, on the Deck and the stage.
+    Paused in its own app: the Deck steps back (paused). None: all's well;
+    else what to return from the tick."""
+    song = deck["now"]
+    if song.get("service") not in {"applemusic", "ytmusic"}:
+        return None
+    t, length = status.get("time", 0) or 0, status.get("length", 0) or 0
+    gone = not status.get("reach", True)
+    frozen = status.get("playing") and abs(t - (last.get("time", 0) or 0)) < 0.3 and (not length or t < length - 3)
+    held_pause = status.get("reach", True) and not status.get("playing") and t > 2 and (not length or t < length - 3)
+    if not (gone or frozen or held_pause):
+        DECK_STALL.clear()
+        return None
+    key = (song["uid"], (deck.get("expect") or {}).get("since"), "pause" if held_pause else "stall")
+    now = time.time()
+    if DECK_STALL.get("key") != key:
+        DECK_STALL.clear()
+        DECK_STALL.update(key=key, since=now, at=t or (last.get("time", 0) or 0), tried=False)
+        return status
+    held = now - DECK_STALL["since"]
+    started = (deck.get("expect") or {}).get("since")
+    same = lambda d: d.get("playing") and (d.get("now") or {}).get("uid") == song["uid"] \
+        and (d.get("expect") or {}).get("since") == started
+    if held_pause:
+        if held >= DECK_STALL_TRY:
+            # Paused in the app itself: the Deck follows (Play carries on).
+            deck_update(lambda d: d.update(playing=False, paused=True) if same(d) else None)
+            DECK_STALL.clear()
+            return False
+        return status
+    if held >= DECK_STALL_TRY and not DECK_STALL["tried"]:
+        DECK_STALL["tried"] = True
+        if deck_play_laptop(song, start_at=DECK_STALL["at"]) is not False:
+            deck_update(lambda d: d.update(expect={"uid": song["uid"], "since": started}) if same(d) else None)
+        return status
+    if held >= DECK_STALL_GIVE_UP:
+        app = {"applemusic": "Apple Music", "ytmusic": "YouTube Music"}[song["service"]]
+        why = (f"{app} isn't open" if gone else f"{app} stopped moving, maybe the network")
+        deck_update(lambda d: d.update(playing=False, paused=True, silent={"at": int(now), "title": song["title"],
+                                                                         "why": why}) if same(d) else None)
+        toast("The music stopped", f"{why}. Press Play to try again", glyph="󰝛")
+        DECK_STALL.clear()
+        return False
+    return status
+
+
+DECK_OUT = {}                 # what the laptop played through, last look
+
+
+def deck_unplugged(deck):
+    """Headphones came out while the Deck plays on the laptop: pause softly,
+    rather than the song carrying on out loud from the speaker."""
+    if deck_where_room(deck):
+        DECK_OUT.clear()
+        return False
+    out = deck_laptop_out() or {}
+    kind, before = out.get("kind"), DECK_OUT.get("kind")
+    DECK_OUT["kind"] = kind
+    if before in {"headphones", "bluetooth"} and kind and kind not in {"headphones", "bluetooth"}:
+        deck_soft(deck, deck_pause, rise=False)
+        toast("Headphones out: paused", "Press Play to carry on through the speaker", glyph="󰟎")
+        return True
+    return False
+
+
+def deck_battery():
+    """The laptop's battery: {level, charging}, or None without one."""
+    for bat in sorted(Path("/sys/class/power_supply").glob("*")):
+        try:
+            if (bat / "type").read_text().strip() != "Battery" or (bat / "present").read_text().strip() == "0":
+                continue
+            level = int((bat / "capacity").read_text().strip())
+            state = (bat / "status").read_text().strip()
+        except (OSError, ValueError):
+            continue
+        plugged = any((p / "online").read_text().strip() == "1"
+                      for p in Path("/sys/class/power_supply").glob("*")
+                      if (p / "online").exists() and (p / "type").exists() and (p / "type").read_text().strip() == "Mains")
+        return {"level": level, "charging": state in {"Charging", "Full"} or plugged}
+    return None
+
+
+def deck_battery_watch(deck):
+    """On battery while the Deck plays or guests can ask: say so at 20% and
+    again at 10%."""
+    if not (deck.get("playing") or deck.get("guests")):
+        return
+    bat = deck_battery()
+    if not bat:
+        return
+    warned = deck.get("batteryWarned") or 0
+    if bat["charging"]:
+        if warned:
+            deck_update(lambda d: d.update(batteryWarned=0))
+        return
+    for mark in (10, 20):
+        if bat["level"] <= mark and (not warned or warned > mark):
+            deck_update(lambda d: d.update(batteryWarned=mark))
+            toast(f"Battery at {bat['level']}%", "Plug the laptop in, or the music stops when it runs out", glyph="󰂃")
+            return
 
 
 def deck_autodj_due(deck):
@@ -6363,6 +6547,7 @@ def deck_command(settings, args):
             deck["roomVolume"] = int(level) if str(level or "").isdigit() else None
         else:
             deck["laptopOut"] = deck_laptop_out()
+        deck["battery"] = deck_battery()
         deck["voiceReady"] = voice_ready()
         deck["voiceName"] = deck_voice_name(deck)
         if deck.get("recapAt") and time.time() - deck["recapAt"] < RECAP_MINUTES * 60:
@@ -6560,11 +6745,13 @@ def deck_command(settings, args):
         deck_fill({**settings, "music": {**(settings.get("music") or {}), "service": args[2]}}, count=6, seed=seed)
         deck_watch()
     elif action == "export" and len(args) >= 3 and args[1] in DECK_SERVICES:
-        flags = {"--played", "--all", "--saved"}
+        flags = {"--played", "--all", "--saved", "--tonight"}
         name = " ".join(a for a in args[2:] if a not in flags).strip()[:100]
         deck = deck_read()
         now = [deck["now"]] if deck.get("now") else []
-        if "--saved" in args:
+        if "--tonight" in args:
+            songs = deck_tonight(deck)
+        elif "--saved" in args:
             songs = next((x["songs"] for x in deck_sets() if x["name"].lower() == name.lower()), [])
         else:
             songs = deck["played"] + now if "--played" in args else deck["played"] + now + deck["set"] if "--all" in args else now + deck["set"]
@@ -6605,6 +6792,7 @@ def deck_command(settings, args):
             if not uid and d.get("now") and not d["playing"]:
                 d["playing"] = True        # carry on with what was playing
                 d["paused"] = False
+                d["silent"] = None
                 deck_resume(d)
                 return True
             song = next((s for s in d["set"] + d["played"] if s["uid"] == uid), None) if uid else None
@@ -6717,7 +6905,7 @@ def deck_command(settings, args):
     else:
         sys.exit("Usage: afterlight deck [state|add <ytmusic|applemusic> <item json> [--next|--play|--at <n>|--scatter]|move <uid> <index>|"
                  "remove <uid>…|place <now|next|end> <uid>…|chapter <uid> [name]|move-chapter <uid> <index>|undo|"
-                 "save <name> [--played|--all]|sets|load <name> [--replace]|grab [--next]|find-add <words> [--next]|build-from-playing [minutes]|next-up|songs <service> <album or playlist json>|forget <name>|shape <tempo|smooth|energy|arc|harmonic|bumps>|autodj <on|off>|autodj from <service> <item json>|export <service> <name> [--played|--all|--saved]|crossfade <on|off>|soft-skip <on|off>|sleep <minutes|song|off>|guests <on|off|forget>|request <take|drop> <id> [--next|--mix]|requests <clear|auto on|auto off|lastcall <minutes|off>>|lock <on|off>|details|"
+                 "save <name> [--played|--all]|sets|load <name> [--replace]|grab [--next]|find-add <words> [--next]|build-from-playing [minutes]|next-up|songs <service> <album or playlist json>|forget <name>|shape <tempo|smooth|energy|arc|harmonic|bumps>|autodj <on|off>|autodj from <service> <item json>|export <service> <name> [--played|--all|--saved|--tonight]|crossfade <on|off>|soft-skip <on|off>|sleep <minutes|song|off>|guests <on|off|forget>|request <take|drop> <id> [--next|--mix]|requests <clear|auto on|auto off|lastcall <minutes|off>>|lock <on|off>|details|"
                  "pin <uid>|shuffle|clear|play [uid]|pause|next|previous|where <laptop|room id>|rooms|join <room id>|"
                  "leave <room id>|everywhere|volume <room id> <0-100>|search <service> <words>|mine <service>|fill [--service <s>]|"
                  "build <minutes> [what it's for] [--start <song>|--seed <item json>] [--replace] [--service <s>]|run]")

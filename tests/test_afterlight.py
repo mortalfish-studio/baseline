@@ -1825,9 +1825,19 @@ class UnplayableTest(unittest.TestCase):
 
     def test_apple_music_refusing_a_song_gives_up_quickly(self):
         with mock.patch.object(al, "am_bridge", return_value={"ok": False}) as bridge, \
+             mock.patch.object(al, "deck_apple_id", return_value=""), \
              mock.patch.object(al.time, "sleep"), mock.patch("builtins.open", mock.mock_open()):
             self.assertFalse(al.deck_play_laptop({"service": "applemusic", "id": "1", "title": "x"}))
         self.assertEqual(bridge.call_count, 3)
+
+    def test_another_countrys_song_is_found_again_in_yours(self):
+        song = {"service": "applemusic", "id": "1", "title": "Adorn", "artist": "Miguel"}
+        replies = lambda op, timeout=0: {"ok": op.get("id") == "2"}
+        with mock.patch.object(al, "am_bridge", side_effect=replies), \
+             mock.patch.object(al, "deck_apple_id", return_value="2") as find, mock.patch.object(al.time, "sleep"):
+            self.assertTrue(al.deck_play_laptop(song))
+        find.assert_called_once_with({"title": "Adorn", "artist": "Miguel"})
+        self.assertEqual(song["id"], "2")
 
 
 class SoftSkipTest(unittest.TestCase):
@@ -1909,6 +1919,95 @@ class LaptopVolumeTest(unittest.TestCase):
                             {"name": "b", "label": "Headphones", "kind": "headphones", "default": True, "volume": 35, "muted": False}]}
         with mock.patch.object(al, "audio_outputs", return_value=outs):
             self.assertEqual(al.deck_laptop_out(), {"kind": "headphones", "label": "Headphones", "volume": 35, "muted": False})
+
+
+class PartySafetyTest(unittest.TestCase):
+    def setUp(self):
+        al.DECK_STALL.clear()
+        al.DECK_OUT.clear()
+
+    def deck(self):
+        return {"now": {"uid": "a", "service": "applemusic", "title": "Song", "id": "1"}, "playing": True,
+                "expect": {"uid": "a", "since": 5}}
+
+    def test_a_song_that_stops_moving_is_started_again_then_given_up_on(self):
+        state = self.deck()
+        clock = {"t": 1000.0}
+        frozen = {"time": 60, "length": 200, "playing": True, "reach": True}
+        with mock.patch.object(al.time, "time", side_effect=lambda: clock["t"]), \
+             mock.patch.object(al, "deck_play_laptop", return_value=True) as play, \
+             mock.patch.object(al, "deck_update", side_effect=lambda f: f(state)), mock.patch.object(al, "toast") as toast:
+            self.assertEqual(al.deck_stalled(state, frozen, frozen), frozen)        # noticed
+            clock["t"] += 11
+            al.deck_stalled(state, frozen, frozen)                                  # tried again, where it was
+            play.assert_called_once_with(state["now"], start_at=60)
+            clock["t"] += 20
+            self.assertFalse(al.deck_stalled(state, frozen, frozen))               # gave up
+        self.assertFalse(state["playing"])
+        self.assertIn("stopped moving", state["silent"]["why"])
+        self.assertIn("Press Play", toast.call_args.args[1])
+
+    def test_moving_music_is_left_alone(self):
+        state = self.deck()
+        self.assertIsNone(al.deck_stalled(state, {"time": 61, "length": 200, "playing": True}, {"time": 60}))
+
+    def test_paused_in_the_app_the_deck_steps_back(self):
+        state = self.deck()
+        clock = {"t": 1000.0}
+        held = {"time": 60, "length": 200, "playing": False, "reach": True}
+        with mock.patch.object(al.time, "time", side_effect=lambda: clock["t"]), \
+             mock.patch.object(al, "deck_play_laptop") as play, \
+             mock.patch.object(al, "deck_update", side_effect=lambda f: f(state)):
+            al.deck_stalled(state, held, held)
+            clock["t"] += 11
+            al.deck_stalled(state, held, held)
+        play.assert_not_called()
+        self.assertEqual((state["playing"], state["paused"]), (False, True))
+        self.assertNotIn("silent", state)
+
+    def test_a_cut_off_fade_puts_the_volume_back(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        fade = Path(tmp.name) / "fade.json"
+        fade.write_text(json.dumps({"service": "ytmusic", "level": 0.7, "at": time.time() - 60}))
+        with mock.patch.object(al, "DECK_FADE", fade), mock.patch.object(al, "DECK_DUCK", Path(tmp.name) / "duck.json"), \
+             mock.patch.object(al, "deck_app_volume", return_value=0.05) as volume:
+            al.deck_fade_heal()
+        volume.assert_called_once_with({"service": "ytmusic"}, 0.7)
+        self.assertFalse(fade.exists())
+
+    def test_a_fade_in_progress_is_left_alone(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        fade = Path(tmp.name) / "fade.json"
+        fade.write_text(json.dumps({"service": "ytmusic", "level": 0.7, "at": time.time()}))
+        with mock.patch.object(al, "DECK_FADE", fade), mock.patch.object(al, "DECK_DUCK", Path(tmp.name) / "duck.json"), \
+             mock.patch.object(al, "deck_app_volume") as volume:
+            al.deck_fade_heal()
+        volume.assert_not_called()
+
+    def test_headphones_out_pauses(self):
+        state = self.deck()
+        outs = iter([{"kind": "headphones"}, {"kind": "speaker"}])
+        with mock.patch.object(al, "deck_where_room", return_value=None), \
+             mock.patch.object(al, "deck_laptop_out", side_effect=lambda: next(outs)), \
+             mock.patch.object(al, "deck_soft") as soft, mock.patch.object(al, "toast"):
+            self.assertFalse(al.deck_unplugged(state))
+            self.assertTrue(al.deck_unplugged(state))
+        self.assertIs(soft.call_args.args[1], al.deck_pause)
+
+    def test_battery_warns_at_twenty_then_ten_once_each(self):
+        state = {"playing": True, "batteryWarned": 0}
+        level = {"v": 19}
+        with mock.patch.object(al, "deck_battery", side_effect=lambda: {"level": level["v"], "charging": False}), \
+             mock.patch.object(al, "deck_update", side_effect=lambda f: f(state)), mock.patch.object(al, "toast") as toast:
+            al.deck_battery_watch(state)
+            al.deck_battery_watch(state)
+            level["v"] = 9
+            al.deck_battery_watch(state)
+            al.deck_battery_watch(state)
+        self.assertEqual(toast.call_count, 2)
+        self.assertEqual(state["batteryWarned"], 10)
 
 
 class AutoDJTowardTest(unittest.TestCase):

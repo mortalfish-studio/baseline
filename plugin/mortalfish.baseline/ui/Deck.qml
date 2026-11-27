@@ -688,6 +688,14 @@ Item {
     return (t.done || 0) < (t.steps || 6) ? strings.t("deck.towardNow").arg(name).arg(t.done || 0).arg(t.steps || 6)
                                           : strings.t("deck.towardThere").arg(name)
   }
+  // Something the room should know: the music stopped by itself, or the battery's low.
+  readonly property var battery: deck.battery || null
+  readonly property bool batteryLow: !!battery && !battery.charging && battery.level <= 20
+  readonly property string alertText: deck.silent && !deck.playing ? strings.t("deck.silent").arg(deck.silent.why)
+    : batteryLow ? strings.t("deck.batteryLow").arg(battery.level) : ""
+  readonly property string alertGlyph: deck.silent && !deck.playing ? "󰝛" : "󰂃"
+  // Seconds left in the playing song (for the stage's countdown).
+  readonly property real songLeft: (pos.length || 0) > 0 ? Math.max(0, pos.length - shownTime) : -1
   property bool readyAsked: false
   property real readyAskedAt: 0
   readonly property bool readyFresh: !!deck.ready && deck.ready.at >= readyAskedAt - 1
@@ -1563,6 +1571,15 @@ Item {
                       font.pixelSize: Style.font.caption
                       color: root.teal
                     }
+                    Label {
+                      Layout.fillWidth: true
+                      visible: root.alertText !== ""
+                      text: root.alertGlyph + "  " + root.alertText
+                      font.family: "Iosevka Nerd Font Propo"
+                      font.pixelSize: Style.font.caption
+                      color: Commons.Color.warning
+                      wrapMode: Text.Wrap
+                    }
                   }
                   DeckVisualizer {
                     Layout.preferredWidth: Math.min(360, Math.max(200, root.stageItem.width * 0.24))
@@ -1659,6 +1676,18 @@ Item {
                     text: !root.sleep ? strings.t("deck.sleep") : root.sleep.song ? strings.t("deck.sleepSong") : strings.t("deck.sleepIn").arg(root.sleepMinutes)
                     tone: root.sleep ? root.amber : root.teal
                     onClicked: root.nextSleep()
+                  }
+                  // Soft: Next, Back, Pause and Play fade rather than cut (on the laptop).
+                  ActionButton {
+                    visible: !root.inSonos
+                    icon: "∿"
+                    text: strings.t(root.deck.softSkip === false ? "deck.softOff" : "deck.soft")
+                    tone: root.deck.softSkip === false ? root.teal : root.amber
+                    onClicked: {
+                      const on = root.deck.softSkip === false
+                      root.deck = Object.assign({}, root.deck, { softSkip: on })
+                      root.run(["deck", "soft-skip", on ? "on" : "off"])
+                    }
                   }
                   // Crossfade: Sonos fades one song into the next.
                   ActionButton {
@@ -2882,6 +2911,21 @@ Item {
             font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption - 1; font.letterSpacing: 2; color: root.amber
           }
         }
+        // The music stopped by itself, or the battery's low: a tag the room can see.
+        Rectangle {
+          visible: root.alertText !== ""
+          x: 36; y: (root.deck.lastCall || 0) > 0 && stageClock.stamp < (root.deck.lastCall || 0) ? 100 : 64
+          height: 26; width: alertTag.implicitWidth + 22; radius: 13
+          color: Util.alpha(Commons.Color.warning, 0.14)
+          border.width: 1; border.color: Commons.Color.warning
+          Label {
+            id: alertTag
+            anchors.centerIn: parent
+            text: (root.alertGlyph + "  " + root.alertText).toUpperCase()
+            font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption - 1; font.letterSpacing: 2
+            color: Commons.Color.warning
+          }
+        }
         // The time, and the way out.
         Label {
           x: 36; y: 28
@@ -3602,6 +3646,37 @@ Item {
                 Label { Layout.alignment: Qt.AlignHCenter; text: strings.t("deck.recapSave"); font.pixelSize: Style.font.caption; color: root.teal }
               }
             }
+            // Keep tonight: a new playlist in your Apple Music, only when you press it.
+            Rectangle {
+              id: keepNight
+              Layout.alignment: Qt.AlignHCenter
+              Layout.topMargin: 18
+              property bool sent: false
+              implicitWidth: keepRow.implicitWidth + 32
+              implicitHeight: 38
+              radius: 19
+              color: Util.alpha(root.amber, keepHover.hovered ? 0.24 : 0.12)
+              border.width: 1; border.color: Util.alpha(root.amber, 0.8)
+              opacity: sent ? 0.6 : 1
+              Row {
+                id: keepRow
+                anchors.centerIn: parent
+                spacing: 8
+                Label { text: "󰆓"; font.family: "Iosevka Nerd Font Propo"; color: root.amber }
+                Label { text: strings.t(keepNight.sent ? "deck.recapKeeping" : "deck.recapKeep").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.amber }
+              }
+              HoverHandler { id: keepHover; cursorShape: Qt.PointingHandCursor }
+              TapHandler {
+                gesturePolicy: TapHandler.WithinBounds
+                onTapped: {
+                  if (keepNight.sent) return
+                  keepNight.sent = true
+                  const d = new Date()
+                  root.run(["deck", "export", "applemusic", strings.t("deck.recapKeepName").arg(d.toLocaleDateString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat)), "--tonight"])
+                }
+              }
+              Connections { target: recap; function onOnChanged() { keepNight.sent = false } }
+            }
           }
           Label {
             anchors.horizontalCenter: parent.horizontalCenter; anchors.bottom: parent.bottom; anchors.bottomMargin: 28
@@ -3625,7 +3700,25 @@ Item {
           anchors.right: stageQr.visible ? stageQr.left : parent.right; anchors.rightMargin: 32
           spacing: 28
           visible: stageView.nextUp.length > 0
-          Label { text: strings.t("deck.upNext").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 4; color: root.teal; Layout.alignment: Qt.AlignVCenter }
+          ColumnLayout {
+            Layout.alignment: Qt.AlignVCenter
+            spacing: 4
+            // The last half minute: a countdown to the next song.
+            Label {
+              readonly property bool counting: root.deck.playing && root.songLeft >= 0 && root.songLeft <= 30
+              text: counting ? strings.t("deck.nextIn").arg(Math.floor(root.songLeft / 60) + ":" + String(Math.floor(root.songLeft % 60)).padStart(2, "0")).toUpperCase()
+                             : strings.t("deck.upNext").toUpperCase()
+              font.pixelSize: Style.font.caption; font.letterSpacing: 4
+              color: counting ? root.amber : root.teal
+            }
+            // Where Auto-DJ is taking the night.
+            Label {
+              visible: root.towardLabel !== ""
+              text: "∞  " + root.towardLabel
+              font.pixelSize: Style.font.caption - 1; font.letterSpacing: 1
+              color: root.teal; opacity: 0.75
+            }
+          }
           Repeater {
             model: stageView.nextUp
             delegate: RowLayout {

@@ -134,7 +134,8 @@ async function appleMusic(op, tab) {
       };
       const state = () => ({ ok: true, signedIn: !!kit.isAuthorized, playing: !!kit.isPlaying,
                              time: Math.floor(kit.currentPlaybackTime || 0),
-                             duration: Math.floor(kit.currentPlaybackDuration || 0), item: now() });
+                             duration: Math.floor(kit.currentPlaybackDuration || 0), item: now(),
+                             storefront: /^[a-z]{2}$/.test(String(kit.storefrontId || "")) ? String(kit.storefrontId) : "" });
       if (op.action === "now") return state();
       if (op.action === "volume") {
         // MusicKit's own volume, or its audio element's when that isn't there.
