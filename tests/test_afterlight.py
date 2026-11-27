@@ -793,6 +793,46 @@ class DeckPlaylistTests(TempCase):
         self.assertEqual(len(added), al.SONOS_AHEAD + 1)
 
 
+class DeckAndPlayerTabTests(TempCase):
+    """The Deck's room and Baseline's Sonos room (the Player tab, the volume
+    keys) are the same room, whichever one you change."""
+
+    def setUp(self):
+        super().setUp()
+        for name, value in {"DECK": self.tmp / "deck.json", "DECK_LOCK": self.tmp / "deck.lock",
+                            "SONOS_TARGET": self.tmp / "sonos-target"}.items():
+            self.patch(name, value)
+        self.rooms = al.sonos_parse_groups(GROUPED)
+        self.patch("sonos_rooms", lambda refresh=False: self.rooms)
+        self.patch("sonos_call", lambda *a, **k: {})
+        self.patch("sonos_now", lambda room: {"playing": False, "track": {"title": "", "artist": "", "art": ""}})
+        self.patch("toast", lambda *a, **k: None)
+        self.patch("where_toast", lambda: None)
+        self.saved = []
+        self.patch("save", lambda settings: self.saved.append(copy.deepcopy(settings)))
+        self.settings = {"sonos": {"room": "", "on": False}}
+
+    def test_picking_a_room_in_the_deck_picks_it_in_baseline(self):
+        al.deck_command(self.settings, ["where", K])
+        self.assertEqual(self.settings["sonos"], {"room": K, "on": True})
+        self.assertEqual((self.tmp / "sonos-target").read_text().strip(), K)
+        al.deck_command(self.settings, ["where", "laptop"])
+        self.assertFalse(self.settings["sonos"]["on"])
+        self.assertFalse((self.tmp / "sonos-target").exists())
+
+    def test_picking_a_room_in_baseline_moves_the_deck(self):
+        al.sonos_use(self.settings, Q)
+        self.assertEqual(al.deck_read()["where"], {"kind": "sonos", "room": Q})
+        al.deck_follow("")
+        self.assertEqual(al.deck_read()["where"], {"kind": "laptop"})
+
+    def test_the_same_room_changes_nothing(self):
+        al.deck_command(self.settings, ["where", K])
+        count = len(self.saved)
+        al.deck_command(self.settings, ["where", K])
+        self.assertEqual(len(self.saved), count)
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -2358,6 +2358,7 @@ def sonos_use(settings, room_id):
         sys.exit("That Sonos room isn't there.")
     settings.setdefault("sonos", {})["room"] = room_id
     sonos_set_target(settings, True)
+    deck_follow(room_id)            # the Deck plays where Baseline points
     # Say what the room is playing, with its cover.
     now = sonos_now(room)
     track = now["track"]
@@ -4306,7 +4307,7 @@ def deck_command(settings, args):
     elif action == "next":
         deck_update(lambda d: deck_start(d))
     elif action == "where" and len(args) == 2:
-        deck_where(args[1])
+        deck_where(args[1], settings)
     elif action == "rooms":
         print(json.dumps(deck_rooms()))
     elif action == "search" and len(args) >= 3 and args[1] in DECK_SERVICES:
@@ -4422,8 +4423,10 @@ def deck_after_edit():
     deck_update(resync)
 
 
-def deck_where(target):
-    """Move the Deck between the laptop and a Sonos room, from the same second."""
+def deck_where(target, settings=None):
+    """Move the Deck between the laptop and a Sonos room, from the same second.
+    With settings, Baseline's Sonos room (the Player tab, the volume keys)
+    follows; sonos_use calls it without, having set that itself."""
     def move(d):
         rooms = sonos_rooms()
         room = None if target == "laptop" else sonos_find_room(rooms, target)
@@ -4438,7 +4441,7 @@ def deck_where(target):
             sys.exit("That Sonos room isn't there.")
         before = deck_where_room(d)
         if (room and before and room["id"] == before["id"]) or (room is None and before is None):
-            return
+            return room["id"] if room else ""
         status = deck_status(d) if d.get("now") and d["playing"] else {"time": 0}
         if before:
             sonos_call(before["ip"], "AVTransport", "Pause", {"InstanceID": 0})
@@ -4447,7 +4450,33 @@ def deck_where(target):
             deck_start(d, d["now"], start_at=status.get("time", 0))
             if room is None:
                 where_toast()
-    deck_update(move)
+        return room["id"] if room else ""
+    room_id = deck_update(move)
+    if settings is not None:
+        sonos_remember(settings, room_id)
+    return room_id
+
+
+def sonos_remember(settings, room_id):
+    """Baseline's Sonos room, quietly: a room id, or "" for the laptop."""
+    sonos = settings.setdefault("sonos", {})
+    if room_id and (sonos.get("room") != room_id or not sonos.get("on")):
+        sonos["room"] = room_id
+        sonos_set_target(settings, True)
+    elif not room_id and sonos.get("on"):
+        sonos_set_target(settings, False)
+
+
+def deck_follow(room_id):
+    """The Player tab picked a room ("" for the laptop's own speakers): the
+    Deck goes there too, taking its music if it's playing."""
+    where = deck_read().get("where") or {}
+    now = where.get("room", "") if where.get("kind") == "sonos" else ""
+    if now != room_id:
+        try:
+            deck_where(room_id or "laptop")
+        except SystemExit:
+            pass
 
 
 # ---- rooms together: Sonos groups
@@ -4543,6 +4572,10 @@ def deck_leave(speaker_id):
             if where.get("kind") == "sonos" and where.get("room") == speaker["id"]:
                 d["where"] = {"kind": "sonos", "room": heir["id"]}
         deck_update(follow)
+        settings = load()
+        if (settings.get("sonos") or {}).get("room") == speaker["id"]:
+            settings["sonos"]["room"] = heir["id"]
+            sonos_set_target(settings, bool(settings["sonos"].get("on")))
     else:
         if sonos_call(speaker["ip"], "AVTransport", "BecomeCoordinatorOfStandaloneGroup", {"InstanceID": 0}, timeout=5) is None:
             sys.exit(f"{speaker['name']} didn't leave.")
@@ -5862,6 +5895,7 @@ def main(argv):
                 sonos_use(settings, args[1])
             elif action == "off":
                 sonos_set_target(settings, False)
+                deck_follow("")
                 if "--quiet" not in args:
                     where_toast()
             elif action == "volume" and len(args) >= 2:
