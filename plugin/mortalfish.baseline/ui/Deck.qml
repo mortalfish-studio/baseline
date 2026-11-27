@@ -1625,12 +1625,6 @@ Item {
                     }
                     HoverHandler { id: playedHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler { onTapped: root.playedOpen = !root.playedOpen }
-                    HeadLink {
-                      anchors.right: parent.right; anchors.rightMargin: 8
-                      anchors.verticalCenter: parent.verticalCenter
-                      glyph: "󰆓"; text: strings.t("deck.savePlayedShort")
-                      onTapped: { root.savePart = "played"; root.filterOpen = false; root.saving = true }
-                    }
                   }
                   Repeater {
                     model: root.playedOpen && root.filter === "" ? (root.deck.played || []) : []
