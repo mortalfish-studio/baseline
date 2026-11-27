@@ -668,5 +668,20 @@
   "deck.closeNow": "Close now",
   "deck.reopen": "Reopen",
   "deck.peopleTonight": "Tonight's guests · %1",
-  "deck.personCounts": "%2/%1"
+  "deck.personCounts": "%2/%1",
+  "deck.recapKicker": "Tonight",
+  "deck.recapTitle": "What a night.",
+  "deck.recapSongs": "songs",
+  "deck.recapHours": "hours",
+  "deck.recapMinutes": "minutes",
+  "deck.recapRequests": "requests",
+  "deck.recapDedications": "dedications",
+  "deck.recapLoved": "Most loved",
+  "deck.recapCrowd": "The crowd's DJs",
+  "deck.recapSave": "Scan to save tonight's songs",
+  "deck.recapClose": "Tap to close",
+  "deck.recapShow": "Recap",
+  "deck.readyCheck": "Check everything",
+  "deck.readyChecking": "Checking…",
+  "deck.voiceFriendly": "Dedications with swearing or slurs are turned away on the phone."
 }

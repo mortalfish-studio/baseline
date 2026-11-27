@@ -1687,3 +1687,47 @@ class GuestStatusTest(unittest.TestCase):
         self.assertTrue(first.get("next"))
         self.assertEqual(second["state"], "set")
         self.assertNotIn("next", second)
+
+
+class DedicationFilterTest(unittest.TestCase):
+    def test_friendly_notes_pass(self):
+        for note in ["For Jess's birthday!", "Scunthorpe massive", "For Dick and Jane", "Cocktails for B and Q", "assassin's creed"]:
+            self.assertTrue(al.note_friendly(note), note)
+
+    def test_swearing_is_caught_through_disguises(self):
+        for note in ["sh1t song", "f u c k this", "fuuuck yeah", "what the fuckkk", "you @sshole"]:
+            self.assertFalse(al.note_friendly(note), note)
+
+
+class RecapTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.patches = [mock.patch.object(al, "DECK_GUESTS_PEOPLE", Path(self.tmp.name) / "people.json"),
+                        mock.patch.object(al, "DECK_GUESTS_ASKS", Path(self.tmp.name) / "asks.json")]
+        for p in self.patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_recap_counts_the_night(self):
+        now = time.time()
+        deck = {"guests": {"since": now - 3600}, "now": {"uid": "c", "title": "C", "thumb": "https://x/c"},
+                "played": [{"uid": "a", "title": "A", "playedAt": now - 1800, "rid": "r1", "note": "hi", "thumb": "https://x/a"},
+                           {"uid": "b", "title": "B", "playedAt": now - 900, "thumb": "https://x/a"}],
+                "votes": {"b": {"g1": 1, "g2": 1}, "a": {"g1": 1}}}
+        r = al.deck_recap(deck)
+        self.assertEqual((r["songs"], r["requests"], r["dedications"]), (3, 1, 1))
+        self.assertEqual(r["loved"]["title"], "B")
+        self.assertEqual(r["loved"]["up"], 2)
+        self.assertEqual(r["covers"], ["https://x/c", "https://x/a"])
+        self.assertGreaterEqual(r["minutes"], 29)
+
+    def test_closing_once_when_last_call_runs_out(self):
+        state = {"lastCall": int(time.time()) - 5, "closedAt": 0}
+        with mock.patch.object(al, "deck_update", side_effect=lambda f: f(state)), \
+             mock.patch.object(al.subprocess, "Popen") as popen:
+            self.assertTrue(al.deck_closing(dict(state)))
+            self.assertFalse(al.deck_closing(dict(state)))
+        self.assertEqual(popen.call_count, 1)
+        self.assertEqual(popen.call_args[0][0][-3:], ["voice", "call", "0"])
+        self.assertTrue(state["recapAt"])

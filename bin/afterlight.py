@@ -3897,7 +3897,8 @@ DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kin
               "pushed": [], "pushedFrom": 1, "expect": None, "was": None, "updated": 0,
               "lock": False, "requests": [], "guests": None, "requestsAuto": False, "votes": {}, "lastCall": 0,
               "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": "",
-              "micViz": False, "speaking": None, "asks": []}
+              "micViz": False, "speaking": None, "asks": [], "awoke": False, "phoneSeen": 0, "ready": None,
+              "recapAt": 0, "closedAt": 0}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -4352,6 +4353,7 @@ def deck_tick(last):
     Sonos room through its queue, step back if you've taken over. Returns the
     status for next time."""
     deck = deck_read()
+    deck_closing(deck)
     if not deck["playing"] or not deck.get("now"):
         return None
     if deck_autodj_due(deck):
@@ -5219,11 +5221,153 @@ def lan_address():
     return m.group(1) if m else ""
 
 
+# Words a dedication can't have: it's read out to the whole room. Matched as
+# whole words after undoing look-alikes (sh1t, @ss), and a few also inside words.
+NOTE_BLOCKED = {"fuck", "fucking", "fucker", "fucked", "motherfucker", "shit", "shitty", "bullshit", "cunt", "cunts",
+                "twat", "wanker", "wank", "bitch", "bitches", "bastard", "dickhead", "cock", "prick", "pussy",
+                "arse", "arsehole", "ass", "asshole", "slut", "whore", "bollocks", "tits", "nigger", "nigga", "faggot",
+                "retard", "retarded", "spastic", "spaz", "paki", "chink", "kike", "tranny", "dyke", "rape", "nazi"}
+NOTE_BLOCKED_INSIDE = ("fuck", "nigg", "fagg", "motherf")
+NOTE_LOOKALIKE = str.maketrans({"0": "o", "1": "i", "!": "i", "3": "e", "4": "a", "@": "a", "5": "s", "$": "s", "7": "t", "*": "u"})
+
+
+def note_friendly(note):
+    """True if a dedication is fine to show and read out."""
+    plain = str(note or "").lower().translate(NOTE_LOOKALIKE)
+    words = re.findall(r"[a-z]+", plain)
+    # Spelt out a letter at a time ("f u c k"): read the run as one word.
+    words += ["".join(run.split()) for run in re.findall(r"\b(?:[a-z]\s+){2,}[a-z]\b", plain)]
+    squashed = re.sub(r"(.)\1+", r"\1", re.sub(r"[^a-z]", "", plain))          # fuuuck
+    return not (any(w in NOTE_BLOCKED or re.sub(r"(.)\1+", r"\1", w) in NOTE_BLOCKED for w in words)
+                or any(bad in squashed for bad in NOTE_BLOCKED_INSIDE))
+
+
+STAY_AWAKE = Path.home() / ".local/state/omarchy/indicators/stay-awake"
+
+
+def idle_set(how):
+    try:
+        return subprocess.run(["omarchy-toggle-idle", how], capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def deck_awake(on):
+    """While requests are open the laptop stays awake (no lock, no sleep), and
+    afterwards goes back to how it was: idle is let back only if we stopped it."""
+    if on and not STAY_AWAKE.exists():
+        if idle_set("stay-awake"):
+            deck_update(lambda d: d.update(awoke=True))
+    elif not on and deck_read().get("awoke"):
+        idle_set("allow-idle")
+        deck_update(lambda d: d.update(awoke=False))
+
+
+RECAP_MINUTES = 10             # how long the recap stays on the stage, unless closed sooner
+
+
+def deck_tonight(deck):
+    """Tonight's songs, in the order they played (and the one playing now)."""
+    since = (deck.get("guests") or {}).get("since") or time.time() - 6 * 3600
+    return [x for x in deck["played"] if x.get("playedAt", 0) >= since - 3600] + ([deck["now"]] if deck.get("now") else [])
+
+
+def deck_recap(deck):
+    """The night in a card: how many songs and how long, requests and
+    dedications, the most loved song, the top guests, and covers to fill it."""
+    songs = deck_tonight(deck)
+    if not songs:
+        return None
+    start = min((x.get("playedAt") or time.time()) for x in songs)
+    votes = deck.get("votes") or {}
+    ups = lambda x: sum(1 for v in (votes.get(x.get("uid")) or {}).values() if v == 1)
+    loved = max(songs, key=ups)
+    covers = []
+    for x in reversed(songs):
+        if x.get("thumb") and x["thumb"] not in covers:
+            covers.append(x["thumb"])
+    return {"songs": len(songs), "minutes": int((time.time() - start) / 60),
+            "requests": sum(1 for x in songs if x.get("rid")), "dedications": sum(1 for x in songs if x.get("note")),
+            "loved": {k: loved.get(k, "") for k in ("title", "artist", "thumb", "by", "photo")} | {"up": ups(loved)} if ups(loved) else None,
+            "top": [{k: p.get(k) for k in ("name", "photo", "played")} for p in deck_people(deck) if p.get("played")][:5],
+            "covers": covers[:30]}
+
+
+def deck_closing(deck):
+    """Last call ran out: say thank you, and show the night's recap."""
+    closes = deck.get("lastCall") or 0
+    if not closes or time.time() < closes or deck.get("closedAt") == closes:
+        return False
+    deck_update(lambda d: d.update(closedAt=closes, recapAt=time.time()))
+    subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "voice", "call", "0"], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    return True
+
+
+def deck_ready():
+    """Before the party: is everything in place? Each check is (ok, words):
+    ok True, False (needs fixing) or None (can't tell / not in use)."""
+    deck = deck_read()
+    out = []
+    guests = deck.get("guests") or {}
+    up = bool(guests) and deck_guests_alive(guests)
+    if up:
+        try:
+            import urllib.request
+            with urllib.request.urlopen(guests["url"] + "/now", timeout=3) as r:
+                up = r.status == 200
+        except OSError:
+            up = False
+    out.append({"key": "page", "ok": up if guests else None,
+                "text": "Requests page is up" if up else "Requests page isn't answering: close and open requests" if guests
+                else "Requests are closed: open them to check the page and phones"})
+    if guests:
+        seen = deck.get("phoneSeen") or 0
+        firewall = quiet_out("systemctl", "is-active", "ufw").strip() == "active"
+        rule = None
+        if firewall:
+            status = subprocess.run(["sudo", "-n", "ufw", "status"], capture_output=True, text=True, timeout=5)
+            if status.returncode == 0:
+                rule = bool(re.search(rf"^{DECK_GUESTS_PORT}(/tcp)?\s+ALLOW", status.stdout, re.M))
+        ok = True if seen >= (guests.get("since") or 0) or not firewall or rule else False if rule is False else None
+        out.append({"key": "phones", "ok": ok,
+                    "text": "A phone has reached the page" if seen >= (guests.get("since") or 0)
+                    else "No firewall in the way of phones" if not firewall
+                    else "The firewall lets phones in" if rule
+                    else f"The firewall blocks phones: sudo ufw allow from 192.168.0.0/16 to any port {DECK_GUESTS_PORT} proto tcp" if rule is False
+                    else "Phones: scan the QR code with yours to check"})
+    out.append({"key": "qr", "ok": bool(shutil.which("qrencode")),
+                "text": "QR code works" if shutil.which("qrencode") else "No QR code without qrencode (omarchy pkg add qrencode)"})
+    if not deck.get("voice", True):
+        out.append({"key": "voice", "ok": None, "text": "Dedications aren't read out (Read dedications is off)"})
+    else:
+        out.append({"key": "voice", "ok": voice_ready(),
+                    "text": f"Voice ready: {next((v[1] for v in VOICES if v[0] == deck_voice_name(deck)), 'on')}" if voice_ready()
+                    else "No voice yet: afterlight voice install"})
+    room = deck_where_room(deck)
+    if (deck.get("where") or {}).get("kind") == "sonos":
+        answer = sonos_call(room["ip"], "AVTransport", "GetTransportInfo", {"InstanceID": 0}, timeout=2) if room else None
+        out.append({"key": "sonos", "ok": answer is not None,
+                    "text": f"{room['name']} answers" if answer is not None else "The Sonos room isn't answering"})
+    else:
+        out.append({"key": "sonos", "ok": None, "text": "Playing on the laptop"})
+    awake = STAY_AWAKE.exists()
+    out.append({"key": "awake", "ok": awake,
+                "text": "The laptop stays awake" if awake else "The laptop may lock or sleep: opening requests keeps it awake"})
+    people = len(deck_people(deck))
+    waiting = len(deck.get("requests") or [])
+    if people or waiting:
+        out.append({"key": "fresh", "ok": None,
+                    "text": f"{people} guest{'s' * (people != 1)} and {waiting} waiting request{'s' * (waiting != 1)} from before: Start fresh for a clean night"})
+    deck_update(lambda d: d.update(ready={"at": time.time(), "items": out}))
+    return out
+
+
 def deck_guests_on():
     """Open the requests page: a server on the home network, at a link with a
     secret in it, and a QR code of that link for the Deck to show."""
     was = deck_read().get("guests") or {}
-    deck_guests_off()
+    deck_guests_off(awake=True)
     ip = lan_address()
     if not ip:
         sys.exit("Not on a network.")
@@ -5248,6 +5392,7 @@ def deck_guests_on():
         deck_update(lambda d: d.update(lastCall=0))
     deck_update(lambda d: d.update(guests={"url": url, "pid": proc.pid, "since": since,
                                            "qr": str(DECK_GUESTS_QR) if DECK_GUESTS_QR.is_file() else ""}))
+    deck_awake(True)
     return url
 
 
@@ -5271,7 +5416,7 @@ def deck_guests_heal(deck):
     return False
 
 
-def deck_guests_off():
+def deck_guests_off(awake=False):
     guests = deck_read().get("guests") or {}
     if deck_guests_alive(guests):
         try:
@@ -5281,6 +5426,8 @@ def deck_guests_off():
     if guests:
         deck_update(lambda d: d.update(guests=None))
     DECK_GUESTS_QR.unlink(missing_ok=True)
+    if not awake:
+        deck_awake(False)
 
 
 def deck_crowd(deck):
@@ -5350,6 +5497,7 @@ def deck_guests_serve(token):
     import threading
     import urllib.parse
     template = (REPO / "web/requests.html").read_text()
+    own, seen_at = lan_address(), [0]
     def page():
         """The page in the theme you're running now (read each time, so a
         theme change reaches the phones on their next refresh)."""
@@ -5391,7 +5539,14 @@ def deck_guests_serve(token):
                 return None, None
             return (parts[1] if len(parts) == 2 else ""), urllib.parse.parse_qs(path.query)
 
+        def seen(self):
+            # A phone (not this laptop) reached the page: the firewall lets them in.
+            if self.client_address[0] not in (own, "127.0.0.1") and time.time() - seen_at[0] > 60:
+                seen_at[0] = time.time()
+                deck_update(lambda d: d.update(phoneSeen=int(time.time())))
+
         def do_GET(self):
+            self.seen()
             # A spoken dedication, for a Sonos room to play (made by deck say; nothing else is served).
             parts = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
             if len(parts) == 3 and parts[0] == token and parts[1] == "voice":
@@ -5437,10 +5592,12 @@ def deck_guests_serve(token):
                 deck = deck_read()
                 since = (deck.get("guests") or {}).get("since") or 0
                 songs = [x for x in deck["played"] if x.get("playedAt", 0) >= since - 3600] + ([deck["now"]] if deck.get("now") else [])
+                mine = {a.get("rid") for a in deck_guest_asks(str((query.get("gid") or [""])[0]))}
                 link = lambda x: f"https://music.apple.com/song/{x['id']}" if x.get("service") == "applemusic" and x.get("id") \
                     else "https://music.apple.com/search?term=" + urllib.parse.quote(f"{x.get('title', '')} {x.get('artist', '')}")
                 return self.send(200, {"songs": [{"title": x.get("title", ""), "artist": x.get("artist", ""), "thumb": x.get("thumb", ""),
-                                                  "link": link(x)} for x in songs][-200:]})
+                                                  "link": link(x), "by": x.get("by", ""),
+                                                  "mine": bool(x.get("rid") and x["rid"] in mine)} for x in songs][-200:]})
             if where == "search":
                 words = clean_text((query.get("q") or [""])[0], 100)
                 if not words:
@@ -5468,6 +5625,7 @@ def deck_guests_serve(token):
                 return None
 
         def do_POST(self):
+            self.seen()
             where, _ = self.route()
             if where == "hello":
                 return self.hello()
@@ -5503,6 +5661,8 @@ def deck_guests_serve(token):
                 return self.send(200, {"ok": False, "error": f"You've asked for {again[0]['title']} already: {words}."})
             by = person.get("name") or clean_text(str(body.get("by", "")), 30)
             note = clean_text(str(body.get("note", "")), 120)
+            if note and not note_friendly(note):
+                return self.send(200, {"ok": False, "error": "Let's keep the dedication friendly: it's shown and read out to everyone. Try other words."})
             photo = str(DECK_GUESTS_PHOTOS / f"{body.get('gid')}.jpg") if person.get("photo") else ""
             def ask(d):
                 waiting = d.get("requests") or []
@@ -5614,6 +5774,7 @@ def deck_guests_serve(token):
     server.serve_forever()
     if (deck_read().get("guests") or {}).get("url", "").endswith(token):
         deck_update(lambda d: d.update(guests=None))
+        deck_awake(False)
 
 
 def deck_request_take(rid, where="end"):
@@ -6031,6 +6192,8 @@ def deck_command(settings, args):
             deck["roomVolume"] = int(level) if str(level or "").isdigit() else None
         deck["voiceReady"] = voice_ready()
         deck["voiceName"] = deck_voice_name(deck)
+        if deck.get("recapAt") and time.time() - deck["recapAt"] < RECAP_MINUTES * 60:
+            deck["recap"] = deck_recap(deck)
         deck["voices"] = [{"key": k, "name": n, "about": a} for k, n, a in voices_ready()]
         print(json.dumps(deck_with_details(deck)))
         sys.stdout.flush()
@@ -6122,6 +6285,11 @@ def deck_command(settings, args):
             deck_guests_off()
     elif action == "guests" and len(args) == 3 and args[1] == "drop" and re.fullmatch(r"[A-Za-z0-9_-]{12}", args[2]):
         deck_guest_drop(args[2])
+    elif action == "recap" and args[1:] in ([], ["off"]):
+        deck_update(lambda d: d.update(recapAt=0 if args[1:] else time.time()))
+    elif action == "ready" and len(args) == 1:
+        for item in deck_ready():
+            print({True: "ok  ", False: "FIX ", None: "--  "}[item["ok"]] + item["text"])
     elif action == "guests" and args[1:] == ["forget"]:
         DECK_GUESTS_PEOPLE.unlink(missing_ok=True)
         DECK_GUESTS_ASKS.unlink(missing_ok=True)
@@ -6160,9 +6328,11 @@ def deck_command(settings, args):
         deck_update(lambda d: d.update(lastCall=closes))
         if closes:
             toast("Last call", "Requests close at " + time.strftime("%H:%M", time.localtime(closes)), glyph="󰄜")
-        if args[2] != "off":
+        if args[2] not in ("off", "0"):
             subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "voice", "call", args[2]], stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        elif args[2] == "0":
+            deck_closing(deck_read())       # closed now: thank you, and the recap
     elif action == "requests" and len(args) == 3 and args[1] == "auto" and args[2] in {"on", "off"}:
         deck_update(lambda d: d.update(requestsAuto=args[2] == "on"))
     elif action == "volume" and len(args) == 2 and re.fullmatch(r"[+-]?\d{1,3}", args[1]):

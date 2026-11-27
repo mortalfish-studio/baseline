@@ -84,9 +84,18 @@
   details.tonight summary { font-size: 11px; letter-spacing: .3em; color: var(--teal); cursor: pointer; list-style: none; }
   details.tonight summary::before { content: "› "; }
   details.tonight[open] summary::before { content: "⌄ "; }
-  .tonight a { color: inherit; text-decoration: none; display: flex; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
-  .tonight a img { width: 40px; height: 40px; border-radius: 4px; object-fit: cover; background: #222; flex: none; }
-  .tonight a .open { margin-left: auto; color: var(--pink); font-size: 12px; flex: none; }
+  .tonight .song { display: flex; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .tonight .song img { width: 44px; height: 44px; border-radius: 4px; object-fit: cover; background: #222; flex: none; }
+  .tonight .song .text { flex: 1; min-width: 0; }
+  .tonight .song.mine .title::after { content: " ★"; color: var(--pink); }
+  .tonight .go { display: flex; gap: 6px; margin-top: 4px; }
+  .tonight .go a { font-size: 11px; color: var(--teal); text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; }
+  .tonight .tools { display: flex; gap: 8px; margin: 12px 0 6px; }
+  .tonight .tools button { flex: 1; }
+  .tonight .tip { font-size: 12px; opacity: .6; margin: 6px 0 10px; }
+  .thanks { margin: 0 0 16px; padding: 16px; border-radius: 10px; text-align: center; border: 1px solid var(--teal); background: rgba(255,255,255,.03); animation: drop .4s ease-out; }
+  .thanks b { display: block; color: var(--pink); font-size: 18px; margin-bottom: 4px; }
+  .thanks button { margin-top: 10px; }
   /* Covers fade in as they arrive; search results rise in one after another. */
   img[src] { opacity: 0; transition: opacity .35s ease-out; }
   img[src].in { opacity: 1; }
@@ -131,6 +140,11 @@
     </div>
     <div class="party" id="party" hidden></div>
     <div class="call" id="call" hidden></div>
+    <div class="thanks" id="thanks" hidden>
+      <b>Thanks for the music!</b>
+      Requests are closed for tonight. Every song that played is below, to keep.
+      <div><button class="solid" id="thanksGo">Save tonight's songs</button></div>
+    </div>
     <div class="now" id="now" hidden>
       <img id="nowArt" alt="">
       <div style="min-width:0;flex:1">
@@ -157,7 +171,12 @@
     </form>
     <div id="results"><p class="hint">Find songs and add them (up to 5), then send them all at once. The DJ picks which ones play.</p></div>
     <details class="tonight" id="tonight">
-      <summary>PLAYED TONIGHT</summary>
+      <summary>TONIGHT'S SONGS <span id="tonightN"></span></summary>
+      <div class="tools">
+        <button type="button" id="share">Share list</button>
+        <button type="button" id="save">Download</button>
+      </div>
+      <p class="tip">★ marks yours. Tap a service to open a song there. To make it a playlist, paste the list into a free tool like TuneMyMusic or Soundiiz.</p>
       <div id="tonightList"></div>
     </details>
   </main>
@@ -275,6 +294,10 @@
       $("call").textContent = r.closed ? "Requests are closed for tonight. Thanks for the picks!"
         : r.lastCall ? "Last call! Requests close at " + new Date(r.lastCall * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
       $("find").hidden = closed;
+      $("thanks").hidden = !closed;
+      $("call").hidden = !r.lastCall || closed;
+      $("results").hidden = closed;
+      if (closed && !thanked) { thanked = true; $("tonight").open = true; }
       const list = $("next"); list.replaceChildren();
       for (const s of (r.next || [])) list.append(el("li", { textContent: s.title + " · " + s.artist }));
     } catch (e) {}
@@ -343,21 +366,52 @@
   }
   $("up").addEventListener("click", () => vote(1));
   $("down").addEventListener("click", () => vote(-1));
+  // ---- tonight's songs: to keep, share, or open in any music app
+  let songs = [];
+  const search = (x) => encodeURIComponent(x.title + " " + x.artist);
   async function tonight() {
     if (!$("tonight").open) return;
     let r = {};
-    try { r = await (await fetch(base + "/played")).json(); } catch (e) { return; }
+    try { r = await (await fetch(base + "/played?gid=" + encodeURIComponent(me.gid || ""))).json(); } catch (e) { return; }
+    songs = r.songs || [];
+    $("tonightN").textContent = songs.length ? "· " + songs.length : "";
     const list = $("tonightList"); list.replaceChildren();
-    for (const x of (r.songs || []).slice().reverse()) {
-      const a = el("a", { href: x.link, target: "_blank", rel: "noopener" });
+    for (const x of songs.slice().reverse()) {
+      const row = el("div", { className: "song" + (x.mine ? " mine" : "") });
       const img = el("img", { alt: "" }); art(img, x.thumb);
-      const text = el("div", { className: "text", style: "min-width:0" });
-      text.append(el("div", { className: "title", textContent: x.title }), el("div", { className: "sub", textContent: x.artist }));
-      a.append(img, text, el("span", { className: "open", textContent: "Open ↗" }));
-      list.append(a);
+      const text = el("div", { className: "text" });
+      const go = el("div", { className: "go" });
+      for (const [name, url] of [["Apple Music", x.link], ["Spotify", "https://open.spotify.com/search/" + search(x)],
+                                 ["YouTube Music", "https://music.youtube.com/search?q=" + search(x)]]) {
+        if (/^https:\/\//.test(url || "")) go.append(el("a", { href: url, target: "_blank", rel: "noopener", textContent: name }));
+      }
+      text.append(el("div", { className: "title", textContent: x.title }), el("div", { className: "sub", textContent: x.artist + (x.by ? " · for " + x.by : "") }), go);
+      row.append(img, text);
+      list.append(row);
     }
-    if (!(r.songs || []).length) list.append(el("p", { className: "hint", textContent: "Nothing yet." }));
+    $("share").disabled = $("save").disabled = !songs.length;
+    if (!songs.length) list.append(el("p", { className: "hint", textContent: "Nothing yet." }));
   }
+  function listText() {
+    const day = new Date().toLocaleDateString([], { day: "numeric", month: "long", year: "numeric" });
+    return "Tonight's songs, " + day + "\n\n" + songs.map((x, i) => (i + 1) + ". " + x.title + " · " + x.artist + (x.mine ? " ★" : "")).join("\n") + "\n";
+  }
+  $("share").addEventListener("click", async () => {
+    const text = listText();
+    try {
+      if (navigator.share) return await navigator.share({ title: "Tonight's songs", text });
+      await navigator.clipboard.writeText(text); say("Copied the list.");
+    } catch (e) { if (e && e.name !== "AbortError") say("Couldn't share. Try Download."); }
+  });
+  $("save").addEventListener("click", () => {
+    const lines = songs.map((x, i) => (i + 1) + ". " + x.title + " · " + x.artist + (x.mine ? " ★" : "") + "\n   " + x.link);
+    const blob = new Blob([listText().split("\n\n")[0] + "\n\n" + lines.join("\n") + "\n"], { type: "text/plain" });
+    const a = el("a", { href: URL.createObjectURL(blob), download: "tonights-songs-" + new Date().toISOString().slice(0, 10) + ".txt" });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  });
+  $("thanksGo").addEventListener("click", () => { $("tonight").open = true; $("tonight").scrollIntoView({ behavior: "smooth" }); });
+  let thanked = false;
   $("tonight").addEventListener("toggle", tonight);
   setInterval(tonight, 30000);
   now(); setInterval(now, 8000);

@@ -648,7 +648,16 @@ Item {
   property bool forgetArmed: false
   property bool clearArmed: false
   property string dropArmed: ""
-  onGuestsOpenChanged: if (!guestsOpen) { guestsAll = false; forgetArmed = false; dropArmed = "" }
+  property bool readyAsked: false
+  property real readyAskedAt: 0
+  readonly property bool readyFresh: !!deck.ready && deck.ready.at >= readyAskedAt - 1
+  onGuestsOpenChanged: if (!guestsOpen) { guestsAll = false; forgetArmed = false; dropArmed = ""; readyAsked = false }
+  // A recap just started (requests closed, or Recap pressed): show the stage.
+  property real recapSeen: 0
+  onDeckChanged: {
+    const at = deck.recapAt || 0
+    if (at > recapSeen) { if (recapSeen > 0 || Date.now() / 1000 - at < 30) stageOn = true; recapSeen = at }
+  }
   function view(name) {
     stageOn = name === "stage"
     guestsOpen = name === "requests"
@@ -2562,6 +2571,7 @@ Item {
         layer.effect: MultiEffect { blurEnabled: true; blur: askPop.opacity * 0.55; blurMax: 40 }
 
         readonly property var nextUp: (root.deck.set || []).slice(0, 3)
+        readonly property string nowUid: root.deck.now ? root.deck.now.uid || "" : ""
         readonly property real big: Math.min(height * 0.5, width * 0.34)
         // The low end of the sound, 0-1: what the cover's glow breathes with.
         readonly property real bass: {
@@ -3134,6 +3144,218 @@ Item {
           }
         }
 
+        // ---- The night's recap: when requests close (or Recap is pressed).
+        // Tonight's covers drift behind; the numbers count up; the most loved
+        // song, the crowd's top DJs, and the code to save tonight's songs.
+        Item {
+          id: recap
+          anchors.fill: parent
+          z: 27
+          readonly property var r: root.deck.recap || null
+          readonly property bool on: !!r && !stageView.moment
+          visible: opacity > 0
+          opacity: on ? 1 : 0
+          Behavior on opacity { NumberAnimation { duration: Style.duration(recap.on ? 600 : 260); easing.type: Easing.OutCubic } }
+          property real shown: 0          // 0 → 1 as it comes in: the numbers count up with it
+          onOnChanged: if (on) { shown = 0; countUp.restart() }
+          NumberAnimation { id: countUp; target: recap; property: "shown"; from: 0; to: 1; duration: Style.duration(1800); easing.type: Easing.OutCubic }
+          TapHandler { onTapped: root.run(["deck", "recap", "off"]) }
+
+          Rectangle { anchors.fill: parent; color: root.ground }
+          // Tonight's covers, a slow drifting wall.
+          Item {
+            anchors.fill: parent
+            clip: true
+            opacity: 0.22
+            readonly property int cell: Math.ceil(stageView.width / 9)
+            readonly property var covers: (recap.r && recap.r.covers) || []
+            Grid {
+              id: wall
+              columns: 9
+              readonly property int rows: Math.ceil(stageView.height / parent.cell) + 1
+              Repeater {
+                model: parent.parent.covers.length ? 9 * wall.rows * 2 : 0
+                delegate: Image {
+                  required property int index
+                  width: wall.parent.cell; height: width
+                  source: wall.parent.covers[(index * 7 + Math.floor(index / 9)) % wall.parent.covers.length]
+                  sourceSize.width: 200; sourceSize.height: 200
+                  fillMode: Image.PreserveAspectCrop
+                  asynchronous: true
+                }
+              }
+              NumberAnimation on y {
+                running: recap.visible && !Style.reduceMotion
+                from: 0; to: -wall.rows * wall.parent.cell
+                duration: 120000; loops: Animation.Infinite
+              }
+            }
+            layer.enabled: true
+            layer.effect: MultiEffect { blurEnabled: true; blur: 0.5; blurMax: 24; saturation: 0.2 }
+          }
+          Rectangle {
+            anchors.fill: parent
+            gradient: Gradient {
+              GradientStop { position: 0; color: Util.alpha(root.ground, 0.55) }
+              GradientStop { position: 0.5; color: Util.alpha(root.ground, 0.8) }
+              GradientStop { position: 1; color: root.ground }
+            }
+          }
+          Rectangle {
+            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+            height: 3
+            gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: root.amber } GradientStop { position: 1; color: root.teal } }
+          }
+
+          ColumnLayout {
+            anchors.centerIn: parent
+            width: Math.min(parent.width - 128, 1400)
+            spacing: 0
+            opacity: recap.shown > 0 ? 1 : 0
+            transform: Translate { y: (1 - Math.min(1, recap.shown * 3)) * 24 }
+
+            Label {
+              text: strings.t("deck.recapKicker").toUpperCase()
+              font.pixelSize: Style.font.caption + 2; font.letterSpacing: 10; color: root.teal
+            }
+            Label {
+              Layout.topMargin: 8
+              text: strings.t("deck.recapTitle")
+              font.pixelSize: Math.min(96, stageView.height * 0.1); font.bold: true; color: root.amber
+              layer.enabled: true
+              layer.effect: MultiEffect { shadowEnabled: true; shadowColor: Util.alpha(root.amber, 0.35 + stageView.bass * 0.3); shadowBlur: 1.0; shadowVerticalOffset: 0 }
+            }
+            // The numbers, counting up.
+            RowLayout {
+              Layout.topMargin: 36
+              spacing: Math.max(48, stageView.width * 0.05)
+              Repeater {
+                model: recap.r ? [
+                  { n: recap.r.songs, label: strings.t("deck.recapSongs") },
+                  { n: recap.r.minutes >= 60 ? recap.r.minutes / 60 : recap.r.minutes, hours: recap.r.minutes >= 60,
+                    label: recap.r.minutes >= 60 ? strings.t("deck.recapHours") : strings.t("deck.recapMinutes") },
+                  { n: recap.r.requests, label: strings.t("deck.recapRequests") },
+                  { n: recap.r.dedications, label: strings.t("deck.recapDedications") }
+                ].filter(x => x.n > 0) : []
+                delegate: ColumnLayout {
+                  required property var modelData
+                  spacing: 4
+                  Label {
+                    text: modelData.hours ? Commons.I18n.formatNumber(modelData.n * recap.shown, 1)
+                                          : Commons.I18n.formatNumber(Math.round(modelData.n * recap.shown))
+                    font.pixelSize: Math.min(84, stageView.height * 0.085); font.bold: true; color: root.ink
+                  }
+                  Label { text: modelData.label.toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 4; color: root.teal }
+                }
+              }
+            }
+            Rectangle {
+              Layout.topMargin: 40; Layout.fillWidth: true
+              height: 2
+              gradient: Gradient { orientation: Gradient.Horizontal
+                GradientStop { position: 0; color: root.amber }
+                GradientStop { position: Math.max(0.01, recap.shown); color: root.teal }
+                GradientStop { position: Math.min(1, recap.shown + 0.01); color: "transparent" } }
+            }
+            RowLayout {
+              Layout.topMargin: 40; Layout.fillWidth: true
+              spacing: Math.max(48, stageView.width * 0.04)
+              // The most loved song.
+              ColumnLayout {
+                visible: !!(recap.r && recap.r.loved)
+                spacing: 12
+                Label { text: strings.t("deck.recapLoved").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 4; color: root.teal }
+                RowLayout {
+                  spacing: 18
+                  Cover {
+                    size: Math.min(140, stageView.height * 0.14)
+                    url: recap.r && recap.r.loved ? recap.r.loved.thumb || "" : ""
+                    layer.enabled: true
+                    layer.effect: MultiEffect { shadowEnabled: true; shadowColor: Util.alpha(root.amber, 0.45); shadowBlur: 1.0; shadowVerticalOffset: 0 }
+                  }
+                  ColumnLayout {
+                    spacing: 4
+                    Layout.maximumWidth: stageView.width * 0.24
+                    Label { Layout.fillWidth: true; text: recap.r && recap.r.loved ? root.titleParts(recap.r.loved.title).main : ""; font.pixelSize: 28; font.bold: true; color: root.amber; elide: Text.ElideRight }
+                    Label { Layout.fillWidth: true; text: recap.r && recap.r.loved ? recap.r.loved.artist : ""; font.pixelSize: Style.font.body + 2; opacity: 0.75; elide: Text.ElideRight }
+                    Label { text: recap.r && recap.r.loved ? "👍 " + recap.r.loved.up : ""; font.pixelSize: Style.font.body + 2; color: root.teal }
+                  }
+                }
+              }
+              // The crowd's DJs: whose songs got played most (the top one glows).
+              ColumnLayout {
+                visible: !!(recap.r && recap.r.top.length)
+                spacing: 12
+                Label { text: strings.t("deck.recapCrowd").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 4; color: root.teal }
+                Row {
+                  spacing: 18
+                  Repeater {
+                    model: recap.r ? recap.r.top : []
+                    delegate: Item {
+                      id: dj
+                      required property var modelData
+                      required property int index
+                      readonly property real size: index === 0 ? 112 : 88
+                      width: size; height: 112
+                      Rectangle {
+                        visible: dj.index === 0
+                        anchors.centerIn: djFace
+                        width: djFace.width; height: width; radius: width / 2
+                        color: root.amber
+                        opacity: 0.4 + stageView.bass * 0.3
+                        scale: 1.12
+                        layer.enabled: true
+                        layer.effect: MultiEffect { blurEnabled: true; blur: 1.0; blurMax: 32; autoPaddingEnabled: true }
+                      }
+                      Rectangle {
+                        id: djFace
+                        anchors.bottom: parent.bottom
+                        width: dj.size; height: width; radius: width / 2
+                        color: root.ground
+                        border.width: dj.index === 0 ? 4 : 2; border.color: dj.index === 0 ? root.amber : Util.alpha(root.teal, 0.7)
+                        Image {
+                          id: djImg
+                          anchors.fill: parent; anchors.margins: dj.index === 0 ? 6 : 4
+                          source: (dj.modelData.photo || "") !== "" ? "file://" + dj.modelData.photo : ""
+                          sourceSize.width: 256; sourceSize.height: 256
+                          fillMode: Image.PreserveAspectCrop
+                          asynchronous: true
+                          layer.enabled: true
+                          layer.effect: MultiEffect { maskEnabled: true; maskSource: djMask }
+                        }
+                        Rectangle { id: djMask; anchors.fill: djImg; radius: width / 2; visible: false; layer.enabled: true }
+                        Label { anchors.centerIn: parent; visible: djImg.status !== Image.Ready; text: (dj.modelData.name || "?").charAt(0).toUpperCase(); font.pixelSize: dj.size * 0.4; font.bold: true; color: root.amber }
+                      }
+                    }
+                  }
+                }
+              }
+              Item { Layout.fillWidth: true }
+              // Save tonight's songs: the requests page has them, with links.
+              ColumnLayout {
+                visible: root.showQr
+                spacing: 10
+                Rectangle {
+                  Layout.alignment: Qt.AlignHCenter
+                  Layout.preferredWidth: Math.min(170, stageView.height * 0.17); Layout.preferredHeight: Layout.preferredWidth
+                  radius: Style.cornerRadius > 0 ? 10 : 0
+                  color: "white"
+                  Image {
+                    anchors.fill: parent; anchors.margins: 10
+                    source: root.guests && root.guests.qr ? "file://" + root.guests.qr + "?" + root.guests.since : ""
+                    smooth: false; fillMode: Image.PreserveAspectFit; cache: false
+                  }
+                }
+                Label { Layout.alignment: Qt.AlignHCenter; text: strings.t("deck.recapSave"); font.pixelSize: Style.font.caption; color: root.teal }
+              }
+            }
+          }
+          Label {
+            anchors.horizontalCenter: parent.horizontalCenter; anchors.bottom: parent.bottom; anchors.bottomMargin: 28
+            text: strings.t("deck.recapClose"); font.pixelSize: Style.font.caption; opacity: 0.4
+          }
+        }
+
         // ---- A request just in: the stage dims behind it, and the guest's face
         // and song slide up under the song's name.
         Rectangle {
@@ -3159,6 +3381,19 @@ Item {
               required property int index
               spacing: 12
               Layout.maximumWidth: 320
+              // The song changed: the line moves along, one after another.
+              transform: Translate { id: comeShift }
+              Connections { target: stageView; function onNowUidChanged() { if (stageView.visible) comeIn.restart() } }
+              SequentialAnimation {
+                id: comeIn
+                PropertyAction { target: coming; property: "opacity"; value: 0 }
+                PropertyAction { target: comeShift; property: "x"; value: 48 }
+                PauseAnimation { duration: Style.duration(220 + coming.index * 110) }
+                ParallelAnimation {
+                  NumberAnimation { target: comeShift; property: "x"; to: 0; duration: Style.duration(520); easing.type: Easing.OutCubic }
+                  NumberAnimation { target: coming; property: "opacity"; to: 1; duration: Style.duration(400); easing.type: Easing.OutCubic }
+                }
+              }
               Cover { url: coming.modelData.thumb || ""; size: 64 }
               ColumnLayout {
                 spacing: 2
@@ -3346,6 +3581,46 @@ Item {
             tone: root.guests ? root.teal : root.amber
             onClicked: root.run(["deck", "guests", root.guests ? "off" : "on"])
           }
+          // Before the party: check everything's in place. And the night's recap.
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            HeadLink {
+              glyph: "󰄬"
+              text: root.readyAsked && !root.readyFresh ? strings.t("deck.readyChecking") : strings.t("deck.readyCheck")
+              onTapped: { root.readyAsked = true; root.readyAskedAt = Date.now() / 1000; root.run(["deck", "ready"]) }
+            }
+            Item { Layout.fillWidth: true }
+            HeadLink { glyph: "󰄨"; text: strings.t("deck.recapShow"); onTapped: root.run(["deck", "recap"]) }
+          }
+          Column {
+            visible: root.readyAsked && root.readyFresh
+            Layout.fillWidth: true
+            spacing: 6
+            Repeater {
+              model: root.readyAsked && root.deck.ready ? root.deck.ready.items : []
+              delegate: RowLayout {
+                required property var modelData
+                width: parent.width
+                spacing: 8
+                Label {
+                  Layout.alignment: Qt.AlignTop
+                  text: modelData.ok === true ? "󰄬" : modelData.ok === false ? "󰀦" : "󰋼"
+                  font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption
+                  color: modelData.ok === true ? root.teal : modelData.ok === false ? root.amber : root.ink
+                  opacity: modelData.ok === null ? 0.55 : 1
+                }
+                Label {
+                  Layout.fillWidth: true
+                  wrapMode: Text.Wrap
+                  textFormat: Text.PlainText
+                  text: modelData.text
+                  font.pixelSize: Style.font.caption
+                  opacity: modelData.ok === null ? 0.6 : 0.9
+                }
+              }
+            }
+          }
           // How requests go in: switches, each saying what it does.
           OptionTile {
             Layout.fillWidth: true; Layout.topMargin: 4
@@ -3364,7 +3639,7 @@ Item {
             amber: root.amber; teal: root.teal
             icon: "󰔊"
             title: strings.t("deck.voice")
-            detail: root.deck.voice !== false ? strings.t("deck.voiceOn") : strings.t("deck.voiceOff")
+            detail: (root.deck.voice !== false ? strings.t("deck.voiceOn") : strings.t("deck.voiceOff")) + " " + strings.t("deck.voiceFriendly")
             checked: root.deck.voice !== false
             onToggled: if (!root.locked) root.run(["deck", "voice", root.deck.voice !== false ? "off" : "on"])
           }
