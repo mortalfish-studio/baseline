@@ -676,6 +676,7 @@ Item {
     stageOn = name === "stage"
     guestsOpen = name === "requests"
     autodjOpen = name === "autodj"
+    shapeOpen = false
     qrBig = false
   }
   property bool qrBig: false
