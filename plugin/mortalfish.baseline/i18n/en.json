@@ -548,5 +548,31 @@
   "deck.bloomMix": "Mix in",
   "deck.crate": "Crate",
   "deck.crateOpen": "Open the crate",
-  "deck.crateClose": "Fold the crate away"
+  "deck.crateClose": "Fold the crate away",
+  "deck.spanHours": "%1 h %2 min",
+  "deck.spanMinutes": "%1 min",
+  "deck.endsAt": "ends %1",
+  "deck.picked": {
+    "one": "%1 picked",
+    "other": "%1 picked"
+  },
+  "deck.undo": "Undo",
+  "deck.save": "Save",
+  "deck.saveDefault": "Set · %1",
+  "deck.saveHint": "Name this set",
+  "deck.findInSet": "Find a song in the set",
+  "deck.nowShort": "Now",
+  "deck.top": "Top",
+  "deck.end": "End",
+  "deck.chapterNew": "New chapter",
+  "deck.warn.key": "keys clash",
+  "deck.warn.tempo": "tempo jump",
+  "deck.warn.artist": "same artist again",
+  "deck.sleepSong": "End of song",
+  "deck.sleepIn": "%1 min",
+  "deck.crossfade": "Crossfade",
+  "deck.nextIn": "Next in %1 s",
+  "deck.skipIt": "Skip it",
+  "deck.yourSets": "Your sets",
+  "deck.yourPlaylists": "Your playlists"
 }

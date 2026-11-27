@@ -48,6 +48,22 @@ def wallhaven_picture(n=1, **changes):
     return picture
 
 
+_STATE = tempfile.TemporaryDirectory()
+
+
+def setUpModule():
+    """No test ever touches the Deck's real files, or starts a lookup in the background."""
+    here = Path(_STATE.name)
+    for name in ("DECK", "DECK_NOW", "DECK_LOCK", "DECK_RUN_LOCK", "DECK_UNDO", "DECK_DETAILS", "DECK_DETAILS_LOCK", "DECK_SETS"):
+        mock.patch.object(al, name, here / name.lower()).start()
+    mock.patch.object(al, "deck_details_soon", lambda deck: None).start()
+
+
+def tearDownModule():
+    mock.patch.stopall()
+    _STATE.cleanup()
+
+
 class TempCase(unittest.TestCase):
     """A fresh temporary folder per test, removed afterwards."""
 
@@ -538,7 +554,9 @@ class DeckTests(TempCase):
     def setUp(self):
         super().setUp()
         for name, value in {"DECK": self.tmp / "deck.json", "DECK_LOCK": self.tmp / "deck.lock",
-                            "DECK_NOW": self.tmp / "deck-now.json"}.items():
+                            "DECK_NOW": self.tmp / "deck-now.json", "DECK_UNDO": self.tmp / "deck-undo.json",
+                            "DECK_DETAILS": self.tmp / "deck-details.json", "DECK_DETAILS_LOCK": self.tmp / "details.lock",
+                            "DECK_SETS": self.tmp / "deck-sets.json"}.items():
             self.patch(name, value)
         self.patch("toast", lambda *a, **k: None)
         self.patch("deck_after_edit", lambda: None)
@@ -594,10 +612,11 @@ class DeckTests(TempCase):
 
     def test_build_asks_for_the_right_length_and_keeps_reasons(self):
         asked = {}
-        def ideas(query, ask=None, count=6, timeout=45):
-            asked.update(ask=ask, count=count)
-            return {"songs": [{"t": "Lady", "a": "Modjo", "w": "opener"}, {"t": "Finally", "a": "CeCe Peniston", "w": "builds"},
-                              {"t": "Lady", "a": "Modjo", "w": "again"}], "q": []}
+        def ideas(query, ask=None, count=6, timeout=45, shape=False):
+            asked.update(ask=ask, count=count, shape=shape)
+            return {"songs": [{"t": "Lady", "a": "Modjo", "w": "opener", "e": 5, "c": "Warm up"},
+                              {"t": "Finally", "a": "CeCe Peniston", "w": "builds", "e": 7, "c": "Build"},
+                              {"t": "Lady", "a": "Modjo", "w": "again", "e": 0, "c": ""}], "q": []}
         self.patch("grok_ideas", ideas)
         self.patch("find_songs", lambda service, wanted: [(i, self.apple(n, i["t"], i["a"])) for n, i in enumerate(wanted)])
         with mock.patch("shutil.which", return_value="/usr/bin/grok"):
@@ -608,6 +627,9 @@ class DeckTests(TempCase):
         self.assertIn("«rooftop at sunset»", asked["ask"])
         self.assertIn("Start with «Lady by Modjo»", asked["ask"])
         self.assertEqual([(s["title"], s["why"]) for s in d["set"]], [("Lady", "opener"), ("Finally", "builds")])
+        self.assertTrue(asked["shape"])
+        self.assertEqual([s["chapter"] for s in d["set"]], ["Warm up", "Build"])
+        self.assertEqual(al.deck_with_details(d)["set"][1]["energy"], 7)
 
     def test_mix_in_scatters_songs_after_the_next_one(self):
         for n in range(6):
@@ -648,6 +670,86 @@ class DeckTests(TempCase):
         al.deck_tick({"time": 40, "length": 200, "playing": True, "id": "1"})
         d = al.deck_read()
         self.assertEqual((d["now"]["uid"], [s["uid"] for s in d["set"]]), ("b", ["c"]))
+
+    def test_details_wheel_and_what_does_not_sit_well(self):
+        self.assertEqual((al.camelot("Gb Minor"), al.camelot("A Major"), al.camelot("C# minor"), al.camelot("nope")),
+                         ("11A", "11B", "12A", ""))
+        self.assertTrue(al.keys_fit("8A", "9A") and al.keys_fit("8A", "8B") and al.keys_fit("12A", "1A"))
+        self.assertFalse(al.keys_fit("8A", "3B"))
+        self.assertTrue(al.tempos_fit(124, 126) and al.tempos_fit(70, 140))
+        self.assertFalse(al.tempos_fit(100, 128))
+        a, b, c = (dict(self.apple(n), service="applemusic") for n in range(3))
+        for n in range(3):
+            self.deck("add", "applemusic", json.dumps(self.apple(n, by="Same" if n < 2 else "Other")))
+        d = al.deck_read()
+        al.deck_details_note(d["set"][0], length=200, bpm=124, key="8A", energy=5)
+        al.deck_details_note(d["set"][1], length=180, bpm=100, key="3B")
+        al.deck_details_note(d["set"][2], bpm=100, key="3B")
+        shown = al.deck_with_details(d)
+        self.assertEqual(shown["set"][0]["length"], 200)
+        self.assertEqual(shown["set"][1]["warn"], ["key", "tempo", "artist"])
+        self.assertEqual(shown["set"][2]["warn"], [])
+        self.assertNotIn("warn", al.deck_read()["set"][0])          # shown, never stored
+
+    def test_details_are_looked_up_once_and_kept_apart(self):
+        self.patch("STATE", self.tmp / "afterlight/state.json")
+        (self.tmp / "afterlight").mkdir()
+        for n in range(2):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        self.patch("am_lookup", lambda params: [{"trackId": 1000, "trackTimeMillis": 201000}, {"trackId": 1001, "trackTimeMillis": 99000}])
+        self.patch("grok_json", lambda prompt, timeout=60: {"e": [4, 9]})
+        self.patch("beatport_windows", lambda: [])
+        al.deck_details_fill()
+        details = al.deck_details_read()
+        self.assertEqual((details["am:1000"]["length"], details["am:1001"]["energy"]), (201, 9))
+        self.assertEqual(al.deck_details_wanted(al.deck_read()), [])     # Beatport waits; not asked again within the hour
+
+    def test_chapters_name_move_and_join(self):
+        for n in range(6):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        uids = [s["uid"] for s in al.deck_read()["set"]]
+        self.deck("chapter", uids[0], "Warm", "up")
+        self.deck("chapter", uids[3], "Peak")
+        d = al.deck_read()
+        self.assertEqual([s.get("chapter", "") for s in d["set"]], ["Warm up"] * 3 + ["Peak"] * 3)
+        d = self.deck("move-chapter", uids[3], "0")                     # the peak first
+        self.assertEqual([s["uid"] for s in d["set"]], uids[3:] + uids[:3])
+        d = self.deck("chapter", uids[0], "")                           # warm up joins the peak
+        self.assertEqual({s.get("chapter") for s in d["set"]}, {"Peak"})
+
+    def test_several_at_once_undo_and_saved_sets(self):
+        self.patch("deck_watch", lambda: None)
+        self.patch("deck_where_room", lambda d: None)
+        for n in range(5):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        uids = [s["uid"] for s in al.deck_read()["set"]]
+        d = self.deck("place", "next", uids[4], uids[2])
+        self.assertEqual([s["uid"] for s in d["set"]][:2], [uids[2], uids[4]])     # in set order
+        d = self.deck("remove", uids[0], uids[1])
+        self.assertEqual(len(d["set"]), 3)
+        d = self.deck("undo")
+        self.assertEqual(len(d["set"]), 5)
+        d = self.deck("undo")
+        self.assertEqual([s["uid"] for s in d["set"]], uids)
+        al.deck_command({}, ["save", "Friday"])
+        self.deck("clear")
+        self.assertEqual(al.deck_set_list()[0]["count"], 5)
+        d = self.deck("load", "friday")
+        self.assertEqual([s["title"] for s in d["set"]], [f"Song {n}" for n in range(5)])
+        self.assertNotEqual(d["set"][0]["uid"], uids[0])                # fresh copies
+
+    def test_sleep_after_a_while_or_this_song(self):
+        d = {**al.DECK_EMPTY, "now": {"uid": "a"}}
+        al.deck_sleep(d, "song")
+        self.assertFalse(al.deck_sleep_due(d))
+        d["now"] = {"uid": "b"}
+        self.assertTrue(al.deck_sleep_due(d))
+        al.deck_sleep(d, "30")
+        self.assertFalse(al.deck_sleep_due(d))
+        d["sleep"]["at"] -= 31 * 60
+        self.assertTrue(al.deck_sleep_due(d))
+        al.deck_sleep(d, "off")
+        self.assertIsNone(d["sleep"])
 
     def test_sonos_queue_entry_for_an_apple_song(self):
         uri, meta = al.sonos_apple_uri("1440833098", "13")
@@ -1250,7 +1352,7 @@ class SuggestionTests(TempCase):
         argv = runner.call_args[0][0]
         self.assertEqual(argv[argv.index("-m") + 1], al.GROK_FAST)
         self.assertEqual(argv[argv.index("--tools") + 1], "")
-        self.assertEqual(ideas, {"songs": [{"t": "Lovely Day", "a": "Bill Withers", "w": "Sunny classic"}], "q": ["golden hour"]})
+        self.assertEqual(ideas, {"songs": [{"t": "Lovely Day", "a": "Bill Withers", "w": "Sunny classic", "e": 0, "c": ""}], "q": ["golden hour"]})
         with mock.patch("subprocess.run", return_value=mock.Mock(stdout="no json here")):
             self.assertEqual(al.grok_ideas("x"), {"songs": [], "q": []})
 

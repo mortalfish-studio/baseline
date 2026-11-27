@@ -1,12 +1,11 @@
 import QtQuick
-import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import qs.Commons
 
 // The Deck's equalizer, "the Skyline": bars from the look's accent (bass) to
-// its cyan (treble), peak caps that hang and fall, a neon glow, a reflection on
-// the floor and faint scanlines. With `live` it shows the laptop's real sound
+// its cyan (treble), peak caps that hang and fall, a soft halo and a reflection
+// on the floor. With `live` it shows the laptop's real sound
 // (cava, reading PipeWire's output); otherwise (a Sonos room, or no cava) a
 // pulse that moves like music. Resting, it breathes. It does nothing at all
 // while `active` is false.
@@ -99,56 +98,69 @@ Item {
   readonly property real barWidth: Math.max(2, (width - gap * (count - 1)) / count)
   function tone(i) { return Qt.tint(amber, Qt.rgba(teal.r, teal.g, teal.b, i / (count - 1))) }
 
-  // ---- the bars, drawn once for the glow and once sharp on top
-  Item {
-    id: bars
-    width: viz.width
-    height: viz.floorY
-    layer.enabled: true
-    Repeater {
-      model: viz.count
-      delegate: Item {
-        required property int index
-        x: index * (viz.barWidth + viz.gap)
-        width: viz.barWidth
-        height: bars.height
-        readonly property color c: viz.tone(index)
-        Rectangle {
-          anchors.bottom: parent.bottom
-          width: parent.width
-          height: Math.max(2, parent.height * (viz.levels[index] || 0))
-          radius: Math.min(2, width / 2)
-          gradient: Gradient {
-            GradientStop { position: 0; color: Qt.lighter(c, 1.25) }
-            GradientStop { position: 1; color: Qt.rgba(c.r, c.g, c.b, 0.35) }
-          }
+  // ---- the bars: each with a soft halo behind it, a peak cap above it and
+  // its reflection below the floor. Drawn plainly (no blur effects), so
+  // nothing spills outside the Skyline or sits in front of it.
+  clip: true
+  Repeater {
+    model: viz.count
+    delegate: Item {
+      required property int index
+      readonly property color c: viz.tone(index)
+      readonly property real level: viz.levels[index] || 0
+      readonly property real barHeight: Math.max(2, (viz.floorY - 8) * level)
+      x: index * (viz.barWidth + viz.gap)
+      width: viz.barWidth
+      height: viz.height
+      // The halo: wider, faint, fading upward.
+      Rectangle {
+        x: -viz.gap
+        width: parent.width + viz.gap * 2
+        height: parent.barHeight + 10
+        y: viz.floorY - height
+        radius: 4
+        opacity: viz.playing ? 0.35 : 0.15
+        gradient: Gradient {
+          GradientStop { position: 0; color: Qt.rgba(c.r, c.g, c.b, 0) }
+          GradientStop { position: 1; color: Qt.rgba(c.r, c.g, c.b, 0.55) }
         }
-        // The peak cap.
-        Rectangle {
-          width: parent.width
-          height: 2
-          radius: 1
-          y: parent.height - parent.height * (viz.peaks[index] || 0) - 4
-          visible: (viz.peaks[index] || 0) > 0.06
-          color: Qt.lighter(c, 1.5)
-          opacity: 0.9
+      }
+      // The bar.
+      Rectangle {
+        width: parent.width
+        height: parent.barHeight
+        y: viz.floorY - height
+        radius: Math.min(2, width / 2)
+        gradient: Gradient {
+          GradientStop { position: 0; color: Qt.lighter(c, 1.25) }
+          GradientStop { position: 1; color: Qt.rgba(c.r, c.g, c.b, 0.45) }
+        }
+      }
+      // The peak cap.
+      Rectangle {
+        width: parent.width
+        height: 2
+        radius: 1
+        y: viz.floorY - (viz.floorY - 8) * (viz.peaks[index] || 0) - 4
+        visible: (viz.peaks[index] || 0) > 0.06
+        color: Qt.lighter(c, 1.5)
+        opacity: 0.9
+      }
+      // The reflection: the bar upside down, fading into the floor.
+      Rectangle {
+        width: parent.width
+        y: viz.floorY + 3
+        height: Math.min(viz.height - viz.floorY - 3, parent.barHeight * 0.6)
+        radius: Math.min(2, width / 2)
+        gradient: Gradient {
+          GradientStop { position: 0; color: Qt.rgba(c.r, c.g, c.b, 0.3) }
+          GradientStop { position: 1; color: Qt.rgba(c.r, c.g, c.b, 0) }
         }
       }
     }
   }
-  MultiEffect {
-    source: bars
-    anchors.fill: bars
-    z: -1
-    blurEnabled: true
-    blur: 1.0
-    blurMax: 24
-    brightness: 0.15
-    opacity: viz.playing ? 0.85 : 0.4
-    Behavior on opacity { NumberAnimation { duration: Style.duration(240) } }
-  }
 
-  // ---- the floor and the reflection on it
+  // ---- the floor
   Rectangle {
     y: viz.floorY + 1
     width: viz.width
@@ -157,37 +169,6 @@ Item {
       orientation: Gradient.Horizontal
       GradientStop { position: 0; color: Qt.rgba(viz.amber.r, viz.amber.g, viz.amber.b, 0.5) }
       GradientStop { position: 1; color: Qt.rgba(viz.teal.r, viz.teal.g, viz.teal.b, 0.5) }
-    }
-  }
-  ShaderEffectSource {
-    id: mirror
-    sourceItem: bars
-    y: viz.floorY + 3
-    width: viz.width
-    height: viz.height - viz.floorY - 3
-    sourceRect: Qt.rect(0, viz.floorY - height, viz.width, height)
-    transform: Scale { yScale: -1; origin.y: mirror.height / 2 }
-    opacity: 0.28
-  }
-  // The reflection fades into the ground.
-  Rectangle {
-    y: viz.floorY + 3
-    width: viz.width
-    height: viz.height - viz.floorY - 3
-    gradient: Gradient {
-      GradientStop { position: 0; color: Qt.rgba(viz.ground.r, viz.ground.g, viz.ground.b, 0) }
-      GradientStop { position: 1; color: viz.ground }
-    }
-  }
-
-  // ---- scanlines over everything, very faint
-  Column {
-    anchors.fill: parent
-    spacing: 3
-    clip: true
-    Repeater {
-      model: Math.ceil(viz.height / 4)
-      delegate: Rectangle { width: viz.width; height: 1; color: viz.ground; opacity: 0.35 }
     }
   }
 }

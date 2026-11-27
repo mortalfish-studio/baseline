@@ -61,7 +61,7 @@ These are symlinks back to your checkout, so the repo stays the single source. `
 | `~/.config/omarchy/afterlight/settings.json`, `sources.json` | Baseline's settings, and where each added picture came from |
 | `~/.config/omarchy/backgrounds/afterlight-*` | pictures you add, and darkened Night/Saver copies made from them |
 | `~/.config/systemd/user/afterlight-mode.timer` | the Day/Night schedule |
-| `~/.local/state/afterlight/` | state: health report, liked tracks, Beatport playlists, the Sonos speakers and room names found (`sonos.json`, kept current: rewritten when they change and at least daily), the music popup's last message (`toast.json`), the last suggestions (`suggest.json`), the Deck's set (`deck.json`) and where its song is (`deck-now.json`), and, while Sonos has the volume keys, `sonos-target` |
+| `~/.local/state/afterlight/` | state: health report, liked tracks, Beatport playlists, the Sonos speakers and room names found (`sonos.json`, kept current: rewritten when they change and at least daily), the music popup's last message (`toast.json`), the last suggestions (`suggest.json`), the Deck's set (`deck.json`), where its song is (`deck-now.json`), its songs' details (`deck-details.json`), the last 30 changes to undo (`deck-undo.json`) and the sets you saved (`deck-sets.json`), and, while Sonos has the volume keys, `sonos-target` |
 | `~/.local/share/baseline/looks/` | looks added from the [catalog](https://github.com/mortalfish-studio/baseline-looks) |
 | `~/.local/share/baseline/mine/` | looks you make in the Studio |
 | `~/.local/share/baseline-before/` | the snapshot taken before installing (moved aside by `afterlight uninstall`) |
@@ -97,7 +97,8 @@ Chrome's colour follows the look through Omarchy's own browser policy (`/etc/opt
 | 08:30 daily | morning check: Omarchy update, GitHub notifications (`gh`), coding-agent limits |
 | opening the Status tab | GitHub (at most every 6 hours) for new Baseline and OmaRelay changes |
 | while the Deck is on screen and playing on the laptop | `cava` reads the sound going out of the laptop (PipeWire), only to draw the equalizer; nothing is recorded or kept |
-| while the Deck plays | a watcher (`afterlight deck run`) checks every couple of seconds where the song is, to start the next on the laptop or follow the Sonos room; it exits once nothing is playing |
+| while the Deck plays | a watcher (`afterlight deck run`) checks every couple of seconds where the song is, to start the next on the laptop or follow the Sonos room, and stops the music when a sleep timer runs out; it exits once nothing is playing |
+| when songs in the Deck are missing details | `afterlight deck details` runs once in the background to look up their lengths, tempo, key and energy (below), then exits; a song isn't asked about again within the hour |
 | after `omarchy update` | check and repair, notifying only if something needed fixing |
 | saving or deleting a look | runs your backup command, if you set one (`backup.command`); nothing by default |
 | Studio → Browse / Add | clones the public catalog; downloads pictures **only if you choose to**, from Wallhaven, Unsplash or Wikimedia |
@@ -107,7 +108,9 @@ Chrome's colour follows the look through Omarchy's own browser policy (`/etc/opt
 | saying "Sonos" to OmaRelay | the Grok agent (`grok -p`, Sonos tools only) talks to Sonos's cloud; only if you've added and signed in to the Sonos MCP yourself. OmaRelay gives it the room names Baseline last read |
 | Send to Sonos (the Player tab's *Continue … in* button, or "send this to the kitchen") | the Grok agent, as above, starts the laptop's song (title, artist, album) on Apple Music in that room; then Baseline skips to the song and second over the local network and pauses the laptop |
 | "play …" with no clear match, or *Ask Grok for ideas* | Grok's fast model (`grok -m grok-4.7-build-fast`, tools off) gets the words asked for and suggests songs; they're then searched on YouTube Music or Apple Music. Only if the Grok command line is installed and signed in |
-| the Deck: *Build a set* and *Fill* | Grok's fast model, as above, gets your brief (or the titles and artists already in the set) and the length; the songs it names are searched on YouTube Music or Apple Music |
+| the Deck: *Build a set* and *Fill* | Grok's fast model, as above, gets your brief (or the titles and artists already in the set) and the length; the songs it names are searched on YouTube Music or Apple Music. A built set also gets each song's energy and chapter |
+| the Deck's song details | lengths from Apple's public catalogue (`itunes.apple.com`, the songs' catalogue numbers) and YouTube Music (signed out, the video ids); tempo and key from Beatport's search, through the open Beatport window (each song's title and artist), only while that window is open; energy from Grok's fast model (the titles and artists, all in one question). Kept in `deck-details.json` |
+| the Deck's crate before you search | your own playlists: YouTube Music's through its open window, Apple Music's through its open window (read only) |
 | the Deck, playing in a Sonos room | writes the set into that room's queue (replacing what was queued there) and plays it, over the local network; YouTube Music songs are searched on Apple Music first |
 | the Deck's rooms, while you can see it (on workspace 7 or popped up) | asks each Sonos speaker for its group, volume and whether it's playing, every 5 seconds, on the local network. Adding or taking out a room regroups the speakers (and may lower a joining room's volume); *Everywhere* never touches a room that's playing something else |
 | searching for playlists in the Deck | YouTube Music's own search (signed out) and, for a playlist's songs, its web API; your private ones are read through the open YouTube Music window. Apple Music playlists and their songs through Apple's player in the Apple Music window, as you (your library playlists are only read, never changed) |

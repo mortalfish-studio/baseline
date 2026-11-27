@@ -123,7 +123,9 @@ async function appleMusic(op, tab) {
       const sf = kit.storefrontId || "us";
       if (op.action === "playlists") {
         const items = [];
-        const words = op.term.toLowerCase().split(/\s+/).filter(Boolean);
+        // "*": every playlist in your library, and nothing from the catalogue.
+        const all = op.term.trim() === "*";
+        const words = all ? [] : op.term.toLowerCase().split(/\s+/).filter(Boolean);
         if (kit.isAuthorized) {
           try {
             let next = "/v1/me/library/playlists", pages = 0;
@@ -138,14 +140,14 @@ async function appleMusic(op, tab) {
             }
           } catch (error) { /* library not available */ }
         }
-        try {
+        if (!all) try {
           const found = await api(`/v1/catalog/${sf}/search`, { term: op.term, types: "playlists", limit: 12 });
           for (const p of ((found.results || {}).playlists || {}).data || []) {
             const a = p.attributes || {};
             items.push({ id: p.id, name: a.name || "", curator: a.curatorName || "Apple Music", art: art(a.artwork), library: false });
           }
         } catch (error) { /* search failed */ }
-        return { ok: true, items: items.slice(0, 30) };
+        return { ok: true, items: items.slice(0, all ? 100 : 30) };
       }
       if (op.action === "tracks") {
         const mine = op.id.startsWith("p.");

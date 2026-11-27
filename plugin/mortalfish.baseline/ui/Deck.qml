@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Effects
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
@@ -153,6 +154,12 @@ Item {
     onTextChanged: if (window.visible) root.read()
   }
   Commons.WatchedFile {
+    path: Quickshell.env("HOME") + "/.local/state/afterlight/deck-details.json"
+    onTextChanged: if (window.visible) detailsSettle.restart()
+  }
+  // Details land a few at a time: read once they settle.
+  Timer { id: detailsSettle; interval: 600; onTriggered: root.read() }
+  Commons.WatchedFile {
     path: Quickshell.env("HOME") + "/.local/state/afterlight/deck-now.json"
     onTextChanged: {
       try {
@@ -175,7 +182,13 @@ Item {
   ListModel { id: setModel }
   function rowOf(song) {
     return { uid: song.uid, title: song.title || "", artist: song.artist || "", thumb: song.thumb || "",
-             service: song.service || "", why: song.why || "" }
+             service: song.service || "", why: song.why || "", chapter: song.chapter || "",
+             bpm: song.bpm || 0, key: song.key || "", energy: song.energy || 0, length: song.length || 0,
+             warn: (song.warn || []).join(",") }
+  }
+  function sameRow(a, b) {
+    for (const k in b) if (a[k] !== b[k]) return false
+    return true
   }
   function syncSet() {
     const want = deck.set || []
@@ -186,6 +199,11 @@ Item {
       for (let j = i; j < setModel.count; j++) if (setModel.get(j).uid === want[i].uid) { at = j; break }
       if (at < 0) setModel.insert(i, rowOf(want[i]))
       else if (at !== i) setModel.move(at, i, 1)
+    }
+    // Details arrive later (lengths, tempo, key): update the rows in place.
+    for (let i = 0; i < want.length && i < setModel.count; i++) {
+      const row = rowOf(want[i])
+      if (!sameRow(setModel.get(i), row)) setModel.set(i, row)
     }
   }
 
@@ -326,6 +344,8 @@ Item {
       else if (key === "next") run(["deck", "add", service, json, "--next"])
       else if (key === "later") run(["deck", "add", service, json])
       else run(["deck", "add", service, json, "--scatter"])
+    } else if (selectedUids.length > 1 && selected[bloomUid]) {
+      placePicked(key === "later" ? "end" : key)
     } else {
       if (key === "now") run(["deck", "play", bloomUid])
       else if (key === "next") run(["deck", "move", bloomUid, "0"])
@@ -369,13 +389,23 @@ Item {
   function moveGhost(point) {
     ghost.x = point.x + 14
     ghost.y = point.y - ghost.height / 2
+    const p = setList.mapFromItem(stage, point.x, point.y)
+    const edge = 56
+    edgeSpeed = (p.x < 0 || p.x > setList.width || root.wall) ? 0
+              : p.y < edge && p.y > -40 ? -Math.ceil((edge - p.y) / 4)
+              : p.y > setList.height - edge && p.y < setList.height + 40 ? Math.ceil((p.y - setList.height + edge) / 4) : 0
   }
   function endDrag() {
+    edgeSpeed = 0
     ghost.Drag.drop()
     dragging = false
     dropIndex = -1
   }
   function dropInSet(index) {
+    if (dragFrom === "chapter") {
+      run(["deck", "move-chapter", dragUid, String(Math.max(0, index))])
+      return
+    }
     if (dragFrom === "found") {
       run(["deck", "add", service, JSON.stringify(dragItem), "--at", String(Math.max(0, index))])
       return
@@ -396,6 +426,163 @@ Item {
     else run(["deck", "play", dragUid])
   }
 
+
+  // ------------------------------------------------------------ the set in time
+  // When each song starts (from now), the chapters, what's folded, picked or
+  // filtered. A song whose length isn't known yet counts as 3:30.
+  function lengthOf(song) { return song && song.length ? song.length : 210 }
+  readonly property real nowLeft: now ? Math.max(0, (pos.length || lengthOf(now)) - shownTime) : 0
+  readonly property var startsAt: {
+    const out = []
+    let t = nowLeft
+    for (const s of (deck.set || [])) { out.push(t); t += lengthOf(s) }
+    out.push(t)
+    return out
+  }
+  readonly property real setSeconds: startsAt.length ? startsAt[startsAt.length - 1] : 0
+  function clockAt(secondsFromNow) {
+    return new Date(Date.now() + secondsFromNow * 1000).toLocaleTimeString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat)
+  }
+  function span(seconds) {
+    const m = Math.round(seconds / 60)
+    return m >= 60 ? strings.t("deck.spanHours").arg(Math.floor(m / 60)).arg(m % 60) : strings.t("deck.spanMinutes").arg(m)
+  }
+  // Each row's place in its chapter: where the chapter starts, whether this
+  // row opens it, how many songs and minutes it holds.
+  readonly property var chapters: {
+    const set = deck.set || []
+    const out = []
+    let prev = now ? (now.chapter || "") : null
+    let head = -1
+    for (let i = 0; i < set.length; i++) {
+      const c = set[i].chapter || ""
+      if (c !== prev && c !== "") head = i
+      else if (c === "") head = -1
+      out.push({ name: c, opens: c !== "" && c !== prev, head: head, count: 0, seconds: 0 })
+      if (head >= 0) { out[head].count++; out[head].seconds += lengthOf(set[i]) }
+      prev = c
+    }
+    return out
+  }
+  property var folded: ({})                  // the uid a chapter starts at → folded
+  function foldChapter(uid) {
+    const f = Object.assign({}, folded)
+    if (f[uid]) delete f[uid]; else f[uid] = true
+    folded = f
+  }
+  function hiddenAt(index) {
+    const c = chapters[index]
+    if (!c || c.head < 0 || c.opens) return false
+    const head = (deck.set || [])[c.head]
+    return !!head && !!folded[head.uid]
+  }
+  property string renaming: ""               // the chapter being named
+  function newChapter(uid) {
+    run(["deck", "chapter", uid, strings.t("deck.chapterNew")])
+    renaming = uid
+  }
+
+  // Several songs at once: Ctrl-click picks one more, Shift-click a run.
+  property var selected: ({})
+  property string selectedLast: ""
+  readonly property var selectedUids: (deck.set || []).filter(s => !!selected[s.uid]).map(s => s.uid)
+  function pick(uid, mods) {
+    const f = Object.assign({}, selected)
+    if ((mods & Qt.ShiftModifier) && selectedLast !== "") {
+      const ids = (deck.set || []).map(s => s.uid)
+      const a = ids.indexOf(selectedLast), b = ids.indexOf(uid)
+      if (a >= 0 && b >= 0) for (let i = Math.min(a, b); i <= Math.max(a, b); i++) f[ids[i]] = true
+    } else if (f[uid]) delete f[uid]
+    else f[uid] = true
+    selected = f
+    selectedLast = uid
+  }
+  function clearPicked() { selected = ({}); selectedLast = "" }
+  function placePicked(where) {
+    const uids = selectedUids
+    if (!uids.length) return
+    if (where === "remove") run(["deck", "remove"].concat(uids))
+    else run(["deck", "place", where].concat(uids))
+    clearPicked()
+  }
+
+  // Finding a song in the set ("/").
+  property string filter: ""
+  function matches(title, artist) {
+    if (filter === "") return true
+    const f = filter.toLowerCase()
+    return title.toLowerCase().indexOf(f) >= 0 || artist.toLowerCase().indexOf(f) >= 0
+  }
+
+  // Getting around: the top (what's playing), the end, smoothly.
+  function scrollTo(y) {
+    const list = root.wall ? wallView : setList
+    const top = list.originY, bottom = list.originY + Math.max(0, list.contentHeight - list.height)
+    scroller.target = list
+    scroller.to = Math.max(top, Math.min(bottom, y))
+    scroller.restart()
+  }
+  function toTop() { scrollTo(-1e9) }
+  function toEnd() { scrollTo(1e9) }
+  NumberAnimation { id: scroller; property: "contentY"; duration: Style.duration(320); easing.type: Easing.OutCubic }
+
+  // Dragging near the list's top or bottom edge scrolls it.
+  property real edgeSpeed: 0
+  Timer {
+    interval: 16
+    repeat: true
+    running: root.dragging && root.edgeSpeed !== 0
+    onTriggered: {
+      const top = setList.originY, bottom = setList.originY + Math.max(0, setList.contentHeight - setList.height)
+      setList.contentY = Math.max(top, Math.min(bottom, setList.contentY + root.edgeSpeed))
+      const p = setList.mapFromItem(stage, ghost.x - 14, ghost.y + ghost.height / 2)
+      const i = setList.indexAt(20, p.y + setList.contentY)
+      if (i >= 0) root.dropIndex = i
+    }
+  }
+
+  // A cover wall instead of the list.
+  property bool wall: false
+  property bool filterOpen: false
+  property bool playedOpen: false
+
+  // Saved sets, and your own playlists, for the crate before you search.
+  property var savedSets: []
+  property var myPlaylists: []
+  function readShelf() {
+    if (!setsReader.running) setsReader.running = true
+    mineReader.command = [tool, "deck", "mine", service]
+    if (!mineReader.running) mineReader.running = true
+  }
+  Process {
+    id: setsReader
+    command: [root.tool, "deck", "sets"]
+    stdout: StdioCollector { onStreamFinished: { try { root.savedSets = JSON.parse(text) } catch (error) {} } }
+  }
+  Process {
+    id: mineReader
+    stdout: StdioCollector { onStreamFinished: { try { root.myPlaylists = JSON.parse(text) } catch (error) {} } }
+  }
+  onServiceChanged: if (seen) readShelf()
+  onSeenChanged: if (seen) readShelf()
+  property bool saving: false
+
+  // Sleep: off, 15, 30, 60 minutes, the end of this song.
+  readonly property var sleep: deck.sleep || null
+  function nextSleep() {
+    const order = ["off", "15", "30", "60", "song"]
+    const at = sleep ? (sleep.song ? 4 : sleepMinutes <= 15 ? 1 : sleepMinutes <= 30 ? 2 : 3) : 0
+    run(["deck", "sleep", order[(at + 1) % order.length]])
+  }
+  property int sleepMinutes: 0
+  Timer {
+    interval: 15000
+    repeat: true
+    triggeredOnStart: true
+    running: root.seen && !!root.sleep && !!root.sleep.at
+    onTriggered: root.sleepMinutes = Math.max(1, Math.ceil((root.sleep.at * 1000 - Date.now()) / 60000))
+  }
+
   FloatingWindow {
     id: window
     title: "Baseline Deck"
@@ -410,8 +597,61 @@ Item {
       id: stage
       anchors.fill: parent
       focus: true
-      Keys.onEscapePressed: if (root.bloomOpen) root.closeBloom(); else if (root.popped) root.goHome()
+      Keys.onEscapePressed: {
+        if (root.bloomOpen) root.closeBloom()
+        else if (root.selectedUids.length) root.clearPicked()
+        else if (root.filterOpen || root.saving) { root.filterOpen = false; root.saving = false; root.filter = "" }
+        else if (root.popped) root.goHome()
+      }
       Keys.onSpacePressed: root.run(["deck", root.deck.playing ? "pause" : "play"])
+      // Home and End, N for what's playing, / to find a song, Ctrl+Z to undo,
+      // Delete for the picked songs, W for the wall.
+      Keys.onPressed: function(event) {
+        if (event.key === Qt.Key_Home || (event.key === Qt.Key_N && !event.modifiers)) { root.toTop(); event.accepted = true }
+        else if (event.key === Qt.Key_End) { root.toEnd(); event.accepted = true }
+        else if (event.key === Qt.Key_Slash) { root.saving = false; root.filterOpen = true; event.accepted = true }
+        else if (event.key === Qt.Key_Z && (event.modifiers & Qt.ControlModifier)) { root.run(["deck", "undo"]); event.accepted = true }
+        else if (event.key === Qt.Key_Delete && root.selectedUids.length) { root.placePicked("remove"); event.accepted = true }
+        else if (event.key === Qt.Key_W && !event.modifiers) { root.wall = !root.wall; event.accepted = true }
+        else if (event.key === Qt.Key_A && (event.modifiers & Qt.ControlModifier)) {
+          const f = {}; for (const x of (root.deck.set || [])) f[x.uid] = true
+          root.selected = f; event.accepted = true
+        }
+      }
+
+      // ---- the cover's glow: the song's own colours, softly, behind it all
+      Item {
+        id: glow
+        anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+        height: parent.height * 0.62
+        clip: true          // the blur spreads past its edges; keep it inside, under the fade
+        readonly property string url: root.now && /^https:\/\//.test(root.now.thumb || "") ? root.now.thumb : ""
+        property bool showA: false
+        onUrlChanged: { if (showA) glowB.source = url; else glowA.source = url; showA = !showA }
+        Component.onCompleted: { glowA.source = url; showA = true }
+        Image { id: glowA; anchors.fill: parent; fillMode: Image.PreserveAspectCrop; sourceSize: Qt.size(48, 48); visible: false; asynchronous: true }
+        Image { id: glowB; anchors.fill: parent; fillMode: Image.PreserveAspectCrop; sourceSize: Qt.size(48, 48); visible: false; asynchronous: true }
+        MultiEffect {
+          source: glowA; anchors.fill: parent
+          blurEnabled: true; blur: 1.0; blurMax: 64; saturation: 0.25
+          opacity: glow.showA && glow.url !== "" ? 0.2 : 0
+          Behavior on opacity { NumberAnimation { duration: Style.duration(900); easing.type: Easing.OutCubic } }
+        }
+        MultiEffect {
+          source: glowB; anchors.fill: parent
+          blurEnabled: true; blur: 1.0; blurMax: 64; saturation: 0.25
+          opacity: !glow.showA && glow.url !== "" ? 0.2 : 0
+          Behavior on opacity { NumberAnimation { duration: Style.duration(900); easing.type: Easing.OutCubic } }
+        }
+        Rectangle {
+          anchors.fill: parent
+          gradient: Gradient {
+            GradientStop { position: 0; color: Util.alpha(root.ground, 0.15) }
+            GradientStop { position: 0.55; color: Util.alpha(root.ground, 0.55) }
+            GradientStop { position: 1; color: root.ground }
+          }
+        }
+      }
 
       Rectangle {
         anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
@@ -441,7 +681,7 @@ Item {
           ActionButton {
             visible: root.popped
             icon: "⤓"
-            text: strings.t("deck.sendHome").arg(root.homeWorkspace)
+            text: strings.t("deck.sendHome")
             tone: root.teal
             onClicked: root.goHome()
           }
@@ -670,7 +910,70 @@ Item {
               Layout.fillHeight: true
               clip: true
               spacing: 2
-              model: root.results
+              readonly property bool shelf: root.results.length === 0 && query.text.trim() === ""
+              model: shelf ? root.myPlaylists : root.results
+              // Before a search: your saved sets, then your own playlists.
+              header: Column {
+                width: found.width
+                spacing: 2
+                visible: found.shelf
+                height: found.shelf ? implicitHeight : 0
+                Label {
+                  visible: root.savedSets.length > 0
+                  text: strings.t("deck.yourSets").toUpperCase()
+                  font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.amber
+                  bottomPadding: 4
+                }
+                Repeater {
+                  model: root.savedSets
+                  delegate: Rectangle {
+                    id: saved
+                    required property var modelData
+                    width: found.width
+                    height: 52
+                    radius: Style.cornerRadius > 0 ? 4 : 0
+                    color: savedHover.hovered ? Util.alpha(root.ink, 0.05) : "transparent"
+                    RowLayout {
+                      anchors.fill: parent
+                      anchors.margins: 5
+                      spacing: 10
+                      // A little mosaic of its first covers.
+                      Grid {
+                        columns: 2
+                        spacing: 0
+                        Repeater {
+                          model: 4
+                          delegate: Cover { required property int index; size: 21; url: saved.modelData.thumbs[index] || ""; radius: 0 }
+                        }
+                      }
+                      ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 0
+                        Label { Layout.fillWidth: true; text: saved.modelData.name; font.bold: true; font.pixelSize: Style.font.caption }
+                        Label {
+                          Layout.fillWidth: true
+                          text: strings.tn("deck.count", saved.modelData.count).arg(saved.modelData.count)
+                                + (saved.modelData.minutes > 0 ? "  ·  " + root.span(saved.modelData.minutes * 60) : "")
+                          font.pixelSize: Style.font.caption
+                          opacity: 0.6
+                        }
+                      }
+                      RoundButton { visible: savedHover.hovered; glyph: "󰆴"; onClicked: { root.run(["deck", "forget", saved.modelData.name]); forgetDone.start() } }
+                      RoundButton { glyph: "󰐊"; onClicked: { root.run(["deck", "load", saved.modelData.name, "--replace"]); root.run(["deck", "next"]) } }
+                      RoundButton { glyph: "󰐒"; onClicked: root.run(["deck", "load", saved.modelData.name]) }
+                    }
+                    HoverHandler { id: savedHover }
+                  }
+                }
+                Timer { id: forgetDone; interval: 600; onTriggered: root.readShelf() }
+                Label {
+                  visible: root.myPlaylists.length > 0
+                  topPadding: root.savedSets.length > 0 ? 10 : 0
+                  bottomPadding: 4
+                  text: strings.t("deck.yourPlaylists").toUpperCase()
+                  font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.amber
+                }
+              }
               boundsBehavior: Flickable.StopAtBounds
               delegate: Rectangle {
                 id: hit
@@ -738,7 +1041,7 @@ Item {
               Label {
                 anchors.centerIn: parent
                 width: parent.width - 20
-                visible: root.results.length === 0
+                visible: root.results.length === 0 && !(found.shelf && (root.savedSets.length || root.myPlaylists.length))
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.Wrap
                 text: strings.t("deck.findHint")
@@ -754,33 +1057,6 @@ Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 12
-
-            // ---- played: tap to play again, drag back into the set
-            RowLayout {
-              Layout.fillWidth: true
-              spacing: 6
-              visible: (root.deck.played || []).length > 0
-              Label { text: strings.t("deck.played").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; opacity: 0.5 }
-              Repeater {
-                model: (root.deck.played || []).slice(-10)
-                delegate: Item {
-                  id: was
-                  required property var modelData
-                  implicitWidth: 30; implicitHeight: 30
-                  opacity: wasHover.hovered ? 1 : 0.45
-                  Cover { anchors.fill: parent; url: was.modelData.thumb || ""; size: 30 }
-                  HoverHandler { id: wasHover; cursorShape: Qt.PointingHandCursor }
-                  TapHandler { onTapped: root.run(["deck", "play", was.modelData.uid]) }
-                  DragHandler {
-                    target: null
-                    onActiveChanged: if (active) root.beginDrag("played", was.modelData.uid, null, was.modelData.title, was.modelData.thumb || "")
-                                     else if (root.dragging) root.endDrag()
-                    onCentroidChanged: if (active) root.moveGhost(was.mapToItem(stage, centroid.position.x, centroid.position.y))
-                  }
-                }
-              }
-              Item { Layout.fillWidth: true }
-            }
 
             // ---- now playing
             RowLayout {
@@ -861,6 +1137,7 @@ Item {
                     Layout.preferredWidth: Math.min(360, Math.max(200, root.stageItem.width * 0.24))
                     Layout.preferredHeight: 112
                     Layout.alignment: Qt.AlignTop
+                    Layout.rightMargin: 8
                     visible: !!root.now
                     active: root.seen && !!root.now
                     playing: root.deck.playing
@@ -905,9 +1182,11 @@ Item {
                     font.pixelSize: Style.font.caption; opacity: 0.6
                   }
                 }
-                RowLayout {
+                Flow {
                   Layout.topMargin: 4
+                  Layout.fillWidth: true
                   spacing: 8
+                  ActionButton { icon: "󰒮"; tone: root.teal; enabled: !!root.now; onClicked: root.run(["deck", "previous"]) }
                   ActionButton {
                     icon: root.deck.playing ? "󰏤" : "󰐊"
                     text: root.deck.playing ? strings.t("deck.pause") : strings.t("deck.play")
@@ -917,31 +1196,130 @@ Item {
                   ActionButton { icon: "󰒭"; text: strings.t("deck.next"); tone: root.teal; enabled: (root.deck.set || []).length > 0; onClicked: root.run(["deck", "next"]) }
                   ActionButton { icon: "󰒝"; text: strings.t("deck.shuffle"); tone: root.teal; enabled: (root.deck.set || []).length > 1; onClicked: root.run(["deck", "shuffle"]) }
                   ActionButton { icon: "✦"; text: strings.t("deck.fill"); onClicked: root.runLong(["deck", "fill"]) }
+                  // Sleep: off, 15, 30, 60 minutes, the end of this song.
+                  ActionButton {
+                    icon: "󰒲"
+                    text: !root.sleep ? "" : root.sleep.song ? strings.t("deck.sleepSong") : strings.t("deck.sleepIn").arg(root.sleepMinutes)
+                    tone: root.sleep ? root.amber : root.teal
+                    onClicked: root.nextSleep()
+                  }
+                  // Crossfade: Sonos fades one song into the next.
+                  ActionButton {
+                    visible: root.inSonos
+                    icon: "󰡍"
+                    text: strings.t("deck.crossfade")
+                    tone: root.deck.crossfade ? root.amber : root.teal
+                    onClicked: root.run(["deck", "crossfade", root.deck.crossfade ? "off" : "on"])
+                  }
                 }
               }
             }
 
-            // ---- up next
+            // ---- up next: how long it runs, when it ends; undo, save, find, the wall
             RowLayout {
               Layout.fillWidth: true
+              spacing: 14
               Label { text: strings.t("deck.upNext").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.amber }
               Label {
                 Layout.fillWidth: true
-                text: (root.deck.set || []).length > 0 ? strings.tn("deck.count", (root.deck.set || []).length).arg((root.deck.set || []).length) : ""
+                text: (root.deck.set || []).length > 0
+                  ? strings.tn("deck.count", (root.deck.set || []).length).arg((root.deck.set || []).length)
+                    + "  ·  " + root.span(root.setSeconds) + "  ·  " + strings.t("deck.endsAt").arg(root.clockAt(root.setSeconds))
+                  : ""
                 font.pixelSize: Style.font.caption
-                opacity: 0.55
+                opacity: 0.6
               }
+              // Picked songs: what to do with all of them.
               Label {
-                visible: (root.deck.set || []).length > 0
-                text: "󰆴  " + strings.t("deck.clear")
-                font.family: "Iosevka Nerd Font Propo"
+                visible: root.selectedUids.length > 0
+                text: strings.tn("deck.picked", root.selectedUids.length).arg(root.selectedUids.length)
                 font.pixelSize: Style.font.caption
-                opacity: clearHover.hovered ? 1 : 0.5
-                HoverHandler { id: clearHover; cursorShape: Qt.PointingHandCursor }
-                TapHandler { onTapped: root.run(["deck", "clear"]) }
+                color: root.amber
+              }
+              HeadLink { visible: root.selectedUids.length > 0; glyph: "󰐊"; text: strings.t("deck.bloomNow"); onTapped: root.placePicked("now") }
+              HeadLink { visible: root.selectedUids.length > 0; glyph: "󰒭"; text: strings.t("deck.bloomNext"); onTapped: root.placePicked("next") }
+              HeadLink { visible: root.selectedUids.length > 0; glyph: "󰐒"; text: strings.t("deck.bloomLater"); onTapped: root.placePicked("end") }
+              HeadLink { visible: root.selectedUids.length > 0; glyph: "󰅖"; text: strings.t("deck.remove"); onTapped: root.placePicked("remove") }
+              HeadLink { visible: root.selectedUids.length > 0; glyph: "󰜺"; onTapped: root.clearPicked() }
+              // Otherwise: the tools for the set.
+              HeadLink {
+                visible: root.selectedUids.length === 0 && (root.deck.undo || 0) > 0
+                glyph: "󰕌"; text: strings.t("deck.undo"); onTapped: root.run(["deck", "undo"])
+              }
+              HeadLink {
+                visible: root.selectedUids.length === 0 && (root.deck.set || []).length > 0
+                glyph: "󰆓"; text: strings.t("deck.save")
+                onTapped: { root.saving = true; root.filterOpen = false }
+              }
+              HeadLink {
+                visible: root.selectedUids.length === 0
+                glyph: "󰍉"; on: root.filterOpen
+                onTapped: { root.filterOpen = !root.filterOpen; if (!root.filterOpen) root.filter = ""; root.saving = false }
+              }
+              HeadLink {
+                visible: root.selectedUids.length === 0
+                glyph: root.wall ? "󰉹" : "󰕰"; on: root.wall
+                onTapped: root.wall = !root.wall
+              }
+              HeadLink {
+                visible: root.selectedUids.length === 0 && (root.deck.set || []).length > 0
+                glyph: "󰆴"; text: strings.t("deck.clear"); onTapped: root.run(["deck", "clear"])
               }
             }
+            // Naming a set to save, or finding a song in this one.
+            Rectangle {
+              Layout.fillWidth: true
+              visible: root.saving || root.filterOpen
+              implicitHeight: 36
+              radius: Style.cornerRadius > 0 ? 4 : 0
+              color: Util.alpha(root.ink, 0.04)
+              border.width: 1
+              border.color: root.amber
+              RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 10; anchors.rightMargin: 6
+                spacing: 8
+                Label { text: root.saving ? "󰆓" : "󰍉"; font.family: "Iosevka Nerd Font Propo"; color: root.amber }
+                TextInput {
+                  id: lineInput
+                  Layout.fillWidth: true
+                  color: root.ink
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                  clip: true
+                  onVisibleChanged: if (visible) {
+                    text = root.saving ? strings.t("deck.saveDefault").arg(new Date().toLocaleDateString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat)) : root.filter
+                    forceActiveFocus(); selectAll()
+                  }
+                  onTextChanged: if (root.filterOpen && !root.saving) root.filter = text
+                  onAccepted: {
+                    if (root.saving && text.trim() !== "") { root.run(["deck", "save", text.trim()]); root.saving = false; saveDone.start() }
+                    else stage.forceActiveFocus()
+                  }
+                  Keys.onEscapePressed: { root.saving = false; root.filterOpen = false; root.filter = ""; stage.forceActiveFocus() }
+                  Label {
+                    visible: lineInput.text === ""
+                    text: root.saving ? strings.t("deck.saveHint") : strings.t("deck.findInSet")
+                    opacity: 0.4
+                  }
+                }
+                ActionButton {
+                  visible: root.saving
+                  icon: "󰆓"; text: strings.t("deck.save")
+                  onClicked: if (lineInput.text.trim() !== "") { root.run(["deck", "save", lineInput.text.trim()]); root.saving = false; saveDone.start() }
+                }
+                RoundButton { glyph: "󰅖"; onClicked: { root.saving = false; root.filterOpen = false; root.filter = ""; stage.forceActiveFocus() } }
+              }
+              Timer { id: saveDone; interval: 800; onTriggered: root.readShelf() }
+            }
+
+            RowLayout {
+              Layout.fillWidth: true
+              Layout.fillHeight: true
+              spacing: 10
+
             Item {
+              id: listBox
               Layout.fillWidth: true
               Layout.fillHeight: true
 
@@ -952,11 +1330,19 @@ Item {
                 onEntered: root.dropIndex = setModel.count
                 onDropped: root.dropInSet(setModel.count)
               }
+              TapHandler { onTapped: { stage.forceActiveFocus(); if (root.selectedUids.length) root.clearPicked() } }
               ListView {
                 id: setList
                 anchors.fill: parent
+                visible: !root.wall
+                // Until you scroll it yourself, the top (played, then what's playing) stays in view.
+                property bool moved: false
+                onMovementStarted: moved = true
+                onCountChanged: if (!moved) topAgain.restart()
+                onOriginYChanged: if (!moved) topAgain.restart()
+                Timer { id: topAgain; interval: 60; onTriggered: setList.contentY = setList.originY }
                 clip: true
-                spacing: 4
+                spacing: 0
                 model: setModel
                 boundsBehavior: Flickable.StopAtBounds
                 interactive: !root.dragging
@@ -967,8 +1353,100 @@ Item {
                   NumberAnimation { properties: "opacity"; from: 0; to: 1; duration: Style.duration(200) }
                   NumberAnimation { properties: "scale"; from: 0.97; to: 1; duration: Style.duration(200); easing.type: Easing.OutCubic }
                 }
-                delegate: Rectangle {
-                  id: row
+
+                // ---- what's played (folded) and the playhead: the set as past, now and next.
+                header: Column {
+                  width: setList.width
+                  spacing: 4
+                  bottomPadding: 8
+                  // It grows once the song and what's played arrive: keep the top in view.
+                  onHeightChanged: if (!setList.moved) topAgain.restart()
+                  Item {
+                    width: parent.width
+                    height: 26
+                    visible: (root.deck.played || []).length > 0 && root.filter === ""
+                    Label {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: (root.playedOpen ? "󰅀  " : "󰅂  ") + strings.t("deck.played").toUpperCase() + "  ·  " + (root.deck.played || []).length
+                      font.family: "Iosevka Nerd Font Propo"
+                      font.pixelSize: Style.font.caption
+                      font.letterSpacing: 2
+                      opacity: playedHover.hovered ? 0.9 : 0.5
+                    }
+                    HoverHandler { id: playedHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: root.playedOpen = !root.playedOpen }
+                  }
+                  Repeater {
+                    model: root.playedOpen && root.filter === "" ? (root.deck.played || []) : []
+                    delegate: Rectangle {
+                      id: was
+                      required property var modelData
+                      width: setList.width
+                      height: 40
+                      radius: Style.cornerRadius > 0 ? 4 : 0
+                      color: wasHover.hovered ? Util.alpha(root.ink, 0.05) : "transparent"
+                      opacity: wasHover.hovered ? 1 : 0.55
+                      RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 40; anchors.rightMargin: 8
+                        spacing: 10
+                        Cover { url: was.modelData.thumb || ""; size: 30 }
+                        Label { Layout.fillWidth: true; text: was.modelData.title + "  ·  " + was.modelData.artist; font.pixelSize: Style.font.caption }
+                        Label { text: "󰑙"; font.family: "Iosevka Nerd Font Propo"; visible: wasHover.hovered; color: root.amber }
+                      }
+                      HoverHandler { id: wasHover; cursorShape: Qt.PointingHandCursor }
+                      TapHandler { onTapped: root.run(["deck", "play", was.modelData.uid]) }
+                      DragHandler {
+                        target: null
+                        onActiveChanged: if (active) root.beginDrag("played", was.modelData.uid, null, was.modelData.title, was.modelData.thumb || "")
+                                         else if (root.dragging) root.endDrag()
+                        onCentroidChanged: if (active) root.moveGhost(was.mapToItem(stage, centroid.position.x, centroid.position.y))
+                      }
+                    }
+                  }
+                  // The playhead.
+                  Rectangle {
+                    width: setList.width
+                    height: 46
+                    visible: !!root.now && root.filter === ""
+                    radius: Style.cornerRadius > 0 ? 5 : 0
+                    color: Util.alpha(root.amber, 0.08)
+                    clip: true
+                    Rectangle { width: 3; height: parent.height; color: root.amber }
+                    RowLayout {
+                      anchors.fill: parent
+                      anchors.leftMargin: 12; anchors.rightMargin: 12
+                      spacing: 12
+                      Label { text: strings.t("deck.nowShort").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 3; color: root.amber; Layout.preferredWidth: 34 }
+                      Cover { url: root.now ? root.now.thumb || "" : ""; size: 32 }
+                      Label {
+                        Layout.fillWidth: true
+                        text: root.now ? root.now.title + "  ·  " + root.now.artist : ""
+                        font.bold: true
+                        font.pixelSize: Style.font.caption
+                      }
+                      Equalizer { visible: root.deck.playing; on: root.deck.playing }
+                      Label {
+                        text: "−" + root.clock(root.nowLeft)
+                        font.pixelSize: Style.font.caption
+                        color: root.teal
+                      }
+                    }
+                    Rectangle {
+                      anchors.bottom: parent.bottom
+                      height: 2
+                      width: root.pos.length > 0 ? parent.width * Math.min(1, root.shownTime / root.pos.length) : 0
+                      gradient: Gradient {
+                        orientation: Gradient.Horizontal
+                        GradientStop { position: 0; color: root.amber }
+                        GradientStop { position: 1; color: root.teal }
+                      }
+                    }
+                  }
+                }
+
+                delegate: Item {
+                  id: slot
                   required property int index
                   required property string uid
                   required property string title
@@ -976,88 +1454,302 @@ Item {
                   required property string thumb
                   required property string service
                   required property string why
-                  readonly property bool isPinned: root.pinned(uid)
-                  readonly property bool lifted: root.dragging && root.dragFrom === "set" && root.dragUid === uid
+                  required property string chapter
+                  required property string warn
+                  required property real bpm
+                  required property string key
+                  required property real energy
+                  readonly property var info: root.chapters[index] || ({ name: "", opens: false, head: -1, count: 0, seconds: 0 })
+                  readonly property bool heading: info.opens && root.filter === ""
+                  readonly property bool isFolded: heading && !!root.folded[uid]
+                  readonly property bool shown: root.matches(title, artist) && !root.hiddenAt(index) && !isFolded
                   width: setList.width
-                  implicitHeight: 62
-                  radius: Style.cornerRadius > 0 ? 5 : 0
-                  color: rowHover.hovered || rowDrop.containsDrag ? Qt.rgba(1, 1, 1, 0.06) : Qt.rgba(1, 1, 1, 0.025)
-                  border.width: 1
-                  border.color: isPinned ? Util.alpha(Commons.Color.warning, 0.5) : (rowHover.hovered ? Qt.rgba(1, 1, 1, 0.12) : "transparent")
-                  opacity: lifted ? 0.3 : 1
-                  // Where a drop goes: a bright line above this row.
-                  Rectangle {
-                    anchors.left: parent.left; anchors.right: parent.right
-                    anchors.bottom: parent.top; anchors.bottomMargin: 1
-                    height: 3
-                    radius: 2
-                    color: root.amber
-                    visible: root.dragging && root.dropIndex === row.index
-                  }
-                  RowLayout {
-                    anchors.fill: parent
-                    anchors.margins: 6
-                    spacing: 12
-                    Label { text: String(row.index + 1); font.pixelSize: Style.font.caption; opacity: 0.4; Layout.preferredWidth: 22; horizontalAlignment: Text.AlignRight }
-                    Cover { url: row.thumb; size: 48 }
-                    ColumnLayout {
-                      Layout.fillWidth: true
-                      spacing: 0
-                      Label { Layout.fillWidth: true; text: row.title; font.bold: true }
+                  height: (heading ? 36 : 0) + (shown ? 66 : 0)
+                  visible: height > 0
+                  clip: true
+
+                  // ---- a chapter starts here: its name, how long, when; fold it, drag it, rename it
+                  Item {
+                    id: head
+                    visible: slot.heading
+                    width: parent.width
+                    height: 32
+                    RowLayout {
+                      anchors.fill: parent
+                      anchors.leftMargin: 4
+                      spacing: 10
                       Label {
-                        Layout.fillWidth: true
-                        text: row.artist + "  ·  " + (row.service === "applemusic" ? "Apple Music" : "YouTube Music")
-                        font.pixelSize: Style.font.caption
-                        opacity: 0.6
-                      }
-                      Label {
-                        Layout.fillWidth: true
-                        visible: row.why !== ""
-                        text: "✦ " + row.why
-                        font.pixelSize: Style.font.caption
+                        text: slot.isFolded ? "󰅂" : "󰅀"
+                        font.family: "Iosevka Nerd Font Propo"
                         color: root.amber
-                        opacity: 0.85
+                        HoverHandler { cursorShape: Qt.PointingHandCursor }
+                        TapHandler { onTapped: root.foldChapter(slot.uid) }
+                      }
+                      Label {
+                        visible: root.renaming !== slot.uid
+                        text: slot.info.name.toUpperCase()
+                        font.pixelSize: Style.font.caption
+                        font.letterSpacing: 3
+                        font.bold: true
+                        color: root.amber
+                        HoverHandler { cursorShape: Qt.IBeamCursor }
+                        TapHandler { onTapped: root.renaming = slot.uid }
+                      }
+                      TextInput {
+                        id: rename
+                        visible: root.renaming === slot.uid
+                        Layout.preferredWidth: 220
+                        text: slot.info.name
+                        color: root.amber
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                        onVisibleChanged: if (visible) { text = slot.info.name; forceActiveFocus(); selectAll() }
+                        onAccepted: { root.run(["deck", "chapter", slot.uid, text.trim()]); root.renaming = ""; stage.forceActiveFocus() }
+                        Keys.onEscapePressed: { root.renaming = ""; stage.forceActiveFocus() }
+                        onActiveFocusChanged: if (!activeFocus && root.renaming === slot.uid) root.renaming = ""
+                      }
+                      Label {
+                        text: strings.tn("deck.count", slot.info.count).arg(slot.info.count) + "  ·  " + root.span(slot.info.seconds)
+                              + "  ·  " + root.clockAt(root.startsAt[slot.index] || 0)
+                        font.pixelSize: Style.font.caption
+                        opacity: 0.5
+                      }
+                      Rectangle {
+                        Layout.fillWidth: true
+                        height: 1
+                        gradient: Gradient {
+                          orientation: Gradient.Horizontal
+                          GradientStop { position: 0; color: Util.alpha(root.amber, 0.5) }
+                          GradientStop { position: 1; color: Util.alpha(root.amber, 0) }
+                        }
+                      }
+                      Label {
+                        text: "󰅖"
+                        font.family: "Iosevka Nerd Font Propo"
+                        opacity: headHover.hovered ? 0.6 : 0
+                        HoverHandler { cursorShape: Qt.PointingHandCursor }
+                        TapHandler { onTapped: root.run(["deck", "chapter", slot.uid, ""]) }
                       }
                     }
-                    RoundButton { glyph: "󰐊"; tip: strings.t("deck.playNow"); onClicked: root.run(["deck", "play", row.uid]) }
-                    RoundButton { glyph: row.isPinned ? "󰐃" : "󰤰"; tip: row.isPinned ? strings.t("deck.unpin") : strings.t("deck.pin"); on: row.isPinned; onClicked: root.run(["deck", "pin", row.uid]) }
-                    RoundButton { glyph: "󰅖"; tip: strings.t("deck.remove"); onClicked: root.run(["deck", "remove", row.uid]) }
-                  }
-                  HoverHandler { id: rowHover; cursorShape: root.dragging ? Qt.ClosedHandCursor : Qt.OpenHandCursor }
-                  TapHandler {
-                    id: rowTap
-                    longPressThreshold: 0.35
-                    readonly property var song: ({ uid: row.uid, title: row.title, artist: row.artist, thumb: row.thumb })
-                    onTapped: function(point) {
-                      if (point.position.x > row.width - 120) return       // play, pin, remove
-                      root.openBloom("set", song, row.uid, row.mapToItem(root.stageItem, point.position.x, point.position.y))
+                    HoverHandler { id: headHover; cursorShape: root.dragging ? Qt.ClosedHandCursor : Qt.OpenHandCursor }
+                    DragHandler {
+                      target: null
+                      onActiveChanged: if (active) root.beginDrag("chapter", slot.uid, null, slot.info.name, slot.thumb)
+                                       else if (root.dragging) root.endDrag()
+                      onCentroidChanged: if (active) root.moveGhost(head.mapToItem(stage, centroid.position.x, centroid.position.y))
                     }
-                    onLongPressed: root.openBloom("set", song, row.uid, row.mapToItem(root.stageItem, rowTap.point.position.x, rowTap.point.position.y))
-                  }
-                  DragHandler {
-                    target: null
-                    grabPermissions: PointerHandler.CanTakeOverFromAnything
-                    onActiveChanged: {
-                      if (active) { if (root.bloomOpen) root.bloomFlick = true; else root.beginDrag("set", row.uid, null, row.title, row.thumb) }
-                      else if (root.bloomFlick) root.releaseFlick()
-                      else if (root.dragging) root.endDrag()
-                    }
-                    onCentroidChanged: if (active) {
-                      const at = row.mapToItem(root.stageItem, centroid.position.x, centroid.position.y)
-                      if (root.bloomFlick) root.aimBloom(at); else root.moveGhost(at)
+                    DropArea {
+                      anchors.fill: parent
+                      keys: ["deck-song"]
+                      onEntered: root.dropIndex = slot.index
+                      onPositionChanged: root.dropIndex = slot.index
+                      onDropped: root.dropInSet(slot.index)
                     }
                   }
-                  DropArea {
-                    id: rowDrop
-                    anchors.fill: parent
-                    keys: ["deck-song"]
-                    // The top half drops before this row, the bottom half after it.
-                    onPositionChanged: function(drag) { root.dropIndex = drag.y < height / 2 ? row.index : row.index + 1 }
-                    onEntered: function(drag) { root.dropIndex = drag.y < height / 2 ? row.index : row.index + 1 }
-                    onDropped: root.dropInSet(root.dropIndex)
+
+                  Rectangle {
+                    id: row
+                    readonly property bool isPinned: root.pinned(slot.uid)
+                    readonly property bool lifted: root.dragging && root.dragFrom === "set" && root.dragUid === slot.uid
+                    readonly property bool picked: !!root.selected[slot.uid]
+                    readonly property var warns: slot.warn === "" ? [] : slot.warn.split(",")
+                    y: slot.heading ? 36 : 0
+                    visible: slot.shown
+                    width: parent.width
+                    height: 62
+                    radius: Style.cornerRadius > 0 ? 5 : 0
+                    color: picked ? Util.alpha(root.amber, 0.13)
+                         : rowHover.hovered || rowDrop.containsDrag ? Util.alpha(root.ink, 0.06) : Util.alpha(root.ink, 0.025)
+                    border.width: 1
+                    border.color: picked ? root.amber : isPinned ? Util.alpha(Commons.Color.warning, 0.5) : (rowHover.hovered ? Util.alpha(root.ink, 0.12) : "transparent")
+                    opacity: lifted ? 0.3 : 1
+                    // Where a drop goes: a bright line above this row.
+                    Rectangle {
+                      anchors.left: parent.left; anchors.right: parent.right
+                      anchors.bottom: parent.top; anchors.bottomMargin: 1
+                      height: 3
+                      radius: 2
+                      color: root.amber
+                      visible: root.dragging && root.dropIndex === slot.index && !slot.heading
+                    }
+                    RowLayout {
+                      anchors.fill: parent
+                      anchors.margins: 6
+                      spacing: 12
+                      // The number; on hover, start a chapter here.
+                      Item {
+                        Layout.preferredWidth: 22
+                        Layout.fillHeight: true
+                        Label {
+                          anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                          visible: !(rowHover.hovered && !slot.heading)
+                          text: String(slot.index + 1); font.pixelSize: Style.font.caption; opacity: 0.4
+                        }
+                        Label {
+                          anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                          visible: rowHover.hovered && !slot.heading
+                          text: "§"
+                          color: root.amber
+                          opacity: chapterHover.hovered ? 1 : 0.6
+                          HoverHandler { id: chapterHover; cursorShape: Qt.PointingHandCursor }
+                          TapHandler { onTapped: root.newChapter(slot.uid) }
+                        }
+                      }
+                      Cover { url: slot.thumb; size: 48 }
+                      ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 0
+                        RowLayout {
+                          Layout.fillWidth: true
+                          spacing: 8
+                          Label { Layout.fillWidth: true; Layout.maximumWidth: implicitWidth; text: slot.title; font.bold: true }
+                          // Key and tempo, from Beatport.
+                          Rectangle {
+                            visible: slot.key !== "" || slot.bpm > 0
+                            implicitWidth: kt.implicitWidth + 10
+                            implicitHeight: kt.implicitHeight + 2
+                            radius: Style.cornerRadius > 0 ? 3 : 0
+                            color: "transparent"
+                            border.width: 1
+                            border.color: Util.alpha(root.teal, 0.35)
+                            Label {
+                              id: kt
+                              anchors.centerIn: parent
+                              text: [slot.key, slot.bpm > 0 ? Math.round(slot.bpm) : ""].filter(x => x !== "").join(" · ")
+                              font.pixelSize: Style.font.caption - 1
+                              color: root.teal
+                            }
+                          }
+                          Item { Layout.fillWidth: true }
+                        }
+                        Label {
+                          Layout.fillWidth: true
+                          text: slot.artist + "  ·  " + (slot.service === "applemusic" ? "Apple Music" : "YouTube Music")
+                          font.pixelSize: Style.font.caption
+                          opacity: 0.6
+                        }
+                        Label {
+                          Layout.fillWidth: true
+                          visible: slot.why !== "" || row.warns.length > 0
+                          text: row.warns.length > 0
+                                ? "◆ " + row.warns.map(w => strings.t("deck.warn." + w)).join("  ·  ")
+                                : "✦ " + slot.why
+                          font.pixelSize: Style.font.caption
+                          color: row.warns.length > 0 ? Commons.Color.warning : root.amber
+                          opacity: 0.85
+                        }
+                      }
+                      // When it starts.
+                      Label {
+                        text: root.clockAt(root.startsAt[slot.index] || 0)
+                        font.pixelSize: Style.font.caption
+                        color: root.teal
+                        opacity: 0.75
+                      }
+                      RoundButton { glyph: "󰐊"; tip: strings.t("deck.playNow"); onClicked: root.run(["deck", "play", slot.uid]) }
+                      RoundButton { glyph: row.isPinned ? "󰐃" : "󰤰"; tip: row.isPinned ? strings.t("deck.unpin") : strings.t("deck.pin"); on: row.isPinned; onClicked: root.run(["deck", "pin", slot.uid]) }
+                      RoundButton { glyph: "󰅖"; tip: strings.t("deck.remove"); onClicked: root.run(["deck", "remove", slot.uid]) }
+                    }
+                    HoverHandler { id: rowHover; cursorShape: root.dragging ? Qt.ClosedHandCursor : Qt.OpenHandCursor }
+                    TapHandler {
+                      id: rowTap
+                      longPressThreshold: 0.35
+                      readonly property var song: ({ uid: slot.uid, title: slot.title, artist: slot.artist, thumb: slot.thumb })
+                      onTapped: function(point) {
+                        stage.forceActiveFocus()
+                        if (point.position.x > row.width - 120 || point.position.x < 40) return       // the number; play, pin, remove
+                        if (point.modifiers & (Qt.ControlModifier | Qt.ShiftModifier)) { root.pick(slot.uid, point.modifiers); return }
+                        root.openBloom("set", song, slot.uid, row.mapToItem(root.stageItem, point.position.x, point.position.y))
+                      }
+                      onLongPressed: root.openBloom("set", song, slot.uid, row.mapToItem(root.stageItem, rowTap.point.position.x, rowTap.point.position.y))
+                    }
+                    DragHandler {
+                      target: null
+                      grabPermissions: PointerHandler.CanTakeOverFromAnything
+                      onActiveChanged: {
+                        if (active) { if (root.bloomOpen) root.bloomFlick = true; else root.beginDrag("set", slot.uid, null, slot.title, slot.thumb) }
+                        else if (root.bloomFlick) root.releaseFlick()
+                        else if (root.dragging) root.endDrag()
+                      }
+                      onCentroidChanged: if (active) {
+                        const at = row.mapToItem(root.stageItem, centroid.position.x, centroid.position.y)
+                        if (root.bloomFlick) root.aimBloom(at); else root.moveGhost(at)
+                      }
+                    }
+                    DropArea {
+                      id: rowDrop
+                      anchors.fill: parent
+                      keys: ["deck-song"]
+                      // The top half drops before this row, the bottom half after it.
+                      onPositionChanged: function(drag) { root.dropIndex = drag.y < height / 2 ? slot.index : slot.index + 1 }
+                      onEntered: function(drag) { root.dropIndex = drag.y < height / 2 ? slot.index : slot.index + 1 }
+                      onDropped: root.dropInSet(root.dropIndex)
+                    }
                   }
                 }
               }
+
+              // ---- the wall: the set as big covers, for across the room
+              GridView {
+                id: wallView
+                anchors.fill: parent
+                visible: root.wall
+                clip: true
+                model: setModel
+                boundsBehavior: Flickable.StopAtBounds
+                cellWidth: Math.floor(width / Math.max(1, Math.floor(width / 176)))
+                cellHeight: cellWidth + 44
+                delegate: Item {
+                  id: tile
+                  required property int index
+                  required property string uid
+                  required property string title
+                  required property string artist
+                  required property string thumb
+                  readonly property bool picked: !!root.selected[uid]
+                  width: wallView.cellWidth
+                  height: wallView.cellHeight
+                  opacity: root.matches(title, artist) ? 1 : 0.15
+                  Cover {
+                    id: big
+                    x: 7; y: 7
+                    width: parent.width - 14; height: width
+                    size: width
+                    url: tile.thumb
+                    border.width: tile.picked ? 2 : 0
+                    border.color: root.amber
+                    scale: wallHover.hovered ? 1.03 : 1
+                    Behavior on scale { NumberAnimation { duration: Style.duration(160); easing.type: Easing.OutCubic } }
+                  }
+                  Rectangle {
+                    x: big.x + 6; y: big.y + 6
+                    implicitWidth: num.implicitWidth + 10; implicitHeight: num.implicitHeight + 4
+                    radius: Style.cornerRadius > 0 ? 3 : 0
+                    color: Util.alpha(root.ground, 0.75)
+                    Label { id: num; anchors.centerIn: parent; text: String(tile.index + 1); font.pixelSize: Style.font.caption; color: root.amber }
+                  }
+                  Rectangle {
+                    anchors.right: big.right; anchors.bottom: big.bottom; anchors.margins: 6
+                    implicitWidth: at.implicitWidth + 10; implicitHeight: at.implicitHeight + 4
+                    radius: Style.cornerRadius > 0 ? 3 : 0
+                    color: Util.alpha(root.ground, 0.75)
+                    Label { id: at; anchors.centerIn: parent; text: root.clockAt(root.startsAt[tile.index] || 0); font.pixelSize: Style.font.caption; color: root.teal }
+                  }
+                  Label { x: 8; y: big.y + big.height + 6; width: parent.width - 16; text: tile.title; font.bold: true; font.pixelSize: Style.font.caption }
+                  Label { x: 8; y: big.y + big.height + 24; width: parent.width - 16; text: tile.artist; font.pixelSize: Style.font.caption; opacity: 0.6 }
+                  HoverHandler { id: wallHover; cursorShape: Qt.PointingHandCursor }
+                  TapHandler {
+                    onTapped: function(point) {
+                      stage.forceActiveFocus()
+                      if (point.modifiers & (Qt.ControlModifier | Qt.ShiftModifier)) { root.pick(tile.uid, point.modifiers); return }
+                      root.openBloom("set", { uid: tile.uid, title: tile.title, artist: tile.artist, thumb: tile.thumb }, tile.uid,
+                                     tile.mapToItem(root.stageItem, point.position.x, point.position.y))
+                    }
+                  }
+                }
+              }
+
               Label {
                 anchors.centerIn: parent
                 visible: setModel.count === 0
@@ -1067,6 +1759,45 @@ Item {
                 text: strings.t("deck.setHint")
                 opacity: 0.45
               }
+              // ---- the heads-up: the next song, in the last 20 seconds of this one
+              Rectangle {
+                id: headsUp
+                readonly property var nextSong: (root.deck.set || [])[0] || null
+                readonly property bool shown: root.deck.playing && !!nextSong && root.pos.length > 0
+                                              && root.nowLeft > 0 && root.nowLeft <= 20 && !root.dragging && !root.bloomOpen
+                z: 5
+                width: Math.min(380, parent.width - 24)
+                height: 64
+                y: 54
+                x: shown ? parent.width - width - 12 : parent.width + 12
+                opacity: shown ? 1 : 0
+                visible: opacity > 0
+                Behavior on x { NumberAnimation { duration: Style.duration(260); easing.type: Easing.OutCubic } }
+                Behavior on opacity { NumberAnimation { duration: Style.duration(200) } }
+                radius: Style.cornerRadius > 0 ? 6 : 0
+                color: Qt.tint(root.ground, Util.alpha(root.amber, 0.1))
+                border.width: 1
+                border.color: Util.alpha(root.amber, 0.6)
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.margins: 8
+                  spacing: 10
+                  Cover { url: headsUp.nextSong ? headsUp.nextSong.thumb || "" : ""; size: 46 }
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 0
+                    Label { text: strings.t("deck.nextIn").arg(Math.ceil(root.nowLeft)).toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.amber }
+                    Label { Layout.fillWidth: true; text: headsUp.nextSong ? headsUp.nextSong.title : ""; font.bold: true; font.pixelSize: Style.font.caption }
+                    Label { Layout.fillWidth: true; text: headsUp.nextSong ? headsUp.nextSong.artist : ""; font.pixelSize: Style.font.caption; opacity: 0.6 }
+                  }
+                  ColumnLayout {
+                    spacing: 4
+                    HeadLink { glyph: "󰒬"; text: strings.t("deck.skipIt"); onTapped: root.run(["deck", "remove", headsUp.nextSong.uid]) }
+                    HeadLink { glyph: "󰐒"; text: strings.t("deck.bloomLater"); onTapped: root.run(["deck", "move", headsUp.nextSong.uid, String((root.deck.set || []).length)]) }
+                  }
+                }
+              }
+
               // The end-of-set marker, when dropping below the last song.
               Rectangle {
                 x: 0
@@ -1074,9 +1805,35 @@ Item {
                 height: 3
                 radius: 2
                 color: root.amber
-                y: Math.min(setList.contentHeight, setList.height) + 1
-                visible: root.dragging && root.dropIndex === setModel.count && setModel.count > 0
+                y: Math.min(setList.contentHeight + setList.originY - setList.contentY, setList.height) + 1
+                visible: root.dragging && root.dropIndex === setModel.count && setModel.count > 0 && !root.wall
               }
+
+              // ---- back to the top, or to the end, once you've scrolled away
+              Column {
+                anchors.right: parent.right; anchors.bottom: parent.bottom
+                anchors.margins: 12
+                spacing: 8
+                readonly property var list: root.wall ? wallView : setList
+                Pill {
+                  shown: parent.list.contentY > parent.list.originY + 160
+                  glyph: "󰁝"; text: root.now ? strings.t("deck.nowShort") : strings.t("deck.top")
+                  onTapped: root.toTop()
+                }
+                Pill {
+                  shown: parent.list.contentY < parent.list.originY + parent.list.contentHeight - parent.list.height - 160
+                  glyph: "󰁅"; text: strings.t("deck.end")
+                  onTapped: root.toEnd()
+                }
+              }
+            }
+
+            // ---- the minimap: the whole set at a glance, its energy, where you are
+            Minimap {
+              Layout.preferredWidth: 36
+              Layout.fillHeight: true
+              visible: setModel.count > 8
+            }
             }
           }
         }
@@ -1655,6 +2412,123 @@ Item {
         Binding on height { when: !eq.on; value: 3 }
       }
     }
+  }
+
+  // A quiet link in a header: a glyph and maybe a word.
+  component HeadLink: Item {
+    id: hl
+    property string glyph: ""
+    property string text: ""
+    property bool on: false
+    signal tapped()
+    implicitWidth: hlRow.implicitWidth
+    implicitHeight: hlRow.implicitHeight
+    Row {
+      id: hlRow
+      spacing: 6
+      Label { text: hl.glyph; font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption; color: hl.on ? root.amber : root.ink }
+      Label { visible: hl.text !== ""; text: hl.text; font.pixelSize: Style.font.caption; color: hl.on ? root.amber : root.ink }
+    }
+    opacity: hlHover.hovered || hl.on ? 1 : 0.55
+    HoverHandler { id: hlHover; cursorShape: Qt.PointingHandCursor }
+    TapHandler { onTapped: hl.tapped() }
+  }
+
+  // A floating pill over the list: back to the top, on to the end.
+  component Pill: Rectangle {
+    id: pill
+    property string glyph: ""
+    property string text: ""
+    property bool shown: false
+    signal tapped()
+    implicitWidth: pillRow.implicitWidth + 22
+    implicitHeight: 30
+    radius: 15
+    color: Qt.tint(root.ground, Util.alpha(root.amber, pillHover.hovered ? 0.3 : 0.16))
+    border.width: 1
+    border.color: Util.alpha(root.amber, 0.7)
+    opacity: shown ? 1 : 0
+    scale: shown ? 1 : 0.96
+    visible: opacity > 0
+    Behavior on opacity { NumberAnimation { duration: Style.duration(shown ? 180 : 120); easing.type: Easing.OutCubic } }
+    Behavior on scale { NumberAnimation { duration: Style.duration(180); easing.type: Easing.OutCubic } }
+    Row {
+      id: pillRow
+      anchors.centerIn: parent
+      spacing: 6
+      Label { text: pill.glyph; font.family: "Iosevka Nerd Font Propo"; color: root.amber }
+      Label { text: pill.text.toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.amber }
+    }
+    HoverHandler { id: pillHover; cursorShape: Qt.PointingHandCursor }
+    TapHandler { onTapped: pill.tapped() }
+  }
+
+  // The whole set in a strip: each song a tick (by its energy, accent when
+  // it's high, cyan when calm), the energy as a line, marks where something
+  // doesn't sit well, chapters as gaps, and the part you can see. Tap or drag
+  // to go there.
+  component Minimap: Item {
+    id: map
+    readonly property var set: root.deck.set || []
+    readonly property var list: root.wall ? wallView : setList
+    Canvas {
+      id: paint
+      anchors.fill: parent
+      onPaint: {
+        const g = getContext("2d")
+        g.reset()
+        const n = map.set.length
+        if (!n) return
+        const h = height, w = width, step = h / n
+        const css = (c, a) => "rgba(" + Math.round(c.r * 255) + "," + Math.round(c.g * 255) + "," + Math.round(c.b * 255) + "," + a + ")"
+        const tone = (e) => e > 0 ? css(Qt.tint(root.teal, Util.alpha(root.amber, Math.min(1, Math.max(0, (e - 2) / 7)))), 0.85)
+                                  : css(root.ink, 0.22)
+        for (let i = 0; i < n; i++) {
+          const s = map.set[i]
+          const c = root.chapters[i]
+          const y = i * step
+          if (c && c.opens && i > 0) { g.fillStyle = css(root.amber, 0.9); g.fillRect(0, y, w, 1) }
+          g.fillStyle = tone(s.energy || 0)
+          g.fillRect(w - 6, y + (step > 3 ? 0.5 : 0), 6, Math.max(1, step - (step > 3 ? 1 : 0)))
+          if ((s.warn || []).length) { g.fillStyle = css(Commons.Color.warning, 1); g.fillRect(0, y + step / 2 - 1.5, 3, 3) }
+        }
+        // The energy line: further left is higher.
+        g.strokeStyle = css(root.amber, 0.9)
+        g.lineWidth = 1.5
+        g.lineJoin = "round"
+        g.beginPath()
+        let started = false
+        for (let i = 0; i < n; i++) {
+          const e = map.set[i].energy || 0
+          if (!e) continue
+          const x = (w - 12) * (1 - (e - 1) / 9) + 2, y = (i + 0.5) * step
+          if (!started) { g.moveTo(x, y); started = true } else g.lineTo(x, y)
+        }
+        g.stroke()
+      }
+      Connections { target: root; function onDeckChanged() { paint.requestPaint() } }
+      onWidthChanged: requestPaint()
+      onHeightChanged: requestPaint()
+    }
+    // What you can see.
+    Rectangle {
+      readonly property real total: Math.max(1, map.list.contentHeight)
+      x: -2
+      width: parent.width + 4
+      y: Math.max(0, Math.min(parent.height - height, (map.list.contentY - map.list.originY) / total * parent.height))
+      height: Math.max(12, Math.min(parent.height, map.list.height / total * parent.height))
+      radius: Style.cornerRadius > 0 ? 3 : 0
+      color: Util.alpha(root.ink, 0.06)
+      border.width: 1
+      border.color: Util.alpha(root.ink, 0.3)
+    }
+    function go(y) {
+      const i = Math.max(0, Math.min(map.set.length - 1, Math.floor(y / height * map.set.length)))
+      map.list.positionViewAtIndex(i, root.wall ? GridView.Center : ListView.Center)
+    }
+    HoverHandler { cursorShape: Qt.PointingHandCursor }
+    TapHandler { onTapped: function(point) { map.go(point.position.y) } }
+    DragHandler { target: null; onCentroidChanged: if (active) map.go(centroid.position.y) }
   }
 
   component RoundButton: Rectangle {
