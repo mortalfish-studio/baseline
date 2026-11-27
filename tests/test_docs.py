@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 REPO = Path(__file__).resolve().parent.parent
-_loader = importlib.machinery.SourceFileLoader("afterlight_docs", str(REPO / "bin/afterlight"))
+_loader = importlib.machinery.SourceFileLoader("afterlight_docs", str(REPO / "bin/afterlight.py"))
 al = importlib.util.module_from_spec(importlib.util.spec_from_loader("afterlight_docs", _loader))
 _loader.exec_module(al)
 CHANGES = (REPO / "docs/system-changes.md").read_text()

@@ -22,7 +22,7 @@ def load_module(home):
     env = {k: v for k, v in os.environ.items() if not k.startswith("XDG_")}
     env["HOME"] = str(home)
     with mock.patch.dict(os.environ, env, clear=True):
-        loader = importlib.machinery.SourceFileLoader(f"afterlight_uninstall_{id(home)}", str(ROOT / "bin/afterlight"))
+        loader = importlib.machinery.SourceFileLoader(f"afterlight_uninstall_{id(home)}", str(ROOT / "bin/afterlight.py"))
         module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(module)
     return module

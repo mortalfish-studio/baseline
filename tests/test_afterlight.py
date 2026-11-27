@@ -21,7 +21,7 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
-_loader = importlib.machinery.SourceFileLoader("afterlight_under_test", str(ROOT / "bin/afterlight"))
+_loader = importlib.machinery.SourceFileLoader("afterlight_under_test", str(ROOT / "bin/afterlight.py"))
 al = importlib.util.module_from_spec(importlib.util.spec_from_loader(_loader.name, _loader))
 _loader.exec_module(al)
 
@@ -1103,9 +1103,53 @@ class DeckPlaylistTests(TempCase):
             return {}
         self.patch("sonos_call", call)
         songs = [{"uid": f"u{n}", "service": "applemusic", "id": str(100 + n)} for n in range(80)]
-        pushed = al.deck_sonos_push({"ip": "192.168.1.10", "id": "RINCON_000E58BC46FC01400"}, songs, "13")
-        self.assertEqual(len(pushed), al.SONOS_AHEAD + 1)
+        room = {"ip": "192.168.1.10", "id": "RINCON_000E58BC46FC01400"}
+        pushed = al.deck_sonos_push(room, songs, "13")
+        self.assertEqual(pushed, ["u0"])                      # the first plays at once
+        # The rest follow in the background, up to SONOS_AHEAD of them.
+        al.deck_update(lambda d: d.update(now=songs[0], set=songs[1:], playing=True, pushed=pushed, pushedFrom=1,
+                                          where={"kind": "sonos", "room": room["id"]}))
+        self.patch("deck_where_room", lambda d: room)
+        self.patch("sonos_apple_sn", lambda: "13")
+        def call2(ip, service, action, args=None, timeout=2.5):
+            if action == "GetPositionInfo":
+                return {"Track": "1"}
+            if action == "GetMediaInfo":
+                return {"NrTracks": str(len(added))}
+            return call(ip, service, action, args, timeout)
+        self.patch("sonos_call", call2)
+        al.DECK.with_name("deck-sonos.again").touch()
+        al.deck_sonos_sync()
+        d = al.deck_read()
+        self.assertEqual(len(d["pushed"]), al.SONOS_AHEAD + 1)
         self.assertEqual(len(added), al.SONOS_AHEAD + 1)
+        self.assertEqual(d["pushedFrom"], 1)                  # kept, so the watcher counts from the right place
+
+    def test_next_in_a_room_jumps_within_its_queue(self):
+        calls = []
+        def call(ip, service, action, args=None, timeout=2.5):
+            calls.append((action, (args or {}).get("Target")))
+            return {"CurrentURI": "x-rincon-queue:RINCON_X#0"} if action == "GetMediaInfo" else {}
+        self.patch("sonos_call", call)
+        self.patch("deck_where_room", lambda d: {"ip": "192.168.1.10", "id": "RINCON_X", "name": "Quiet Room"})
+        self.patch("sonos_apple_sn", lambda: "13")
+        self.patch("sonos_now", lambda room: {"track": {}})
+        self.patch("toast", lambda *a, **k: None)
+        self.patch("deck_watch", lambda: None)
+        synced = []
+        self.patch("deck_sonos_soon", lambda: synced.append(1))
+        a, b, c = ({"uid": u, "service": "applemusic", "id": str(n), "title": u, "artist": ""} for n, u in enumerate("abc"))
+        deck = {**al.DECK_EMPTY, "now": a, "set": [b, c], "playing": True, "pushed": ["a", "b", "c"], "pushedFrom": 4}
+        al.deck_start(deck)
+        self.assertIn(("Seek", 5), calls)                     # b is track 5: straight there
+        self.assertNotIn(("RemoveAllTracksFromQueue", None), calls)
+        self.assertEqual((deck["now"]["uid"], synced), ("b", [1]))
+
+    def test_sonos_queue_changes_only_what_differs(self):
+        # Playing b (track 2 of a, b, c, d); the set is now c, x, d: c stays, d goes, x and d go on.
+        self.assertEqual(al.deck_sonos_plan(["a", "b", "c", "d"], 1, 2, "b", ["c", "x", "d"]), (1, ["x", "d"]))
+        self.assertEqual(al.deck_sonos_plan(["a", "b", "c"], 1, 2, "b", ["c", "e"]), (1, ["e"]))      # Auto-DJ added e
+        self.assertEqual(al.deck_sonos_plan(["b", "c"], 5, 9, "b", ["c"]), (0, ["c"]))               # lost track: redo
 
 
 class DeckAndPlayerTabTests(TempCase):

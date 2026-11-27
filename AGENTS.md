@@ -1,6 +1,6 @@
 # Working on Baseline
 
-Baseline is an Omarchy desktop system: looks (themes), the bar panel (`plugin/mortalfish.baseline/`), Baseline Studio, the `afterlight` command (`bin/afterlight`), and the install/health tooling. Read `README.md` first.
+Baseline is an Omarchy desktop system: looks (themes), the bar panel (`plugin/mortalfish.baseline/`), Baseline Studio, the `afterlight` command (`bin/afterlight`, a launcher for `bin/afterlight.py`, where the code is), and the install/health tooling. Read `README.md` first.
 
 ## Every change keeps the docs current
 
@@ -8,7 +8,7 @@ Other people install this from GitHub, so the docs are part of the change, not a
 
 | If you change… | Update |
 |---|---|
-| anything Baseline links, writes or replaces outside the repo, needs sudo for, runs in the background, or fetches from the network | `docs/system-changes.md`, and `managed_paths()` in `bin/afterlight` so the snapshot and `afterlight uninstall` cover it |
+| anything Baseline links, writes or replaces outside the repo, needs sudo for, runs in the background, or fetches from the network | `docs/system-changes.md`, and `managed_paths()` in `bin/afterlight.py` so the snapshot and `afterlight uninstall` cover it |
 | `install.sh`, prerequisites, apps it installs, the install command | `docs/install.md` and the README's install section |
 | the Chrome add-on (`chrome/`) or its native host | `docs/chrome-extension.md`, and bump `version` in its `manifest.json` |
 | where an app (T3 Code, Grok Bot, Superwhisper, Chrome) is wired in | `docs/adapting.md` |

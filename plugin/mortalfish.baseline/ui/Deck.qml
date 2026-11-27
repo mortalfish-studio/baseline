@@ -226,6 +226,21 @@ Item {
   property var queue: []
   property string status: ""
   readonly property bool busy: runner.running
+  // Play, pause and next show at once, before the command (and the speaker)
+  // answers; the next read puts in what really happened.
+  function playPause() {
+    const on = !deck.playing
+    deck = Object.assign({}, deck, { playing: on, paused: !on })
+    run(["deck", on ? "play" : "pause"])
+  }
+  function skip() {
+    const set = deck.set || []
+    if (set.length === 0) return
+    deck = Object.assign({}, deck, { now: set[0], set: set.slice(1), playing: true,
+                                     played: (deck.played || []).concat(deck.now ? [deck.now] : []) })
+    syncSet()
+    run(["deck", "next"])
+  }
   function run(args) {
     queue = queue.concat([args])
     if (!runner.running) next()
@@ -688,7 +703,7 @@ Item {
         else if (root.filterOpen || root.saving) { root.filterOpen = false; root.saving = false; root.filter = "" }
         else if (root.popped) root.goHome()
       }
-      Keys.onSpacePressed: root.run(["deck", root.deck.playing ? "pause" : "play"])
+      Keys.onSpacePressed: root.playPause()
       // Home and End, N for what's playing, / to find a song, Ctrl+Z to undo,
       // Delete for the picked songs, W for the wall.
       Keys.onPressed: function(event) {
@@ -1404,9 +1419,9 @@ Item {
                     icon: root.deck.playing ? "󰏤" : "󰐊"
                     text: root.deck.playing ? strings.t("deck.pause") : strings.t("deck.play")
                     enabled: !!root.now || (root.deck.set || []).length > 0
-                    onClicked: root.run(["deck", root.deck.playing ? "pause" : "play"])
+                    onClicked: root.playPause()
                   }
-                  ActionButton { icon: "󰒭"; text: strings.t("deck.next"); tone: root.teal; enabled: (root.deck.set || []).length > 0; onClicked: root.run(["deck", "next"]) }
+                  ActionButton { icon: "󰒭"; text: strings.t("deck.next"); tone: root.teal; enabled: (root.deck.set || []).length > 0; onClicked: root.skip() }
                   // Playing above; the set and the night below the bar.
                   Rectangle { width: 1; height: 30; color: Util.alpha(root.ink, 0.18) }
                   ActionButton { icon: "✦"; text: strings.t("deck.fill"); onClicked: root.runLong(["deck", "fill", "--service", root.service]) }
