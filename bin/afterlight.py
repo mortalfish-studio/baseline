@@ -4252,14 +4252,24 @@ def deck_page(song, op):
 def deck_can_quiet(song):
     """Can the app a song plays in be paused on its own, without touching any
     other tab? (Apple Music always; the others with add-on 1.12.)"""
-    return song.get("service") == "applemusic" or bool(deck_page(song, {"type": "pause-media", "dry": True}).get("ok"))
+    if song.get("service") == "applemusic":
+        return True
+    reply = deck_page(song, {"type": "pause-media", "dry": True})
+    # Beatport's player isn't an element on the page; its bar's Pause button is.
+    return bool(reply.get("ok")) and (reply.get("count", 0) > 0 or song.get("service") == "beatport")
 
 
 def deck_quiet(song):
     """Pause the app a song played in (switching to another app mid-song)."""
     if song.get("service") == "applemusic":
         am_bridge({"action": "pause"}, timeout=4)
-    elif not deck_page(song, {"type": "pause-media"}).get("ok"):
+        return
+    reply = deck_page(song, {"type": "pause-media"})
+    if song.get("service") == "beatport" and reply.get("ok") and not reply.get("count"):
+        if beatport_player_playing():
+            beatport_bridge({"type": "page", "op": {"type": "click", "label": "^Pause$", "region": "bar", "wait": 1500}}, timeout=4)
+        return
+    if not reply.get("ok") or not reply.get("count"):
         media_command("pause")
 
 

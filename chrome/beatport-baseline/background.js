@@ -132,7 +132,7 @@ async function appleMusic(op, tab) {
           const media = [...document.querySelectorAll("audio, video")];
           const kitLevel = typeof kit.volume === "number" ? kit.volume : null;
           const was = kitLevel !== null ? kitLevel : (media[0] ? media[0].volume : null);
-          if (op.level !== null) {
+          if (typeof op.level === "number" && Number.isFinite(op.level)) {  // no level: only read it
             if (kitLevel !== null) kit.volume = op.level;
             for (const el of media) el.volume = op.level;
           }

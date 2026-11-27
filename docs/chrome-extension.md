@@ -52,7 +52,7 @@ Baseline panel / mouse ──► afterlight beatport … ──► socket ($XDG_
 |---|---|
 | `manifest.json` | permissions: native messaging, tabs, scripting; only `beatport.com`, `youtube.com`, `music.youtube.com` |
 | `background.js` | connects to the native host and handles each request: `open`, `check`, `page`, `fetch`, `scratch`, `media`, `tabs`; passes playlists back |
-| `bridge.js` | runs inside the page: finds and clicks things (`click`, with `first` for the page's own button rather than a recommendation's; `steps`), browses YouTube Music (`ytm-browse`), and quiets that page's audio and video (`pause-media`; `dry` only says whether it could), so the Deck can start the next song before it stops the last |
+| `bridge.js` | runs inside the page: finds and clicks things (`click`, with `first` for the page's own button rather than a recommendation's; `steps`), browses YouTube Music (`ytm-browse`), and quiets that page's audio and video (`pause-media`; `dry` only says whether it could, and how many players it found: Beatport's player isn't on the page, so the Deck presses its bar's Pause instead), so the Deck can start the next song before it stops the last |
 | `background.js` → `appleMusic()` | one fixed function run in the Apple Music page's own world (Apple's player lives there): `now`, `queue` (checked catalogue ids only), `play`, `pause`, `toggle`, `next`, `previous`, `seek`, `volume` (the Deck's fade), and, reading only, `playlists` (a search of your library playlists and Apple's, or with `*` every playlist in your library) and `tracks` (a checked playlist id's songs) |
 | `autoplay.js` | presses a Beatport page's own Play button when Baseline opens it with `#baseline-play` |
 | `report.js` | reads your playlists from Beatport's sidebar |

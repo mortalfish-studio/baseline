@@ -831,6 +831,20 @@ class DeckTests(TempCase):
         self.assertEqual(al.deck_with_details(d)["set"][0]["bpm"], 126)
         self.assertEqual(al.deck_song_key(song), "bp:22988389")
 
+    def test_beatport_is_quieted_with_its_own_pause_button(self):
+        sent, keys = [], []
+        self.patch("beatport_bridge", lambda req, timeout=8: sent.append(req["op"]) or {"ok": True, "count": 0})
+        self.patch("beatport_player_playing", lambda: True)
+        self.patch("media_command", lambda cmd: keys.append(cmd))
+        bp = {"uid": "b", "service": "beatport", "id": "1", "title": "B"}
+        self.assertTrue(al.deck_can_quiet(bp))
+        al.deck_quiet(bp)
+        self.assertEqual(sent[-1]["type"], "click")
+        self.assertEqual(sent[-1]["label"], "^Pause$")
+        self.assertEqual(keys, [])     # never the media keys, which could pause the wrong app
+        yt = {"uid": "y", "service": "ytmusic", "video": "abcdefghijk", "title": "Y"}
+        self.assertFalse(al.deck_can_quiet(yt))   # no player on the page: can't promise
+
     def test_switching_apps_pauses_the_one_before(self):
         quieted, played = [], []
         self.patch("deck_where_room", lambda d: None)
