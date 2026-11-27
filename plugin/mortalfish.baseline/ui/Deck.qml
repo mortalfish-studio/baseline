@@ -649,6 +649,13 @@ Item {
   readonly property bool locked: !!deck.lock
   readonly property var requests: deck.requests || []
   readonly property var guests: deck.guests || null
+  readonly property var people: deck.people || []
+  readonly property var nowVotes: {
+    const v = (deck.votes || {})[now ? now.uid : ""] || {}
+    let up = 0, down = 0
+    for (const k in v) { if (v[k] === 1) up++; else if (v[k] === -1) down++ }
+    return { up: up, down: down }
+  }
   // Hold the lock for a second to open it again (a tap does nothing).
   property real unlockHeld: 0
   function hourOf(t) {
@@ -2530,6 +2537,62 @@ Item {
           RoundButton { glyph: "󰅖"; tip: strings.t("deck.stageLeaveTip"); onClicked: root.stageOn = false }
         }
 
+        // Tonight's top contributors: their faces, bobbing with the music.
+        Row {
+          z: 2
+          anchors.horizontalCenter: parent.horizontalCenter
+          y: 12
+          spacing: 18
+          visible: root.people.length > 0
+          Repeater {
+            model: root.people.slice(0, 5)
+            delegate: Column {
+              id: fan
+              required property var modelData
+              required property int index
+              spacing: 4
+              // How much it bounces: the loudness of a slice of the sound.
+              readonly property real beat: {
+                const l = stageViz.levels || []
+                if (!l.length || !root.deck.playing) return 0
+                const at = Math.floor((index * 0.17 + 0.05) * l.length) % l.length
+                return Math.min(1, (l[at] || 0) * 1.4)
+              }
+              Item {
+                width: 52; height: 60
+                Rectangle {
+                  id: fanRing
+                  width: 52; height: 52; radius: 26
+                  y: 6 - fan.beat * 8
+                  Behavior on y { NumberAnimation { duration: Style.duration(90); easing.type: Easing.OutCubic } }
+                  color: root.ground
+                  border.width: fan.index === 0 ? 3 : 2
+                  border.color: fan.index === 0 ? root.amber : root.teal
+                  Image {
+                    id: fanFace
+                    anchors.fill: parent; anchors.margins: 3
+                    source: (fan.modelData.photo || "") !== "" ? "file://" + fan.modelData.photo : ""
+                    fillMode: Image.PreserveAspectCrop
+                    asynchronous: true
+                    layer.enabled: true
+                    layer.effect: MultiEffect { maskEnabled: true; maskSource: fanMask }
+                  }
+                  Rectangle { id: fanMask; anchors.fill: fanFace; radius: width / 2; visible: false; layer.enabled: true }
+                  Label { anchors.centerIn: parent; visible: fanFace.status !== Image.Ready; text: (fan.modelData.name || "?").charAt(0).toUpperCase(); font.bold: true; font.pixelSize: 20; color: root.teal }
+                  Rectangle {
+                    visible: fan.modelData.played > 0
+                    anchors.right: parent.right; anchors.top: parent.top; anchors.margins: -4
+                    width: 20; height: 20; radius: 10
+                    color: fan.index === 0 ? root.amber : root.teal
+                    Label { anchors.centerIn: parent; text: String(fan.modelData.played); font.pixelSize: 11; font.bold: true; color: root.ground }
+                  }
+                }
+              }
+              Label { anchors.horizontalCenter: parent.horizontalCenter; text: fan.modelData.name; font.pixelSize: Style.font.caption; opacity: 0.75; width: 64; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight }
+            }
+          }
+        }
+
         // Requests while on stage: the newest few, to mix in, put next or turn down.
         Rectangle {
           id: stageAsks
@@ -2623,7 +2686,17 @@ Item {
                 Rectangle { id: shoutMask; anchors.fill: shoutFace; radius: width / 2; visible: false; layer.enabled: true }
                 Label { anchors.centerIn: parent; visible: shoutFace.status !== Image.Ready; text: root.now ? (root.now.by || "?").charAt(0).toUpperCase() : ""; font.pixelSize: 26; font.bold: true; color: root.teal }
               }
-              Label { text: root.now ? strings.t("deck.requestedBy").arg(root.now.by || "") : ""; font.pixelSize: Math.max(18, Math.min(28, stageView.width / 50)); color: root.teal }
+              ColumnLayout {
+                spacing: 2
+                Label { text: root.now ? strings.t("deck.requestedBy").arg(root.now.by || "") : ""; font.pixelSize: Math.max(18, Math.min(28, stageView.width / 50)); color: root.teal }
+                Label {
+                  visible: !!root.now && (root.now.note || "") !== ""
+                  Layout.maximumWidth: stageView.width * 0.4
+                  text: root.now ? "“" + (root.now.note || "") + "”" : ""
+                  font.pixelSize: Math.max(16, Math.min(24, stageView.width / 60)); font.italic: true
+                  wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
+                }
+              }
             }
             Label {
               Layout.fillWidth: true
@@ -2664,6 +2737,12 @@ Item {
               Layout.fillWidth: true
               Label { text: root.clock(root.shownTime); font.pixelSize: Style.font.subtitle; opacity: 0.6 }
               Item { Layout.fillWidth: true }
+              Label {
+                visible: root.nowVotes.up + root.nowVotes.down > 0
+                text: "👍 " + root.nowVotes.up + "   👎 " + root.nowVotes.down
+                font.pixelSize: Style.font.subtitle
+                Layout.rightMargin: 18
+              }
               Label { text: "−" + root.clock(root.nowLeft); font.pixelSize: Style.font.subtitle; color: root.teal }
             }
           }
@@ -2671,6 +2750,7 @@ Item {
 
         // The sound, across the bottom.
         DeckVisualizer {
+          id: stageViz
           anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
           anchors.leftMargin: 64; anchors.rightMargin: stageQr.visible ? stageQr.width + 96 : 64
           anchors.bottomMargin: 150
@@ -2800,6 +2880,74 @@ Item {
             wrapMode: Text.Wrap
             text: root.deck.requestsAuto ? strings.t("deck.requestsAutoOn") : strings.t("deck.requestsAutoOff")
             font.pixelSize: Style.font.caption; opacity: 0.55
+          }
+          // Last call: requests close in a while (the phones say when), or now.
+          RowLayout {
+            visible: !!root.guests
+            Layout.fillWidth: true
+            spacing: 8
+            Label {
+              Layout.fillWidth: true
+              text: !root.deck.lastCall ? strings.t("deck.lastCall")
+                    : Date.now() / 1000 >= root.deck.lastCall ? strings.t("deck.requestsClosed")
+                    : strings.t("deck.closesAt").arg(new Date(root.deck.lastCall * 1000).toLocaleTimeString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat))
+              font.pixelSize: Style.font.caption; color: root.deck.lastCall ? root.amber : root.ink; opacity: root.deck.lastCall ? 1 : 0.7
+            }
+            HeadLink { visible: !root.deck.lastCall; text: "15m"; onTapped: root.run(["deck", "requests", "lastcall", "15"]) }
+            HeadLink { visible: !root.deck.lastCall; text: "30m"; onTapped: root.run(["deck", "requests", "lastcall", "30"]) }
+            HeadLink { visible: !root.deck.lastCall; text: strings.t("deck.closeNow"); onTapped: root.run(["deck", "requests", "lastcall", "0"]) }
+            HeadLink { visible: !!root.deck.lastCall; glyph: "󰑐"; text: strings.t("deck.reopen"); onTapped: root.run(["deck", "requests", "lastcall", "off"]) }
+          }
+          // Who's asked tonight: faces, names, how many asked and played (most played first).
+          Label {
+            visible: root.people.length > 0
+            text: strings.t("deck.peopleTonight").arg(root.people.length).toUpperCase()
+            font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal
+            Layout.topMargin: 4
+          }
+          Flow {
+            visible: root.people.length > 0
+            Layout.fillWidth: true
+            spacing: 10
+            Repeater {
+              model: root.people.slice(0, 12)
+              delegate: Column {
+                id: guest
+                required property var modelData
+                required property int index
+                width: 68
+                spacing: 3
+                Rectangle {
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  width: 48; height: 48; radius: 24
+                  color: root.ground
+                  border.width: guest.index === 0 && guest.modelData.played > 0 ? 3 : 2
+                  border.color: guest.index === 0 && guest.modelData.played > 0 ? root.amber : root.teal
+                  Image {
+                    id: guestFace
+                    anchors.fill: parent; anchors.margins: 3
+                    source: (guest.modelData.photo || "") !== "" ? "file://" + guest.modelData.photo : ""
+                    fillMode: Image.PreserveAspectCrop
+                    asynchronous: true
+                    layer.enabled: true
+                    layer.effect: MultiEffect { maskEnabled: true; maskSource: guestMask }
+                  }
+                  Rectangle { id: guestMask; anchors.fill: guestFace; radius: width / 2; visible: false; layer.enabled: true }
+                  Label { anchors.centerIn: parent; visible: guestFace.status !== Image.Ready; text: (guest.modelData.name || "?").charAt(0).toUpperCase(); font.bold: true; color: root.teal }
+                }
+                Label { width: parent.width; horizontalAlignment: Text.AlignHCenter; text: guest.modelData.name; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
+                Label {
+                  width: parent.width; horizontalAlignment: Text.AlignHCenter
+                  text: strings.t("deck.personCounts").arg(guest.modelData.asked).arg(guest.modelData.played)
+                  font.pixelSize: Style.font.caption - 1; opacity: 0.55
+                }
+              }
+            }
+          }
+          Label {
+            visible: root.people.length > 12
+            text: strings.t("deck.requestsMore").arg(root.people.length - 12)
+            font.pixelSize: Style.font.caption; opacity: 0.5
           }
         }
       }
@@ -3084,6 +3232,13 @@ Item {
         Layout.fillWidth: true
         text: (rr.req.artist || "") + (rr.req.by ? "  ·  " + strings.t("deck.requestBy").arg(rr.req.by) : "")
         font.pixelSize: Style.font.caption; opacity: 0.6
+      }
+      Label {
+        Layout.fillWidth: true
+        visible: (rr.req.note || "") !== ""
+        text: "“" + (rr.req.note || "") + "”"
+        font.pixelSize: Style.font.caption; font.italic: true; color: root.teal
+        elide: Text.ElideRight
       }
     }
     RoundButton { glyph: "◆"; tip: strings.t("deck.requestMix"); onClicked: root.run(["deck", "request", "take", rr.req.rid, "--mix"]) }

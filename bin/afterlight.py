@@ -3895,7 +3895,7 @@ DECK_SETS = STATE.parent / "deck-sets.json"           # sets you saved
 DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kind": "laptop"}, "playing": False,
               "paused": False, "sleep": None, "crossfade": False, "autodj": False, "autodjAt": 0, "handoff": "",
               "pushed": [], "pushedFrom": 1, "expect": None, "was": None, "updated": 0,
-              "lock": False, "requests": [], "guests": None, "requestsAuto": False}
+              "lock": False, "requests": [], "guests": None, "requestsAuto": False, "votes": {}, "lastCall": 0}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -5197,6 +5197,8 @@ def deck_guests_on():
     except (OSError, subprocess.SubprocessError):
         DECK_GUESTS_QR.unlink(missing_ok=True)
     since = int(was.get("since") or time.time()) if token == old else int(time.time())
+    if token != old:
+        deck_update(lambda d: d.update(lastCall=0))
     deck_update(lambda d: d.update(guests={"url": url, "pid": proc.pid, "since": since,
                                            "qr": str(DECK_GUESTS_QR) if DECK_GUESTS_QR.is_file() else ""}))
     return url
@@ -5214,6 +5216,38 @@ def deck_guests_off():
     if guests:
         deck_update(lambda d: d.update(guests=None))
     DECK_GUESTS_QR.unlink(missing_ok=True)
+
+
+def deck_crowd(deck):
+    """What guests voted for tonight: songs with more 👍 than 👎, and the other way."""
+    songs = {x["uid"]: x for x in deck["played"][-60:] + ([deck["now"]] if deck.get("now") else [])}
+    up, down = [], []
+    for uid, votes in (deck.get("votes") or {}).items():
+        total = sum(v for v in votes.values() if v in (1, -1))
+        song = songs.get(uid)
+        if song and total:
+            (up if total > 0 else down).append(f"{song['title']} by {song['artist']}".replace("»", ""))
+    return {"up": up[-12:], "down": down[-8:]}
+
+
+def deck_people(deck):
+    """Tonight's guests who asked for something: name, face, how many asked,
+    how many played. Most played first (the top contributors)."""
+    since = (deck.get("guests") or {}).get("since") or 0
+    people = read_json(DECK_GUESTS_PEOPLE, {})
+    asks = read_json(DECK_GUESTS_ASKS, {})
+    if not isinstance(people, dict) or not isinstance(asks, dict):
+        return []
+    played = {x.get("rid") for x in deck["played"] + ([deck["now"]] if deck.get("now") else []) if x.get("rid")}
+    out = []
+    for gid, person in people.items():
+        tonight = [a for a in asks.get(gid) or [] if a.get("at", 0) >= since - 3600 * 4]
+        if not tonight or not isinstance(person, dict):
+            continue
+        photo = DECK_GUESTS_PHOTOS / f"{gid}.jpg"
+        out.append({"name": person.get("name", ""), "photo": str(photo) if person.get("photo") and photo.is_file() else "",
+                    "asked": len(tonight), "played": sum(1 for a in tonight if a.get("rid") in played)})
+    return sorted(out, key=lambda p: (-p["played"], -p["asked"], p["name"].lower()))[:40]
 
 
 def deck_guest_person(gid):
@@ -5298,9 +5332,25 @@ def deck_guests_serve(token):
                 return self.send(200, {"known": bool(person), "name": person.get("name", ""), "photo": bool(person.get("photo"))})
             if where == "now":
                 deck = deck_read()
+                gid = str((query.get("gid") or [""])[0])
                 show = lambda x: {"title": x.get("title", ""), "artist": x.get("artist", ""), "thumb": x.get("thumb", "")}
-                return self.send(200, {"now": show(deck["now"]) if deck.get("now") else None,
-                                       "next": [show(x) for x in deck["set"][:3]]})
+                now = deck.get("now")
+                votes = (deck.get("votes") or {}).get(now["uid"], {}) if now else {}
+                closes = deck.get("lastCall") or 0
+                return self.send(200, {"now": {**show(now), "uid": now["uid"], "by": now.get("by", ""), "note": now.get("note", ""),
+                                               "up": sum(1 for v in votes.values() if v == 1),
+                                               "down": sum(1 for v in votes.values() if v == -1),
+                                               "mine": votes.get(gid, 0)} if now else None,
+                                       "next": [show(x) for x in deck["set"][:3]],
+                                       "lastCall": closes, "closed": bool(closes and time.time() >= closes)})
+            if where == "played":
+                deck = deck_read()
+                since = (deck.get("guests") or {}).get("since") or 0
+                songs = [x for x in deck["played"] if x.get("playedAt", 0) >= since - 3600] + ([deck["now"]] if deck.get("now") else [])
+                link = lambda x: f"https://music.apple.com/song/{x['id']}" if x.get("service") == "applemusic" and x.get("id") \
+                    else "https://music.apple.com/search?term=" + urllib.parse.quote(f"{x.get('title', '')} {x.get('artist', '')}")
+                return self.send(200, {"songs": [{"title": x.get("title", ""), "artist": x.get("artist", ""), "thumb": x.get("thumb", ""),
+                                                  "link": link(x)} for x in songs][-200:]})
             if where == "search":
                 words = clean_text((query.get("q") or [""])[0], 100)
                 if not words:
@@ -5331,6 +5381,8 @@ def deck_guests_serve(token):
             where, _ = self.route()
             if where == "hello":
                 return self.hello()
+            if where == "vote":
+                return self.vote()
             if where != "ask":
                 return self.send(404, b"", "text/plain")
             body = self.body(4000)
@@ -5340,6 +5392,9 @@ def deck_guests_serve(token):
             songs = [served[str(i)] for i in dict.fromkeys(str(i) for i in ids[:DECK_GUESTS_PICKS]) if str(i) in served]
             if not songs:
                 return self.send(200, {"ok": False, "error": "Search for it first."})
+            closes = deck_read().get("lastCall") or 0
+            if closes and time.time() >= closes:
+                return self.send(200, {"ok": False, "error": "Requests are closed for tonight. Thanks!"})
             phone = self.client_address[0]
             with lock:
                 if time.time() - asked.get(phone, 0) < 20:
@@ -5357,6 +5412,7 @@ def deck_guests_serve(token):
                          "played": "it's been played", "declined": "the DJ passed on it this time"}[state]
                 return self.send(200, {"ok": False, "error": f"You've asked for {again[0]['title']} already: {words}."})
             by = person.get("name") or clean_text(str(body.get("by", "")), 30)
+            note = clean_text(str(body.get("note", "")), 120)
             photo = str(DECK_GUESTS_PHOTOS / f"{body.get('gid')}.jpg") if person.get("photo") else ""
             def ask(d):
                 waiting = d.get("requests") or []
@@ -5368,7 +5424,7 @@ def deck_guests_serve(token):
                     if mine + len(fresh) >= 8:
                         break
                     fresh.append({**song, "service": "applemusic", "rid": os.urandom(4).hex(), "by": by, "photo": photo, "phone": phone,
-                                  "gid": gid if person else "", "at": int(time.time())})
+                                  "gid": gid if person else "", "note": note, "at": int(time.time())})
                 d["requests"] = (waiting + fresh)[-40:]
                 return [r["rid"] for r in fresh], bool(d.get("requestsAuto"))
             taken, auto = deck_update(ask)
@@ -5393,6 +5449,28 @@ def deck_guests_serve(token):
             toast(f"Request: {first['title']}" + (f" +{len(taken) - 1}" if len(taken) > 1 else ""),
                   first["artist"] + (f" · from {by}" if by else ""), art=photo, glyph="󰎈")
             return self.send(200, {"ok": True, "sent": len(taken), "again": [x["title"] for x in again]})
+
+        def vote(self):
+            """👍 or 👎 for what's playing (or take it back), one per guest per song."""
+            body = self.body(500)
+            if body is None:
+                return self.send(400, {"ok": False})
+            gid, uid, v = str(body.get("gid", "")), str(body.get("uid", "")), body.get("v")
+            if not deck_guest_person(gid) or v not in (1, -1, 0):
+                return self.send(200, {"ok": False})
+            def cast(d):
+                if (d.get("now") or {}).get("uid") != uid:
+                    return False
+                votes = d.get("votes") or {}
+                mine = votes.pop(uid, {})
+                if v:
+                    mine[gid] = v
+                else:
+                    mine.pop(gid, None)
+                votes[uid] = mine
+                d["votes"] = dict(list(votes.items())[-80:])
+                return True
+            return self.send(200, {"ok": bool(deck_update(cast))})
 
         def hello(self):
             """A guest says who they are (a name, maybe a selfie); they're
@@ -5456,7 +5534,7 @@ def deck_request_take(rid, where="end"):
         song = deck_item("applemusic", {"id": found["id"], "title": found["title"], "artist": found["artist"],
                                         "thumb": found.get("thumb", ""),
                                         "from": f"Request · {found['by']}" if found.get("by") else "Request"})
-        song.update({k: found[k] for k in ("rid", "gid", "by", "photo") if found.get(k)})
+        song.update({k: found[k] for k in ("rid", "gid", "by", "photo", "note") if found.get(k)})
         if where == "next":
             d["set"].insert(0, song)
         elif where == "mix":
@@ -5538,6 +5616,7 @@ def deck_command(settings, args):
         deck["rooms"] = [{"id": r["id"], "name": r["name"]} for r in sonos_rooms()]
         stack = read_list(DECK_UNDO)
         deck["undo"] = len(stack) if isinstance(stack, list) else 0
+        deck["people"] = deck_people(deck) if deck.get("guests") or deck.get("requests") else []
         print(json.dumps(deck_with_details(deck)))
         sys.stdout.flush()
         deck_details_soon(deck)
@@ -5657,6 +5736,11 @@ def deck_command(settings, args):
             deck_update(lambda d: d.update(requests=[r for r in d.get("requests") or [] if r.get("rid") != args[2]]))
     elif action == "requests" and args[1:] == ["clear"]:
         deck_update(lambda d: d.update(requests=[]))
+    elif action == "requests" and len(args) == 3 and args[1] == "lastcall" and (args[2] == "off" or args[2].isdigit()):
+        closes = 0 if args[2] == "off" else int(time.time()) + max(0, min(240, int(args[2]))) * 60
+        deck_update(lambda d: d.update(lastCall=closes))
+        if closes:
+            toast("Last call", "Requests close at " + time.strftime("%H:%M", time.localtime(closes)), glyph="󰄜")
     elif action == "requests" and len(args) == 3 and args[1] == "auto" and args[2] in {"on", "off"}:
         deck_update(lambda d: d.update(requestsAuto=args[2] == "on"))
     elif action == "lock" and len(args) == 2 and args[1] in {"on", "off"}:
@@ -5818,7 +5902,7 @@ def deck_command(settings, args):
     else:
         sys.exit("Usage: afterlight deck [state|add <ytmusic|applemusic> <item json> [--next|--play|--at <n>|--scatter]|move <uid> <index>|"
                  "remove <uid>…|place <now|next|end> <uid>…|chapter <uid> [name]|move-chapter <uid> <index>|undo|"
-                 "save <name> [--played|--all]|sets|load <name> [--replace]|grab [--next]|find-add <words> [--next]|build-from-playing [minutes]|next-up|songs <service> <album or playlist json>|forget <name>|shape <tempo|smooth|energy|arc|harmonic|bumps>|autodj <on|off>|autodj from <service> <item json>|export <service> <name> [--played|--all|--saved]|crossfade <on|off>|sleep <minutes|song|off>|guests <on|off|forget>|request <take|drop> <id> [--next|--mix]|requests <clear|auto on|auto off>|lock <on|off>|details|"
+                 "save <name> [--played|--all]|sets|load <name> [--replace]|grab [--next]|find-add <words> [--next]|build-from-playing [minutes]|next-up|songs <service> <album or playlist json>|forget <name>|shape <tempo|smooth|energy|arc|harmonic|bumps>|autodj <on|off>|autodj from <service> <item json>|export <service> <name> [--played|--all|--saved]|crossfade <on|off>|sleep <minutes|song|off>|guests <on|off|forget>|request <take|drop> <id> [--next|--mix]|requests <clear|auto on|auto off|lastcall <minutes|off>>|lock <on|off>|details|"
                  "pin <uid>|shuffle|clear|play [uid]|pause|next|previous|where <laptop|room id>|rooms|join <room id>|"
                  "leave <room id>|everywhere|volume <room id> <0-100>|search <service> <words>|mine <service>|fill [--service <s>]|"
                  "build <minutes> [what it's for] [--start <song>|--seed <item json>] [--replace] [--service <s>]|run]")
@@ -5904,9 +5988,12 @@ def deck_fill(settings, count=5, auto=False, seed=None):
     elif auto:
         night = deck["played"][-24:] + recent
         listing = "; ".join(f"{s['title']} by {s['artist']}" for s in night)
+        crowd = deck_crowd(deck)
         ask = ("You're the DJ. Here's tonight so far, in order, the last ones still to play: " + listing.replace("»", "")[:2400]
                + ". Work out its themes, genres, eras, mood and where the energy is heading, then suggest songs that carry it on "
-                 "naturally from the last one. Vary the artists (none of the last few again), and nothing already in it.")
+                 "naturally from the last one. Vary the artists (none of the last few again), and nothing already in it."
+               + (" The guests loved: " + "; ".join(crowd["up"])[:500] + "." if crowd["up"] else "")
+               + (" They didn't like: " + "; ".join(crowd["down"])[:400] + ": less like those." if crowd["down"] else ""))
         ideas = grok_ideas("", ask=ask, count=count + 3, timeout=90)
     else:
         toast("Grok is picking songs…", "That fit " + ", ".join(s["title"] for s in recent[-3:]), glyph="✦")

@@ -641,5 +641,12 @@
   "deck.autodjSoon": "Auto-DJ is adding more",
   "deck.qrTapHint": "Tap it to show it big for a phone",
   "deck.requestsScroll": "Scroll for the rest",
-  "deck.requestedBy": "Requested by %1"
+  "deck.requestedBy": "Requested by %1",
+  "deck.lastCall": "Last call:",
+  "deck.requestsClosed": "Requests closed",
+  "deck.closesAt": "Requests close at %1",
+  "deck.closeNow": "Close now",
+  "deck.reopen": "Reopen",
+  "deck.peopleTonight": "Tonight's guests · %1",
+  "deck.personCounts": "%1 asked · %2 played"
 }

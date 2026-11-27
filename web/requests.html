@@ -65,6 +65,20 @@
   .party { margin: 0 0 16px; padding: 14px; border-radius: 10px; text-align: center; font-weight: 700; color: var(--bg);
            background: linear-gradient(90deg, var(--pink), var(--teal)); animation: pulse 1.6s ease-in-out infinite; }
   @keyframes pulse { 50% { filter: brightness(1.15); } }
+  .votes { display: flex; gap: 8px; margin-left: auto; flex: none; }
+  .votes button { padding: 8px 10px; font-size: 18px; letter-spacing: 0; border-color: var(--line); color: var(--ink); }
+  .votes button.on { border-color: var(--teal); background: rgba(255,255,255,.08); }
+  .votes small { font-size: 11px; opacity: .7; margin-left: 4px; }
+  .shout { font-size: 12px; color: var(--teal); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .call { margin: 0 0 14px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--pink); color: var(--pink); text-align: center; font-size: 14px; }
+  .note { width: 100%; margin: 0 0 10px; padding: 10px; font-size: 14px; border-color: var(--line); }
+  details.tonight { margin: 22px 0 0; }
+  details.tonight summary { font-size: 11px; letter-spacing: .3em; color: var(--teal); cursor: pointer; list-style: none; }
+  details.tonight summary::before { content: "› "; }
+  details.tonight[open] summary::before { content: "⌄ "; }
+  .tonight a { color: inherit; text-decoration: none; display: flex; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .tonight a img { width: 40px; height: 40px; border-radius: 4px; object-fit: cover; background: #222; flex: none; }
+  .tonight a .open { margin-left: auto; color: var(--pink); font-size: 12px; flex: none; }
   .link { background: none; border: 0; color: var(--teal); text-transform: none; letter-spacing: 0; padding: 6px; font-size: 13px; text-decoration: underline; }
 </style>
 </head>
@@ -93,12 +107,18 @@
       <button class="me" id="me" title="Change your name or photo"><span id="meName"></span><span class="avatar" id="meFace"></span></button>
     </div>
     <div class="party" id="party" hidden></div>
+    <div class="call" id="call" hidden></div>
     <div class="now" id="now" hidden>
       <img id="nowArt" alt="">
-      <div style="min-width:0">
+      <div style="min-width:0;flex:1">
         <div class="label">NOW PLAYING</div>
         <div class="title" id="nowTitle"></div>
         <div class="sub" id="nowArtist"></div>
+        <div class="shout" id="nowShout" hidden></div>
+      </div>
+      <div class="votes">
+        <button id="up" aria-label="Love it">👍<small id="upN"></small></button>
+        <button id="down" aria-label="Not for me">👎<small id="downN"></small></button>
       </div>
     </div>
     <ul class="next" id="next"></ul>
@@ -112,10 +132,15 @@
       <button>Find</button>
     </form>
     <div id="results"><p class="hint">Find songs and add them (up to 5), then send them all at once. The DJ picks which ones play.</p></div>
+    <details class="tonight" id="tonight">
+      <summary>PLAYED TONIGHT</summary>
+      <div id="tonightList"></div>
+    </details>
   </main>
 
   <div class="tray" id="tray" hidden>
-    <div class="inner">
+    <div class="inner" style="flex-wrap:wrap">
+      <input class="note" id="note" maxlength="120" placeholder="Add a dedication (optional): for Jess's birthday!">
       <div class="covers" id="trayCovers"></div>
       <button class="link" id="trayClear">Clear</button>
       <button class="solid" id="send">Send</button>
@@ -196,9 +221,21 @@
   // ---- what's playing
   async function now() {
     try {
-      const r = await (await fetch(base + "/now")).json();
+      const r = await (await fetch(base + "/now?gid=" + encodeURIComponent(me.gid || ""))).json();
       $("now").hidden = !r.now;
-      if (r.now) { $("nowTitle").textContent = r.now.title; $("nowArtist").textContent = r.now.artist; art($("nowArt"), r.now.thumb); }
+      playing = r.now;
+      if (r.now) {
+        $("nowTitle").textContent = r.now.title; $("nowArtist").textContent = r.now.artist; art($("nowArt"), r.now.thumb);
+        $("nowShout").hidden = !r.now.by;
+        $("nowShout").textContent = r.now.by ? "Requested by " + r.now.by + (r.now.note ? ": “" + r.now.note + "”" : "") : "";
+        $("upN").textContent = r.now.up || ""; $("downN").textContent = r.now.down || "";
+        $("up").classList.toggle("on", r.now.mine === 1); $("down").classList.toggle("on", r.now.mine === -1);
+      }
+      closed = !!r.closed;
+      $("call").hidden = !r.lastCall;
+      $("call").textContent = r.closed ? "Requests are closed for tonight. Thanks for the picks!"
+        : r.lastCall ? "Last call! Requests close at " + new Date(r.lastCall * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+      $("find").hidden = closed;
       const list = $("next"); list.replaceChildren();
       for (const s of (r.next || [])) list.append(el("li", { textContent: s.title + " · " + s.artist }));
     } catch (e) {}
@@ -229,7 +266,36 @@
     if (playing) $("party").textContent = "Your song is playing: " + playing.title + "!";
     tray();
   }
-  now(); setInterval(now, 15000);
+  let playing = null, closed = false;
+  async function vote(v) {
+    if (!playing || !me.gid) return;
+    const next = playing.mine === v ? 0 : v;
+    try {
+      await fetch(base + "/vote", { method: "POST", headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ gid: me.gid, uid: playing.uid, v: next }) });
+    } catch (e) {}
+    now();
+  }
+  $("up").addEventListener("click", () => vote(1));
+  $("down").addEventListener("click", () => vote(-1));
+  async function tonight() {
+    if (!$("tonight").open) return;
+    let r = {};
+    try { r = await (await fetch(base + "/played")).json(); } catch (e) { return; }
+    const list = $("tonightList"); list.replaceChildren();
+    for (const x of (r.songs || []).slice().reverse()) {
+      const a = el("a", { href: x.link, target: "_blank", rel: "noopener" });
+      const img = el("img", { alt: "" }); art(img, x.thumb);
+      const text = el("div", { className: "text", style: "min-width:0" });
+      text.append(el("div", { className: "title", textContent: x.title }), el("div", { className: "sub", textContent: x.artist }));
+      a.append(img, text, el("span", { className: "open", textContent: "Open ↗" }));
+      list.append(a);
+    }
+    if (!(r.songs || []).length) list.append(el("p", { className: "hint", textContent: "Nothing yet." }));
+  }
+  $("tonight").addEventListener("toggle", tonight);
+  setInterval(tonight, 30000);
+  now(); setInterval(now, 8000);
   setInterval(mine, 10000);
 
   // ---- picks: add a few, keep searching, send them together
@@ -259,13 +325,13 @@
     let a = {};
     try {
       a = await (await fetch(base + "/ask", { method: "POST", headers: { "Content-Type": "application/json" },
-                                              body: JSON.stringify({ ids: picks.map((p) => p.id), gid: me.gid, by: me.name }) })).json();
+                                              body: JSON.stringify({ ids: picks.map((p) => p.id), gid: me.gid, by: me.name, note: $("note").value.trim() }) })).json();
     } catch (e) {}
     $("send").disabled = false;
     if (!a.ok) return say(a.error || "Couldn't send. Try again in a moment.");
     say((a.sent > 1 ? "Sent " + a.sent + "! The DJ will see them." : "Sent! The DJ will see it.")
         + ((a.again || []).length ? " (You'd already asked for " + a.again.join(", ") + ".)" : ""));
-    picks = []; clearSearch(); tray(); mine();
+    picks = []; $("note").value = ""; clearSearch(); tray(); mine();
   });
 
   // ---- search
