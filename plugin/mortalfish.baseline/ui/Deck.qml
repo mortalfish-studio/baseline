@@ -2978,6 +2978,43 @@ Item {
             checked: root.deck.voice !== false
             onToggled: root.run(["deck", "voice", root.deck.voice !== false ? "off" : "on"])
           }
+          // Which voice reads them: pick one and it says hello.
+          Flow {
+            visible: !!root.deck.voiceReady && root.deck.voice !== false && (root.deck.voices || []).length > 1
+            Layout.fillWidth: true
+            spacing: 6
+            Repeater {
+              model: root.deck.voices || []
+              delegate: Rectangle {
+                id: vchip
+                required property var modelData
+                required property int index
+                readonly property bool picked: root.deck.voiceName === modelData.key
+                width: vrow.implicitWidth + 16; height: 26
+                radius: 13
+                color: picked ? Util.alpha(root.amber, 0.18) : (vHover.hovered ? Util.alpha(root.teal, 0.1) : "transparent")
+                border.width: 1
+                border.color: picked ? root.amber : Util.alpha(root.teal, 0.45)
+                Row {
+                  id: vrow
+                  anchors.centerIn: parent
+                  spacing: 4
+                  Label { visible: vchip.index === 0; text: "★"; font.pixelSize: Style.font.caption - 1; color: root.amber; anchors.verticalCenter: parent.verticalCenter }
+                  Label { text: vchip.modelData.name; font.pixelSize: Style.font.caption; color: vchip.picked ? root.amber : root.ink; anchors.verticalCenter: parent.verticalCenter }
+                }
+                HoverHandler { id: vHover; cursorShape: Qt.PointingHandCursor }
+                TapHandler { onTapped: root.run(["deck", "voice", "use", vchip.modelData.key]) }
+              }
+            }
+          }
+          Label {
+            visible: !!root.deck.voiceReady && root.deck.voice !== false && (root.deck.voices || []).length > 1
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            readonly property var v: (root.deck.voices || []).find(x => x.key === root.deck.voiceName) || null
+            text: v ? strings.t("deck.voiceAbout").arg(v.name).arg(v.about) + (v.key === (root.deck.voices[0] || {}).key ? "  ·  " + strings.t("deck.voiceRecommended") : "") : ""
+            font.pixelSize: Style.font.caption - 1; opacity: 0.55
+          }
           // Last call: requests close in a while (the phones say when), or now.
           RowLayout {
             visible: !!root.guests

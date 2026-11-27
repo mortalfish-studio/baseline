@@ -71,7 +71,15 @@
   .votes small { font-size: 11px; opacity: .7; margin-left: 4px; }
   .shout { font-size: 12px; color: var(--teal); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .call { margin: 0 0 14px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--pink); color: var(--pink); text-align: center; font-size: 14px; }
-  .note { width: 100%; margin: 0 0 10px; padding: 10px; font-size: 14px; border-color: var(--line); }
+  /* The dedication: a roomy box that opens when asked for, closed it's one line of what you wrote. */
+  .ded { max-width: 528px; margin: 0 auto 12px; }
+  .ded label { display: block; font-size: 11px; letter-spacing: .3em; text-transform: uppercase; color: var(--teal); margin-bottom: 8px; }
+  .ded textarea { display: block; width: 100%; min-height: 104px; max-height: 40vh; resize: none; font: inherit; font-size: 16px; line-height: 1.4;
+                  color: var(--ink); background: rgba(255,255,255,.04); border: 1px solid var(--pink); border-radius: 8px; padding: 12px; }
+  .ded textarea:focus { outline: 2px solid var(--teal); outline-offset: 1px; }
+  .ded .foot { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 12px; opacity: .8; }
+  .ded .foot span { flex: 1; }
+  .dedline { max-width: 528px; margin: 0 auto 10px; font-size: 14px; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .85; }
   details.tonight { margin: 22px 0 0; }
   details.tonight summary { font-size: 11px; letter-spacing: .3em; color: var(--teal); cursor: pointer; list-style: none; }
   details.tonight summary::before { content: "› "; }
@@ -139,9 +147,15 @@
   </main>
 
   <div class="tray" id="tray" hidden>
-    <div class="inner" style="flex-wrap:wrap">
-      <input class="note" id="note" maxlength="120" placeholder="Add a dedication (optional): for Jess's birthday!">
+    <div class="ded" id="ded" hidden>
+      <label for="note">Your dedication</label>
+      <textarea id="note" maxlength="120" rows="3" placeholder="For Jess's birthday! Love from everyone at table four."></textarea>
+      <div class="foot"><span id="noteHint">It's shown (and read out) when your song plays.</span><b id="noteCount">0/120</b><button class="link" id="dedDone">Done</button></div>
+    </div>
+    <div class="dedline" id="dedLine" hidden></div>
+    <div class="inner">
       <div class="covers" id="trayCovers"></div>
+      <button class="link" id="dedOpen">+ Dedication</button>
       <button class="link" id="trayClear">Clear</button>
       <button class="solid" id="send">Send</button>
     </div>
@@ -223,6 +237,7 @@
     try {
       const r = await (await fetch(base + "/now?gid=" + encodeURIComponent(me.gid || ""))).json();
       $("now").hidden = !r.now;
+      $("noteHint").textContent = r.voice ? "It's shown on the big screen and read out when your song plays." : "It's shown on the big screen when your song plays.";
       playing = r.now;
       if (r.now) {
         $("nowTitle").textContent = r.now.title; $("nowArtist").textContent = r.now.artist; art($("nowArt"), r.now.thumb);
@@ -319,7 +334,25 @@
     else picks.push(song);
     tray();
   }
-  $("trayClear").addEventListener("click", () => { picks = []; tray(); });
+  $("trayClear").addEventListener("click", () => { picks = []; dedication(false); tray(); });
+
+  // ---- the dedication: opens into a roomy box; closed, one line of what you wrote
+  function dedication(open) {
+    const text = $("note").value.trim();
+    $("ded").hidden = !open;
+    $("dedLine").hidden = open || !text;
+    $("dedLine").textContent = text ? "“" + text + "”" : "";
+    $("dedOpen").textContent = open ? "Done" : text ? "Edit note" : "+ Dedication";
+    if (open) { grow(); $("note").focus(); setTimeout(() => $("note").scrollIntoView({ block: "nearest" }), 300); }
+  }
+  function grow() {
+    const box = $("note"); box.style.height = "auto"; box.style.height = Math.max(104, box.scrollHeight + 2) + "px";
+    $("noteCount").textContent = box.value.length + "/120";
+  }
+  $("note").addEventListener("input", grow);
+  $("dedOpen").addEventListener("click", () => dedication($("ded").hidden));
+  $("dedDone").addEventListener("click", () => dedication(false));
+  $("dedLine").addEventListener("click", () => dedication(true));
   $("send").addEventListener("click", async () => {
     $("send").disabled = true;
     let a = {};
@@ -331,7 +364,7 @@
     if (!a.ok) return say(a.error || "Couldn't send. Try again in a moment.");
     say((a.sent > 1 ? "Sent " + a.sent + "! The DJ will see them." : "Sent! The DJ will see it.")
         + ((a.again || []).length ? " (You'd already asked for " + a.again.join(", ") + ".)" : ""));
-    picks = []; $("note").value = ""; clearSearch(); tray(); mine();
+    picks = []; $("note").value = ""; dedication(false); clearSearch(); tray(); mine();
   });
 
   // ---- search

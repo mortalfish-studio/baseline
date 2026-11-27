@@ -48,7 +48,7 @@ Column {
   Commons.Translations { id: strings; directory: Qt.resolvedUrl("../i18n") }
 
   // Speaker or headphones, first: it's what you reach for before pressing play.
-  OutputSwitch { width: parent.width; host: root.host }
+  OutputSwitch { id: output; width: parent.width; host: root.host }
 
   function clock(seconds) {
     if (!(seconds >= 0) || !isFinite(seconds)) return "–:––"
@@ -95,10 +95,14 @@ Column {
   readonly property int toAdd: liked.filter(i => !i.added).length
   function likeAction(args) { Quickshell.execDetached([tool, "like"].concat(args)) }
 
-  // ---- Now playing: one group, so the gap above its title is wider than inside it
+  // ---- Now playing: one group, so the gap above its title is wider than inside it.
+  // The laptop's player: hidden while a Sonos room plays (the Deck moved
+  // there, or you picked it above, which shows what the room plays); it's
+  // back when you pick the laptop's speaker or headphones again.
   Column {
   width: parent.width
   spacing: Style.space(10)
+  visible: !output.sonosOn
 
   Section {
     width: parent.width

@@ -873,13 +873,18 @@ class DeckTests(TempCase):
         song = {"uid": "u1", "rid": "0a1b2c3d", "by": "Sam", "note": "For Jess, happy birthday!",
                 "title": "Lady (Hear Me Tonight) [Radio Edit]", "artist": "Modjo"}
         self.assertEqual(al.deck_voice_text(song),
-                         "A request from Sam. For Jess, happy birthday. Here's Lady, by Modjo.")
+                         "A request from Sam. For Jess, happy birthday! Here's Lady, by Modjo.")
         deck = {**al.DECK_EMPTY, "now": song, "playing": True}
         self.assertTrue(al.deck_voice_due(deck))
         self.assertFalse(al.deck_voice_due({**deck, "spoken": ["0a1b2c3d"]}))      # said already
         self.assertFalse(al.deck_voice_due({**deck, "voice": False}))              # turned off
         self.assertFalse(al.deck_voice_due({**deck, "now": {**song, "note": ""}}))  # nothing to say
         self.assertIsNone(al.deck_voice_clip({**song, "rid": "../x"}))             # only real request ids name files
+        self.assertIn("by Earth, Wind and Fire.", al.deck_voice_text({**song, "artist": "Earth, Wind & Fire"}))
+        self.patch("voices_ready", lambda: [v for v in al.VOICES if v[0] != "piper"])
+        self.assertEqual(al.deck_voice_name({}), "am_michael")                      # Michael unless you pick
+        self.assertEqual(al.deck_voice_name({"voiceName": "bf_emma"}), "bf_emma")
+        self.assertEqual(al.deck_voice_name({"voiceName": "piper"}), "am_michael")  # not installed: the default
 
     def test_a_sonos_room_says_the_next_dedication_as_the_song_ends(self):
         self.patch("voice_ready", lambda: True)

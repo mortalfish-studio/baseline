@@ -627,6 +627,8 @@
   "deck.requestMix": "Mix it in: where it fits best in the next few",
   "deck.requestsAuto": "Mix in by itself",
   "deck.voice": "Read dedications",
+  "deck.voiceAbout": "%1: %2. Pick a voice to hear it.",
+  "deck.voiceRecommended": "★ our pick",
   "deck.guestsForget": "Start fresh",
   "deck.guestsForgetSure": "Tap again: forget everyone",
   "deck.guestsDropHint": "Hover a face, or press and hold it, for ✕ to drop that guest. Start fresh forgets everyone; their phones ask who they are next time.",

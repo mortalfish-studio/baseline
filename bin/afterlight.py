@@ -5387,7 +5387,7 @@ def deck_guests_serve(token):
             parts = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
             if len(parts) == 3 and parts[0] == token and parts[1] == "voice":
                 clip = VOICE_DIR / parts[2]
-                if re.fullmatch(r"[0-9a-f]{8}\.mp3", parts[2]) and clip.is_file():
+                if re.fullmatch(r"(?:[0-9a-f]{8}|sample)-[a-z_]{3,12}\.mp3", parts[2]) and clip.is_file():
                     return self.send(200, clip.read_bytes(), "audio/mpeg")
                 return self.send(404, b"", "text/plain")
             where, query = self.route()
@@ -5412,12 +5412,13 @@ def deck_guests_serve(token):
                 now = deck.get("now")
                 votes = (deck.get("votes") or {}).get(now["uid"], {}) if now else {}
                 closes = deck.get("lastCall") or 0
+                speaks = bool(deck.get("voice", True) and voice_ready())
                 return self.send(200, {"now": {**show(now), "uid": now["uid"], "by": now.get("by", ""), "note": now.get("note", ""),
                                                "up": sum(1 for v in votes.values() if v == 1),
                                                "down": sum(1 for v in votes.values() if v == -1),
                                                "mine": votes.get(gid, 0)} if now else None,
                                        "next": [show(x) for x in deck["set"][:3]],
-                                       "lastCall": closes, "closed": bool(closes and time.time() >= closes)})
+                                       "lastCall": closes, "closed": bool(closes and time.time() >= closes), "voice": speaks})
             if where == "played":
                 deck = deck_read()
                 since = (deck.get("guests") or {}).get("since") or 0
@@ -5663,86 +5664,206 @@ def deck_app_volume(song, level=None):
     return value if isinstance(value, (int, float)) else None
 
 
-# ---- dedications read aloud: Piper (offline speech) says who a request is
-# from and their message as the song starts. On the laptop the music dips
-# under it; a Sonos room plays the clip first (from the guest page's server),
-# then goes back to the song.
+# ---- dedications read aloud: an offline voice (Kokoro; Piper as the
+# "robot") says who a request is from and their message as the song starts.
+# On the laptop the music dips under it; a Sonos room plays the clip between
+# songs (fetched from the guest page's server), then goes on to the song.
 
+KOKORO_DIR = HOME / ".local/share/baseline/kokoro"
+KOKORO_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
+KOKORO_FILES = ("kokoro-v1.0.onnx", "voices-v1.0.bin")
 PIPER_DIR = HOME / ".local/share/baseline/piper"
 PIPER_VOICE = "en_GB-cori-high"
 PIPER_VOICE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/cori/high/"
 VOICE_DIR = STATE.parent / "deck-voice"
 VOICE_DUCK = 0.3            # the music, while the voice speaks, as a share of its volume
+VOICES = [                  # key, name, what it sounds like (the first is the one we'd pick)
+    ("am_michael", "Michael", "warm and relaxed"),
+    ("am_fenrir", "Fenrir", "deep, a radio DJ"),
+    ("af_heart", "Heart", "warm and smooth"),
+    ("bf_emma", "Emma", "soft, British"),
+    ("bm_george", "George", "rich, British"),
+    ("am_puck", "Puck", "light and playful"),
+    ("piper", "Robot", "the first voice, for a laugh"),
+]
+VOICE_SAMPLE = "Hi, I'm {name}. A request from Sam. For Jess, happy birthday! Here's September, by Earth, Wind and Fire."
+KOKORO_SAY = """
+import sys, soundfile
+from kokoro_onnx import Kokoro
+model, voices, voice, lang, out = sys.argv[1:6]
+samples, rate = Kokoro(model, voices).create(sys.stdin.read(), voice=voice, speed=0.95, lang=lang)
+soundfile.write(out, samples, rate, format="WAV")
+"""
 
 
-def voice_ready():
+def kokoro_ready():
+    return (KOKORO_DIR / "venv/bin/python").is_file() and all((KOKORO_DIR / f).is_file() for f in KOKORO_FILES)
+
+
+def piper_ready():
     return (PIPER_DIR / "venv/bin/piper").is_file() and (PIPER_DIR / f"{PIPER_VOICE}.onnx").is_file() \
         and (PIPER_DIR / f"{PIPER_VOICE}.onnx.json").is_file()
 
 
-def voice_install():
-    """Piper in its own Python (via uv) and one English voice: about 175 MB,
-    all in ~/.local/share/baseline/piper."""
-    if voice_ready():
-        return True
+def voices_ready():
+    """The voices installed, in VOICES' order."""
+    kokoro, piper = kokoro_ready(), piper_ready()
+    return [v for v in VOICES if (piper if v[0] == "piper" else kokoro)]
+
+
+def voice_ready():
+    return bool(voices_ready())
+
+
+def deck_voice_name(deck):
+    """The voice the Deck speaks in: the one picked, if it's installed, else the first that is."""
+    ready = [v[0] for v in voices_ready()]
+    wanted = deck.get("voiceName") or VOICES[0][0]
+    return wanted if wanted in ready else (ready[0] if ready else "")
+
+
+def voice_install(which="kokoro"):
+    """Kokoro (about 350 MB) or, with "robot", Piper and one voice (about 175
+    MB), each in its own Python made with uv, in ~/.local/share/baseline."""
     if not shutil.which("uv"):
         print("needs uv (omarchy pkg add uv)")
         return False
-    PIPER_DIR.mkdir(parents=True, exist_ok=True)
-    venv = PIPER_DIR / "venv"
-    steps = [["uv", "venv", "--python", "3.12", str(venv)],
-             ["uv", "pip", "install", "--python", str(venv / "bin/python"), "piper-tts"]]
-    for step in steps:
-        if not (venv / "bin/piper").is_file() and subprocess.run(step, stdin=subprocess.DEVNULL).returncode != 0:
-            return False
-    for name in (f"{PIPER_VOICE}.onnx", f"{PIPER_VOICE}.onnx.json"):
-        target = PIPER_DIR / name
-        if not target.is_file() and subprocess.run(
-                ["curl", "-fL", "--retry", "2", "-o", str(target) + ".part", PIPER_VOICE_URL + name]).returncode == 0:
+    if which == "robot":
+        folder, packages, ready = PIPER_DIR, ["piper-tts"], piper_ready
+        files = [(PIPER_VOICE_URL + n, n) for n in (f"{PIPER_VOICE}.onnx", f"{PIPER_VOICE}.onnx.json")]
+    else:
+        folder, packages, ready = KOKORO_DIR, ["kokoro-onnx", "soundfile"], kokoro_ready
+        files = [(KOKORO_URL + n, n) for n in KOKORO_FILES]
+    if ready():
+        return True
+    folder.mkdir(parents=True, exist_ok=True)
+    venv = folder / "venv"
+    if not (venv / "bin/python").is_file() and subprocess.run(["uv", "venv", "--python", "3.12", str(venv)],
+                                                              stdin=subprocess.DEVNULL).returncode != 0:
+        return False
+    if subprocess.run(["uv", "pip", "install", "--python", str(venv / "bin/python"), *packages],
+                      stdin=subprocess.DEVNULL).returncode != 0:
+        return False
+    for url, name in files:
+        target = folder / name
+        if not target.is_file() and subprocess.run(["curl", "-fL", "--retry", "2", "-o", str(target) + ".part", url]).returncode == 0:
             os.replace(str(target) + ".part", target)
-    return voice_ready()
+    return ready()
+
+
+def voice_speak(text, voice, wav):
+    """Text to a .wav in voice (a Kokoro voice, or "piper"). True if it worked."""
+    part = Path(str(wav) + ".part")
+    if voice == "piper":
+        argv = [str(PIPER_DIR / "venv/bin/piper"), "-m", str(PIPER_DIR / f"{PIPER_VOICE}.onnx"), "-f", str(part)]
+    else:
+        argv = [str(KOKORO_DIR / "venv/bin/python"), "-I", "-c", KOKORO_SAY, *(str(KOKORO_DIR / f) for f in KOKORO_FILES),
+                voice, "en-gb" if voice.startswith("b") else "en-us", str(part)]
+    try:
+        made = subprocess.run(argv, input=text.encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90)
+    except (OSError, subprocess.SubprocessError):
+        part.unlink(missing_ok=True)
+        return False
+    if made.returncode != 0 or not part.is_file():
+        part.unlink(missing_ok=True)
+        return False
+    os.replace(part, wav)
+    return True
+
+
+def voice_mp3(wav):
+    """The .mp3 of a clip, for a Sonos room (made once). None if it can't."""
+    out = wav.with_suffix(".mp3")
+    if not out.is_file():
+        if subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-af", "apad=pad_dur=0.4", "-codec:a",
+                           "libmp3lame", "-b:a", "160k", "-ar", "44100", str(out) + ".part.mp3"],
+                          stdin=subprocess.DEVNULL, timeout=60).returncode != 0:
+            return None
+        os.replace(str(out) + ".part.mp3", out)
+    return out
 
 
 def deck_voice_text(song):
     title = re.split(r"\s+[\(\[]", song.get("title", ""))[0].strip()
     who = song.get("by") or "a guest"
-    note = song.get("note", "").strip().rstrip(".!?")
+    note = song.get("note", "").strip()
     words = [f"A request from {who}."]
     if note:
-        words.append(note + ".")
-    words.append(f"Here's {title}" + (f", by {song['artist']}." if song.get("artist") else "."))
+        words.append(note if note[-1] in ".!?" else note + ".")
+    artist = song.get("artist", "").replace(" & ", " and ")
+    words.append(f"Here's {title}" + (f", by {artist}." if artist else "."))
     return " ".join(words)
 
 
-def deck_voice_clip(song, mp3=False):
-    """The spoken dedication for a requested song (made once, kept by its
-    request id): the .wav, or the .mp3 for a Sonos room. None if it can't."""
+def deck_voice_clip(song, mp3=False, voice=None):
+    """The spoken dedication for a requested song, in voice (made once per
+    voice, kept by request id): the .wav, or the .mp3 for a Sonos room."""
     rid = str(song.get("rid", ""))
-    if not re.fullmatch(r"[0-9a-f]{8}", rid) or not song.get("note") or not voice_ready():
+    if not re.fullmatch(r"[0-9a-f]{8}", rid) or not song.get("note"):
+        return None
+    voice = voice or deck_voice_name(deck_read())
+    if not voice:
         return None
     VOICE_DIR.mkdir(parents=True, exist_ok=True)
-    wav, out = VOICE_DIR / f"{rid}.wav", VOICE_DIR / f"{rid}.mp3"
-    if not wav.is_file():
-        made = subprocess.run([str(PIPER_DIR / "venv/bin/piper"), "-m", str(PIPER_DIR / f"{PIPER_VOICE}.onnx"),
-                               "-f", str(wav) + ".part"], input=deck_voice_text(song).encode(),
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
-        if made.returncode != 0:
-            return None
-        os.replace(str(wav) + ".part", wav)
-    if not mp3:
-        return wav
-    if not out.is_file():
-        if subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-codec:a", "libmp3lame", "-b:a", "128k",
-                           "-ar", "44100", str(out) + ".part.mp3"], stdin=subprocess.DEVNULL, timeout=60).returncode != 0:
-            return None
-        os.replace(str(out) + ".part.mp3", out)
-    return out
+    wav = VOICE_DIR / f"{rid}-{voice}.wav"
+    if not wav.is_file() and not voice_speak(deck_voice_text(song), voice, wav):
+        return None
+    return voice_mp3(wav) if mp3 else wav
 
 
 def clip_seconds(wav):
     import wave
     with wave.open(str(wav)) as w:
         return w.getnframes() / float(w.getframerate() or 1)
+
+
+def deck_room_clip(deck, room, mp3, length, track, at=0):
+    """A Sonos room plays a clip (from the guest page's server), then goes
+    back to its queue at track (from at seconds) and plays on."""
+    url = (deck.get("guests") or {}).get("url")
+    if not url:
+        return False
+    ip = room["ip"]
+    deck_update(lambda d: d.update(voiceUntil=time.time() + length + 12))
+    try:
+        sonos_call(ip, "AVTransport", "SetAVTransportURI", {"InstanceID": 0, "CurrentURI": f"{url}/voice/{mp3.name}",
+                                                            "CurrentURIMetaData": ""})
+        sonos_call(ip, "AVTransport", "Play", {"InstanceID": 0, "Speed": 1})
+        started = time.time()
+        while time.time() - started < 6:    # it fetches the clip first
+            state = (sonos_call(ip, "AVTransport", "GetTransportInfo", {"InstanceID": 0}) or {}).get("CurrentTransportState")
+            if state == "PLAYING":
+                break
+            time.sleep(0.3)
+        time.sleep(length + 0.6)
+    finally:
+        sonos_call(ip, "AVTransport", "SetAVTransportURI", {"InstanceID": 0, "CurrentURI": f"x-rincon-queue:{room['id']}#0",
+                                                            "CurrentURIMetaData": ""})
+        sonos_call(ip, "AVTransport", "Seek", {"InstanceID": 0, "Unit": "TRACK_NR", "Target": track})
+        if at > 2:
+            sonos_call(ip, "AVTransport", "Seek", {"InstanceID": 0, "Unit": "REL_TIME", "Target": hms(at)})
+        if deck.get("crossfade"):
+            sonos_call(ip, "AVTransport", "SetCrossfadeMode", {"InstanceID": 0, "CrossfadeMode": 1})
+        sonos_call(ip, "AVTransport", "Play", {"InstanceID": 0, "Speed": 1})
+        deck_update(lambda d: d.update(voiceUntil=0))
+        deck_sonos_soon()
+    return True
+
+
+def deck_laptop_clip(song, wav, length):
+    """Play a clip on the laptop, the song's app dipping under it."""
+    was = deck_app_volume(song) if song else None
+    def ramp(start, end, seconds, steps=6):
+        for i in range(1, steps + 1):
+            deck_app_volume(song, round(start + (end - start) * i / steps, 3))
+            time.sleep(seconds / steps)
+    if was:
+        ramp(was, was * VOICE_DUCK, 0.6)
+    try:
+        subprocess.run(["pw-play", str(wav)], stdin=subprocess.DEVNULL, timeout=length + 15)
+    finally:
+        if was:
+            ramp(was * VOICE_DUCK, was, 1.5)
 
 
 def deck_say(uid, before=False):
@@ -5756,48 +5877,40 @@ def deck_say(uid, before=False):
     room = deck_where_room(deck)
     if before and not room:
         return False
-    wav = deck_voice_clip(song, mp3=bool(room))
+    wav = deck_voice_clip(song, voice=deck_voice_name(deck))
     if not wav:
         return False
-    length = clip_seconds(wav.with_suffix(".wav"))
+    length = clip_seconds(wav)
     if room:
-        url = (deck.get("guests") or {}).get("url")
-        if not url:
-            return False        # the room fetches the clip from the guest page's server
-        ip = room["ip"]
-        track = int((sonos_call(ip, "AVTransport", "GetPositionInfo", {"InstanceID": 0}) or {}).get("Track") or 0)
-        if not track:
-            return False
-        track += 1 if before else 0
-        deck_update(lambda d: d.update(voiceUntil=time.time() + length + 8))
-        try:
-            sonos_call(ip, "AVTransport", "SetAVTransportURI", {"InstanceID": 0, "CurrentURI": f"{url}/voice/{wav.name}",
-                                                                "CurrentURIMetaData": ""})
-            sonos_call(ip, "AVTransport", "Play", {"InstanceID": 0, "Speed": 1})
-            time.sleep(length + 1.2)
-        finally:
-            sonos_call(ip, "AVTransport", "SetAVTransportURI", {"InstanceID": 0, "CurrentURI": f"x-rincon-queue:{room['id']}#0",
-                                                                "CurrentURIMetaData": ""})
-            sonos_call(ip, "AVTransport", "Seek", {"InstanceID": 0, "Unit": "TRACK_NR", "Target": track})
-            if deck.get("crossfade"):
-                sonos_call(ip, "AVTransport", "SetCrossfadeMode", {"InstanceID": 0, "CrossfadeMode": 1})
-            sonos_call(ip, "AVTransport", "Play", {"InstanceID": 0, "Speed": 1})
-            deck_update(lambda d: d.update(voiceUntil=0))
-            deck_sonos_soon()
-        return True
+        mp3 = voice_mp3(wav)
+        track = int((sonos_call(room["ip"], "AVTransport", "GetPositionInfo", {"InstanceID": 0}) or {}).get("Track") or 0)
+        return bool(mp3 and track) and deck_room_clip(deck, room, mp3, length, track + (1 if before else 0))
     time.sleep(2.5)             # let the song get going: the voice talks over its intro
-    was = deck_app_volume(song)
-    def ramp(start, end, seconds, steps=6):
-        for i in range(1, steps + 1):
-            deck_app_volume(song, round(start + (end - start) * i / steps, 3))
-            time.sleep(seconds / steps)
-    if was:
-        ramp(was, was * VOICE_DUCK, 0.6)
-    try:
-        subprocess.run(["pw-play", str(wav)], stdin=subprocess.DEVNULL, timeout=length + 15)
-    finally:
-        if was:
-            ramp(was * VOICE_DUCK, was, 1.5)
+    deck_laptop_clip(song, wav, length)
+    return True
+
+
+def deck_voice_sample(voice):
+    """A voice says hello and a made-up dedication, wherever the Deck plays."""
+    deck = deck_read()
+    name = next((v[1] for v in VOICES if v[0] == voice), "")
+    if voice not in [v[0] for v in voices_ready()]:
+        return False
+    VOICE_DIR.mkdir(parents=True, exist_ok=True)
+    wav = VOICE_DIR / f"sample-{voice}.wav"
+    if not wav.is_file() and not voice_speak(VOICE_SAMPLE.format(name=name), voice, wav):
+        return False
+    length = clip_seconds(wav)
+    room = deck_where_room(deck) if deck.get("playing") else None
+    if room:
+        mp3 = voice_mp3(wav)
+        position = sonos_call(room["ip"], "AVTransport", "GetPositionInfo", {"InstanceID": 0}) or {}
+        try:
+            h, m, sec = (int(x) for x in (position.get("RelTime") or "0:0:0").split(":"))
+        except ValueError:
+            h = m = sec = 0
+        return bool(mp3) and deck_room_clip(deck, room, mp3, length, int(position.get("Track") or 1), h * 3600 + m * 60 + sec)
+    deck_laptop_clip(deck.get("now") if deck.get("playing") else None, wav, length)
     return True
 
 
@@ -5843,6 +5956,8 @@ def deck_command(settings, args):
         deck_guests_heal(deck)
         deck["people"] = deck_people(deck) if deck.get("guests") or deck.get("requests") else []
         deck["voiceReady"] = voice_ready()
+        deck["voiceName"] = deck_voice_name(deck)
+        deck["voices"] = [{"key": k, "name": n, "about": a} for k, n, a in voices_ready()]
         print(json.dumps(deck_with_details(deck)))
         sys.stdout.flush()
         deck_details_soon(deck)
@@ -5979,6 +6094,12 @@ def deck_command(settings, args):
         deck = deck_read()
         song = next((s for s in [deck.get("now") or {}] + deck["set"] if s.get("rid") == args[2]), None)
         print(deck_voice_clip(song, mp3=bool(deck_where_room(deck))) if song else "")
+    elif action == "voice" and len(args) == 3 and args[1] == "use" and args[2] in [v[0] for v in VOICES]:
+        deck_update(lambda d: d.update(voiceName=args[2]))
+        subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "voice", "sample", args[2]], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    elif action == "voice" and len(args) == 3 and args[1] == "sample" and args[2] in [v[0] for v in VOICES]:
+        print("said" if deck_voice_sample(args[2]) else "that voice isn't installed")
     elif action == "say" and len(args) in (2, 3) and args[2:] in ([], ["--before"]):
         print("said" if deck_say(args[1], before=args[2:] == ["--before"]) else "nothing to say")
     elif action == "lock" and len(args) == 2 and args[1] in {"on", "off"}:
@@ -8033,11 +8154,11 @@ def main(argv):
             update_all(settings)
             if addon_version() not in (None, addon_wanted()):
                 addon_reload()
-        elif command == "voice" and args[:1] in (["install"], ["status"]):
+        elif command == "voice" and args[:1] in (["install"], ["status"]) and args[1:] in ([], ["robot"]):
             if args[0] == "install":
-                print("ready" if voice_install() else "couldn't install the voice")
+                print("ready" if voice_install(args[1] if args[1:] else "kokoro") else "couldn't install the voice")
             else:
-                print(json.dumps({"ready": voice_ready(), "voice": PIPER_VOICE, "where": str(PIPER_DIR)}))
+                print(json.dumps({"voices": [v[0] for v in voices_ready()], "using": deck_voice_name(deck_read())}))
         elif command == "addon" and args[:1] in (["version"], ["reload"]):
             if args[0] == "reload":
                 print("reloaded" if addon_reload() else "couldn't: press ↻ on the add-on in chrome://extensions")
