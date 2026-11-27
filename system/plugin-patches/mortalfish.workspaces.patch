@@ -12,8 +12,8 @@
    property string activeMode: "dwindle"
    property bool modeStale: false
  
-+  // Names for the first six slots; the rest keep their numbers.
-+  readonly property var slotNames: ["term", "web", "code", "chat", "video", "music"]
++  // Names for the first seven slots (7 is Baseline's Deck); the rest keep their numbers.
++  readonly property var slotNames: ["term", "web", "code", "chat", "video", "music", "deck"]
 +
 +  function slotLabel(slot) {
 +    if (slot === root.slots) return "0"

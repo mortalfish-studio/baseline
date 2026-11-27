@@ -109,7 +109,7 @@ The Player tab drives three services in Chrome, through the [Chrome add-on](docs
 
 ### The Deck
 
-`omarchy-shell mortalfish.baseline deck`, or *Open the Deck* in the Player tab: a window for a set of songs you arrange by hand, from YouTube Music and Apple Music together.
+The Deck has a workspace of its own, **7 · deck** (Super+7), where it fills the screen and is always there. *Open the Deck* in the Player tab (or `omarchy-shell mortalfish.baseline deck`) pops it up over whatever you're doing instead; Escape, *Back to workspace 7*, or switching workspace sends it home. It's a set of songs you arrange by hand, from YouTube Music and Apple Music together. Rather not keep it open: `afterlight set deck.home false`.
 
 - **Find songs** on the left (the same YouTube Music / Apple Music switch) and drag one into the set, onto the cover to play it now, or onto a room to play it there. ▶ and + do the same without dragging; an Apple Music album adds all its songs.
 - **Arrange the set**: drag songs up and down, pin one (📌) to keep it in place when you shuffle, remove one, or drag a song from *Played* back in.

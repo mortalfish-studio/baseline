@@ -93,6 +93,7 @@ DEFAULTS = {
     # Where "play <something>" looks when it isn't a Beatport chart or playlist
     # and no service is named: "ytmusic" or "applemusic".
     "music": {"service": "ytmusic"},
+    "deck": {"home": True},          # the Deck kept open on workspace 7
     "battery": {"limit": False, "limitPercent": 80},
     # Beatport links pinned in the Player tab: [{"name": ..., "url": ...}]
     "beatport": {"pins": []},

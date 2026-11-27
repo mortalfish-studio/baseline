@@ -536,5 +536,6 @@
   "deck.dropToJoin": "Drop to play here too",
   "deck.dropToLeave": "Drop outside to take it out",
   "deck.busy": "In use",
-  "deck.paused": "Paused"
+  "deck.paused": "Paused",
+  "deck.sendHome": "Back to workspace %1"
 }

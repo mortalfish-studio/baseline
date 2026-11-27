@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
+import Quickshell.Hyprland
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
@@ -24,11 +25,69 @@ Item {
 
   Commons.Translations { id: strings; directory: Qt.resolvedUrl("../i18n") }
 
-  function show() {
+  // ------------------------------------------------------------ where it sits
+  // Its home is workspace 7, where it fills the screen. Opened from anywhere
+  // else it pops up there, floating over the windows, and goes home again with
+  // Escape or when you switch workspace. `silent` opens it at home without
+  // taking you there (at login).
+  readonly property int homeWorkspace: 7
+  property bool popped: false
+  property int poppedOn: -1
+  readonly property int currentWorkspace: Hyprland.focusedWorkspace ? Hyprland.focusedWorkspace.id : -1
+  // Only work (poll rooms, animate) while it can be seen.
+  readonly property bool seen: window.visible && (popped || currentWorkspace === homeWorkspace)
+
+  function show(silent) {
     window.visible = true
     read()
-    Qt.callLater(() => query.forceActiveFocus())
+    if (silent) return
+    placeTries = 0
+    place.restart()
   }
+  function target() {
+    for (const t of Hyprland.toplevels.values) {
+      if (t.title !== "Baseline Deck") continue
+      let address = String(t.address || "")
+      if (address && address.indexOf("0x") !== 0) address = "0x" + address
+      if (/^0x[0-9a-f]+$/i.test(address)) return "window = \"address:" + address + "\""
+    }
+    return ""
+  }
+  function popHere() {
+    const t = target()
+    if (!t) return false
+    const ws = currentWorkspace
+    if (ws === homeWorkspace || ws < 1) {
+      if (popped) goHome()
+      Hyprland.dispatch("hl.dsp.focus({ workspace = \"" + homeWorkspace + "\" })")
+    } else {
+      Hyprland.dispatch("hl.dsp.window.move({ workspace = \"" + ws + "\", follow = false, " + t + " })")
+      Hyprland.dispatch("hl.dsp.window.float({ action = \"on\", " + t + " })")
+      Hyprland.dispatch("hl.dsp.window.resize({ x = 1240, y = 820, " + t + " })")
+      Hyprland.dispatch("hl.dsp.window.center({ " + t + " })")
+      Hyprland.dispatch("hl.dsp.focus({ " + t + " })")
+      Hyprland.dispatch("hl.dsp.window.alter_zorder({ mode = \"top\", " + t + " })")
+      poppedOn = ws
+      popped = true
+    }
+    query.forceActiveFocus()
+    return true
+  }
+  function goHome() {
+    const t = target()
+    popped = false
+    if (!t) return
+    Hyprland.dispatch("hl.dsp.window.float({ action = \"off\", " + t + " })")
+    Hyprland.dispatch("hl.dsp.window.move({ workspace = \"" + homeWorkspace + "\", follow = false, " + t + " })")
+  }
+  // The window may still be on its way (just made, or shown again): try a few times.
+  property int placeTries: 0
+  Timer {
+    id: place
+    interval: 120
+    onTriggered: if (!root.popHere() && ++root.placeTries < 20) restart()
+  }
+  onCurrentWorkspaceChanged: if (popped && currentWorkspace !== poppedOn) goHome()
 
   // ------------------------------------------------------------ the set
   property var deck: ({ now: null, set: [], played: [], pinned: [], where: { kind: "laptop" }, playing: false, rooms: [] })
@@ -48,7 +107,7 @@ Item {
   // with something else (the TV); `afterlight deck rooms`, every few seconds.
   readonly property bool inSonos: whereId !== "laptop"
   readonly property real tileWidth: strip.tileWidth
-  readonly property bool open: window.visible
+  readonly property bool open: seen
   readonly property Item stageItem: stage
   property var roomList: []
   property string roomText: ""
@@ -71,7 +130,7 @@ Item {
   Timer {
     interval: 5000
     repeat: true
-    running: window.visible
+    running: root.seen
     triggeredOnStart: true
     onTriggered: root.readRooms()
   }
@@ -106,7 +165,7 @@ Item {
   Timer {
     interval: 1000
     repeat: true
-    running: window.visible && root.deck.playing && root.pos.playing
+    running: root.seen && root.deck.playing && root.pos.playing
     onTriggered: root.shownTime = Math.min(root.shownTime + 1, root.pos.length || root.shownTime + 1)
   }
 
@@ -234,13 +293,13 @@ Item {
     implicitWidth: 1240
     implicitHeight: 820
     minimumSize: Qt.size(980, 640)
-    onVisibleChanged: if (!visible) root.closed()
+    onVisibleChanged: if (!visible) { root.popped = false; root.closed() }
 
     Item {
       id: stage
       anchors.fill: parent
       focus: true
-      Keys.onEscapePressed: window.visible = false
+      Keys.onEscapePressed: if (root.popped) root.goHome()
       Keys.onSpacePressed: root.run(["deck", root.deck.playing ? "pause" : "play"])
 
       Rectangle {
@@ -268,6 +327,13 @@ Item {
             Label { text: strings.t("deck.title").toUpperCase(); font.pixelSize: 22; font.bold: true; font.letterSpacing: 3; color: root.teal }
           }
           Item { Layout.fillWidth: true }
+          ActionButton {
+            visible: root.popped
+            icon: "⤓"
+            text: strings.t("deck.sendHome").arg(root.homeWorkspace)
+            tone: root.teal
+            onClicked: root.goHome()
+          }
           Label {
             visible: root.busy || root.status !== ""
             text: root.status !== "" ? root.status : "󰔟"
@@ -890,7 +956,7 @@ Item {
                       GradientStop { position: 1; color: "transparent" }
                     }
                     NumberAnimation on x {
-                      running: spark.visible && cable.visible && window.visible
+                      running: spark.visible && cable.visible && root.seen
                       from: -spark.width; to: cable.width
                       duration: 900 + cable.width * 3
                       loops: Animation.Infinite

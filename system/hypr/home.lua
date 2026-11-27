@@ -1,9 +1,9 @@
 -- Home workspaces. Each core app always opens on its own workspace, whether it
 -- starts at login, from a key, or after being closed:
---   1 term · 2 web · 3 code · 4 chat · 5 video · 6 music
+--   1 term · 2 web · 3 code · 4 chat · 5 video · 6 music · 7 deck (Baseline's Deck)
 -- Workspaces 3 and 4 belong to your coding and chat apps, chosen in Baseline >
 -- Setup > Apps (`afterlight apps`), which writes hypr/baseline_apps.lua.
--- The bar names these slots (mortalfish.workspaces); Super+1..6 go to them.
+-- The bar names these slots (mortalfish.workspaces); Super+1..7 go to them.
 
 local homes = {
   { "1", { class = "^foot$" } },                                   -- term: the terminal
@@ -38,5 +38,7 @@ o.rebind("ALT + XF86AudioLowerVolume", "Volume down precise", volume .. " -1", {
 
 -- Baseline Studio (the picture library and look maker): a centred float.
 o.window({ title = "^Baseline Studio$" }, { float = true, center = true, size = { 1240, 840 } })
--- The Deck (the set of songs to arrange and play): a centred float too.
-o.window({ title = "^Baseline Deck$" }, { float = true, center = true, size = { 1240, 820 } })
+-- The Deck (the set of songs to arrange and play) lives on workspace 7, filling
+-- it; opened from anywhere else it pops up over that workspace as a float and
+-- goes home again with Escape or when you switch away (ui/Deck.qml).
+o.window({ title = "^Baseline Deck$" }, { workspace = "7 silent" })

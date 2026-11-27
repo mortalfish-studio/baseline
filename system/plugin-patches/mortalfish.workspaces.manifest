@@ -4,7 +4,7 @@
   "name": "My Workspaces",
   "version": "1.0.0",
   "author": "mortalfish",
-  "description": "Named workspace indicators (term, web, code, chat, video, music)",
+  "description": "Named workspace indicators (term, web, code, chat, video, music, deck)",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "My Workspaces",
-    "description": "Named workspace indicators (term, web, code, chat, video, music)",
+    "description": "Named workspace indicators (term, web, code, chat, video, music, deck)",
     "category": "Compositor",
     "allowMultiple": false
   },

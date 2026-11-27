@@ -290,6 +290,10 @@ BarWidget {
   // The last tab opened survives restarts: it lives in settings.json.
   property bool tabRestored: false
   onAfterStateChanged: {
+    if (afterState && afterState.settings.deck && afterState.settings.deck.home && !deckWanted) {
+      deckSilent = true
+      deckWanted = true
+    }
     if (tabRestored || !afterState || !afterState.settings.ui) return
     tabRestored = true
     if (!popupOpen && tabNames.indexOf(afterState.settings.ui.tab) >= 0) tab = afterState.settings.ui.tab
@@ -789,10 +793,14 @@ BarWidget {
   }
 
   // The Deck: made on first use, kept while open.
+  // It lives on workspace 7 (made quietly at start, unless deck.home is off);
+  // opening it from anywhere else pops it up there.
   property bool deckWanted: false
+  property bool deckSilent: false
   function openDeck() {
     close()
-    if (deckWanted && deckLoader.item) deckLoader.item.show()
+    deckSilent = false
+    if (deckWanted && deckLoader.item) deckLoader.item.show(false)
     else deckWanted = true
   }
   Loader {
@@ -801,7 +809,7 @@ BarWidget {
     source: "Deck.qml"
     onLoaded: {
       item.host = root
-      item.show()
+      item.show(root.deckSilent)
     }
   }
 

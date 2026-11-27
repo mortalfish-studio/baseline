@@ -79,7 +79,7 @@ Chrome's colour follows the look through Omarchy's own browser policy (`/etc/opt
 
 ## The desktop, day to day
 
-- **Home workspaces**: 1 terminal, 2 web (Chrome, Outlook), 3 code (T3 Code, or the coding app picked in Setup → Apps), 4 chat (Grok Bot, or your pick), 5 video (YouTube), 6 music (Beatport, YouTube Music, Apple Music). Each app always opens on its own workspace, and all six start at login.
+- **Home workspaces**: 1 terminal, 2 web (Chrome, Outlook), 3 code (T3 Code, or the coding app picked in Setup → Apps), 4 chat (Grok Bot, or your pick), 5 video (YouTube), 6 music (Beatport, YouTube Music, Apple Music), 7 deck (Baseline's [Deck](../README.md#the-deck), opened there by the shell at start unless `deck.home` is off). Each app always opens on its own workspace, and all of them start at login. The bar names the seven (the `mortalfish.workspaces` copy).
 - **Day / Night / Saver**: switched by the clock (07:00 and 20:00 by default). Saver lowers the screen brightness, warms the colours, picks the power-saver profile and a solid bar, and puts all four back afterwards. Night and Saver also change the colour temperature.
 - **Mouse** (Razer Basilisk V3 only; other mice need [adapting](adapting.md#a-different-mouse)): lights in the look's colours; slow-down button = hold to dictate, front side button = OmaRelay voice, rear side button = next track, wheel tilt = previous/next workspace. All changeable in Setup.
 - **Superwhisper**: Setup can change its recording indicator style.
@@ -105,7 +105,7 @@ Chrome's colour follows the look through Omarchy's own browser policy (`/etc/opt
 | "play …" with no clear match, or *Ask Grok for ideas* | Grok's fast model (`grok -m grok-4.7-build-fast`, tools off) gets the words asked for and suggests songs; they're then searched on YouTube Music or Apple Music. Only if the Grok command line is installed and signed in |
 | the Deck: *Build a set* and *Fill* | Grok's fast model, as above, gets your brief (or the titles and artists already in the set) and the length; the songs it names are searched on YouTube Music or Apple Music |
 | the Deck, playing in a Sonos room | writes the set into that room's queue (replacing what was queued there) and plays it, over the local network; YouTube Music songs are searched on Apple Music first |
-| the Deck's rooms, while its window is open | asks each Sonos speaker for its group, volume and whether it's playing, every 5 seconds, on the local network. Adding or taking out a room regroups the speakers (and may lower a joining room's volume); *Everywhere* never touches a room that's playing something else |
+| the Deck's rooms, while you can see it (on workspace 7 or popped up) | asks each Sonos speaker for its group, volume and whether it's playing, every 5 seconds, on the local network. Adding or taking out a room regroups the speakers (and may lower a joining room's volume); *Everywhere* never touches a room that's playing something else |
 | searching Apple Music (Player tab, Deck, or "play … on Apple Music") | Apple's public catalogue search (`itunes.apple.com`), no account; the words searched and your region's storefront are sent |
 
 Nothing is sent anywhere else, and nothing personal goes into shared looks: commits use your GitHub no-reply address and an author handle you choose.
