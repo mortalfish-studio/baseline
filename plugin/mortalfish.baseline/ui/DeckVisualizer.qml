@@ -56,7 +56,10 @@ Item {
   Process {
     id: cavaMic
     running: viz.hearing
-    command: ["cava", "-p", String(Qt.resolvedUrl("cava-mic.conf")).replace(/^file:\/\//, "")]
+    // The default microphone's PipeWire name goes into the config as it starts.
+    command: ["sh", "-c", "src=$(pactl get-default-source) || exit 1; conf=${XDG_RUNTIME_DIR:-/tmp}/baseline-cava-mic.conf; "
+              + "sed \"s|@DEFAULT_SOURCE@|$src|\" \"$1\" > \"$conf\" && exec cava -p \"$conf\"", "sh",
+              String(Qt.resolvedUrl("cava-mic.conf")).replace(/^file:\/\//, "")]
     stdout: SplitParser {
       onRead: function(line) {
         const parts = line.split(";")

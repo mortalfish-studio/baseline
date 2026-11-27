@@ -5970,6 +5970,10 @@ def deck_command(settings, args):
         deck["undo"] = len(stack) if isinstance(stack, list) else 0
         deck_guests_heal(deck)
         deck["people"] = deck_people(deck) if deck.get("guests") or deck.get("requests") else []
+        room = deck_where_room(deck)
+        if room:
+            level = (sonos_call(room["ip"], "GroupRenderingControl", "GetGroupVolume", {"InstanceID": 0}, timeout=1.5) or {}).get("CurrentVolume")
+            deck["roomVolume"] = int(level) if str(level or "").isdigit() else None
         deck["voiceReady"] = voice_ready()
         deck["voiceName"] = deck_voice_name(deck)
         deck["voices"] = [{"key": k, "name": n, "about": a} for k, n, a in voices_ready()]
@@ -6103,6 +6107,16 @@ def deck_command(settings, args):
             toast("Last call", "Requests close at " + time.strftime("%H:%M", time.localtime(closes)), glyph="󰄜")
     elif action == "requests" and len(args) == 3 and args[1] == "auto" and args[2] in {"on", "off"}:
         deck_update(lambda d: d.update(requestsAuto=args[2] == "on"))
+    elif action == "volume" and len(args) == 2 and re.fullmatch(r"[+-]?\d{1,3}", args[1]):
+        # The room the Deck plays in (not Baseline's Sonos card, which may be another).
+        room = deck_where_room(deck_read())
+        if not room:
+            sys.exit("The Deck isn't playing in a Sonos room.")
+        if args[1][0] in "+-":
+            sonos_call(room["ip"], "GroupRenderingControl", "SetRelativeGroupVolume", {"InstanceID": 0, "Adjustment": int(args[1])})
+        else:
+            sonos_call(room["ip"], "GroupRenderingControl", "SetGroupVolume",
+                       {"InstanceID": 0, "DesiredVolume": max(0, min(100, int(args[1])))})
     elif action == "mic" and len(args) == 2 and args[1] in {"on", "off"}:
         deck_update(lambda d: d.update(micViz=args[1] == "on"))
     elif action == "voice" and len(args) == 2 and args[1] in {"on", "off"}:

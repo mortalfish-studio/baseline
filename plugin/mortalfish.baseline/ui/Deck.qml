@@ -1613,6 +1613,27 @@ Item {
                     tone: root.deck.crossfade ? root.amber : root.teal
                     onClicked: root.run(["deck", "crossfade", root.deck.crossfade ? "off" : "on"])
                   }
+                  // The room's volume (the room the Deck plays in).
+                  Item { Layout.fillWidth: true; visible: root.inSonos }
+                  RowLayout {
+                    visible: root.inSonos && root.deck.roomVolume !== undefined && root.deck.roomVolume !== null
+                    spacing: 8
+                    Label { text: "󰜟"; font.family: "Iosevka Nerd Font Propo"; color: root.amber }
+                    ThemedSlider {
+                      id: roomVol
+                      Layout.preferredWidth: 170
+                      label: ""; valueText: ""
+                      value: root.deck.roomVolume || 0
+                      minimum: 0; maximum: 100; step: 2
+                      fromColor: root.amber; toColor: root.teal
+                      onCommitted: function(v) { root.run(["deck", "volume", String(Math.round(v))]) }
+                    }
+                    Label {
+                      text: Commons.I18n.formatNumber(Math.round(roomVol.liveValue))
+                      font.pixelSize: Style.font.caption; color: root.teal
+                      Layout.preferredWidth: 26
+                    }
+                  }
                 }
               }
             }
