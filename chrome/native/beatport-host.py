@@ -60,6 +60,15 @@ def read_chrome():
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps({"site": message["site"], "at": int(time.time())}) + "\n")
             tmp.replace(path)
+        elif message.get("type") == "log":
+            # What the add-on was doing, for working out what went wrong (kept short).
+            path = STATE.parent / "addon.log"
+            try:
+                lines = path.read_text().splitlines()[-199:] if path.exists() else []
+            except OSError:
+                lines = []
+            lines.append(time.strftime("%H:%M:%S ") + str(message.get("text", ""))[:300].replace("\n", " "))
+            path.write_text("\n".join(lines) + "\n")
         elif message.get("type") == "reply":
             with pending_lock:
                 waiter = pending.pop(message.get("id"), None)

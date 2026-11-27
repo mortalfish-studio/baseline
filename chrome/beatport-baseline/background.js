@@ -5,6 +5,8 @@
 const HOST = "com.mortalfish.baseline_beatport";
 const BEATPORT = /^https:\/\/www\.beatport\.com\//;
 let port = null;
+// A line in Baseline's add-on log (~/.local/state/afterlight/addon.log); never tokens.
+const log = (text) => { try { if (port) port.postMessage({ type: "log", text: String(text).slice(0, 300) }); } catch (error) { /* gone */ } };
 
 function connect() {
   try {
@@ -15,8 +17,11 @@ function connect() {
     return;
   }
   port.onMessage.addListener((message) => {
+    if (message && message.type !== "applemusic" && message.type !== "page") log("request " + message.type);
+    if (message && (message.op || {}).action === "export" || (message.op || {}).type === "bp-export") log("export asked: " + message.type);
     handle(message)
-      .then((reply) => port && port.postMessage({ id: message.id, type: "reply", ...reply }))
+      // The request's id last, so a reply's own "id" (a new playlist's, say) never hides it.
+      .then((reply) => port && port.postMessage({ ...reply, id: message.id, type: "reply" }))
       .catch((error) => port && port.postMessage({ id: message.id, type: "reply", error: String(error) }));
   });
   port.onDisconnect.addListener(() => { port = null; setTimeout(() => { if (!port) connect(); }, 10000); });
@@ -142,16 +147,9 @@ async function appleMusic(op, tab) {
       if (op.action === "export") {
         if (!kit.isAuthorized) return { ok: false, error: "signed out" };
         try {
-          // Apple's own API with the player's own tokens, as the web app does; capped at 20 s.
-          const made = await fetch("https://api.music.apple.com/v1/me/library/playlists", {
-            method: "POST", signal: AbortSignal.timeout(20000),
-            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${kit.developerToken}`,
-                       "Music-User-Token": kit.musicUserToken },
-            body: JSON.stringify({ attributes: { name: op.name, description: "Saved from Baseline's Deck" },
-                                   relationships: { tracks: { data: op.ids.map((id) => ({ id, type: "songs" })) } } }) });
-          const body = await made.json().catch(() => ({}));
-          const first = (body.data || [])[0];
-          return { ok: made.ok && !!first, id: first ? String(first.id) : "", status: made.status };
+          // The player's own tokens, for this worker to make the playlist
+          // with (they never leave the add-on).
+          return { ok: !!(kit.developerToken && kit.musicUserToken), dev: kit.developerToken, user: kit.musicUserToken };
         } catch (error) { return { ok: false, error: String(error).slice(0, 120) }; }
       }
       // Reading only: playlists for a search (yours, then the catalogue's),
@@ -224,7 +222,54 @@ async function appleMusic(op, tab) {
       return state();
     },
   }).catch((error) => [{ result: { ok: false, error: String(error) } }]);
-  return (result && result.result) || { ok: false };
+  const reply = (result && result.result) || { ok: false };
+  if (op.action === "export") log("apple tokens: " + (reply.ok ? "yes" : "no " + (reply.error || "")));
+  if (op.action === "export") return reply.ok ? await appleExport(clean, reply.dev, reply.user) : { ok: false, error: reply.error || "signed out" };
+  return reply;
+}
+
+// A new playlist in your Apple Music library, made here with the player's
+// tokens (Apple's API, as its web app does), 20 seconds at most.
+async function appleExport(op, dev, user) {
+  try {
+    const made = await fetch("https://api.music.apple.com/v1/me/library/playlists", {
+      method: "POST", signal: AbortSignal.timeout(20000),
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${dev}`, "Music-User-Token": user,
+                 "Origin": "https://music.apple.com" },
+      body: JSON.stringify({ attributes: { name: op.name, description: "Saved from Baseline's Deck" },
+                             relationships: { tracks: { data: op.ids.map((id) => ({ id, type: "songs" })) } } }) });
+    const text = await made.text();
+    log("apple export status " + made.status);
+    let body = {};
+    try { body = JSON.parse(text || "{}"); } catch (error) { /* not JSON */ }
+    const first = (body.data || [])[0];
+    return { ok: made.ok && !!first, playlist: first ? String(first.id) : "", status: made.status, error: first ? "" : text.slice(0, 120) };
+  } catch (error) { log("apple export error " + error); return { ok: false, error: String(error).slice(0, 120) }; }
+}
+
+// A new private playlist in your Beatport account, made here with the
+// Beatport app's own sign-in (its session), 25 seconds at most.
+async function beatportExport(op) {
+  const name = String(op.name || "").replace(/[\u0000-\u001f]/g, "").slice(0, 100);
+  const ids = (Array.isArray(op.ids) ? op.ids : []).map(Number).filter((n) => Number.isInteger(n) && n > 0 && n < 1e12).slice(0, 300);
+  if (!name || !ids.length) return { ok: false };
+  let step = "session";
+  try {
+    const session = await (await fetch("https://www.beatport.com/api/auth/session", { credentials: "include", signal: AbortSignal.timeout(10000) })).json();
+    const token = session && session.token && !session.token.anon ? session.token.accessToken : "";
+    if (!token) return { ok: false, error: "signed out" };
+    const api = (path, body) => fetch(`https://api.beatport.com/v4/my/playlists/${path}`, {
+      method: "POST", signal: AbortSignal.timeout(15000),
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` }, body: JSON.stringify(body) });
+    step = "create";
+    log("beatport export: signed in, creating");
+    const made = await api("", { name });
+    const playlist = await made.json().catch(() => ({}));
+    if (!made.ok || !playlist.id) return { ok: false, status: made.status, error: "create" };
+    step = "add tracks";
+    const added = await api(`${playlist.id}/tracks/bulk/`, { track_ids: ids });
+    return { ok: added.ok, status: added.status, playlist: String(playlist.id) };
+  } catch (error) { log("beatport export " + step + " " + error); return { ok: false, error: step + ": " + String(error).slice(0, 120) }; }
 }
 
 async function beatportTab() {
@@ -394,6 +439,7 @@ async function handle(message) {
   if (message.type === "page") {
     // Read or press something on the open Beatport (or, with site
     // "ytmusic", YouTube Music) page (see bridge.js).
+    if ((message.op || {}).type === "bp-export") return await beatportExport(message.op);
     const tab = message.site === "ytmusic" ? await ytmusicTab() : await beatportTab();
     if (!tab) return { ok: false, error: "no Beatport tab" };
     return await askPage(tab, message.op || {});

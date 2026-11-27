@@ -5541,6 +5541,8 @@ def deck_command(settings, args):
         print(json.dumps(deck_with_details(deck)))
         sys.stdout.flush()
         deck_details_soon(deck)
+        if deck["playing"]:
+            deck_watch()        # the watcher went away (a restart, a crash): it follows the music again
     elif action == "add" and len(args) >= 3 and args[1] in DECK_SERVICES:
         try:
             item = json.loads(args[2])

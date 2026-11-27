@@ -183,6 +183,14 @@ Item {
       } catch (error) {}
     }
   }
+  // The watcher reports every couple of seconds while music plays; if it's
+  // gone quiet, reading the state starts it again.
+  Timer {
+    interval: 15000
+    repeat: true
+    running: root.seen && root.deck.playing
+    onTriggered: if (Date.now() / 1000 - (root.pos.at || 0) > 20) root.read()
+  }
   // Between the watcher's reports, the clock keeps moving.
   Timer {
     interval: 1000

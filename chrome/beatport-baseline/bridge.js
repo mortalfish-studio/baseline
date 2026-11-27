@@ -125,21 +125,24 @@
     const name = String(op.name || "").replace(/[\u0000-\u001f]/g, "").slice(0, 100);
     const ids = (Array.isArray(op.ids) ? op.ids : []).map(Number).filter((n) => Number.isInteger(n) && n > 0 && n < 1e12).slice(0, 300);
     if (!name || !ids.length) return { ok: false };
-    try { return await beatportMake(name, ids); }
-    catch (error) { return { ok: false, error: String(error).slice(0, 120) }; }
+    const where = { step: "session" };
+    const work = beatportMake(name, ids, where).catch((error) => ({ ok: false, error: where.step + ": " + String(error).slice(0, 120) }));
+    return await Promise.race([work, sleep(25000).then(() => ({ ok: false, error: "stuck at " + where.step }))]);
   }
 
-  async function beatportMake(name, ids) {
+  async function beatportMake(name, ids, where) {
     const session = await (await fetch("/api/auth/session", { credentials: "include", signal: AbortSignal.timeout(10000) })).json().catch(() => ({}));
     const token = session && session.token && !session.token.anon ? session.token.accessToken : "";
     if (!token) return { ok: false, error: "signed out" };
     const api = (path, body) => fetch(`https://api.beatport.com/v4/my/playlists/${path}`, {
       method: "POST", signal: AbortSignal.timeout(15000), headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` }, body: JSON.stringify(body) });
+    where.step = "create";
     const made = await api("", { name });
     const playlist = await made.json().catch(() => ({}));
     if (!made.ok || !playlist.id) return { ok: false, status: made.status };
+    where.step = "add tracks";
     const added = await api(`${playlist.id}/tracks/bulk/`, { track_ids: ids });
-    return { ok: added.ok, status: added.status, id: playlist.id };
+    return { ok: added.ok, status: added.status, playlist: String(playlist.id) };
   }
 
   // The page's own player volume (0-1): Beatport's and YouTube Music's are
