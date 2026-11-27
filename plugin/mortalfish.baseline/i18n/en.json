@@ -629,6 +629,8 @@
   "deck.voice": "Read dedications",
   "deck.voiceLabel": "Voice",
   "deck.dedication": "Dedication",
+  "deck.lastCallTitle": "Last call",
+  "deck.lastCallScan": "Scan the code to send your song",
   "deck.dedicationFor": "for %1",
   "deck.newRequest": "New request",
   "deck.withDedication": "with a dedication",

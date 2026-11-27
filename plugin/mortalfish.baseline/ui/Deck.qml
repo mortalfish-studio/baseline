@@ -2557,6 +2557,9 @@ Item {
         color: root.ground
         TapHandler {}       // nothing underneath takes a tap while it's up
         HoverHandler { cursorShape: Qt.ArrowCursor }
+        // A request popping in: the whole stage softens behind it.
+        layer.enabled: root.stageOn && askPop.opacity > 0
+        layer.effect: MultiEffect { blurEnabled: true; blur: askPop.opacity * 0.55; blurMax: 40 }
 
         readonly property var nextUp: (root.deck.set || []).slice(0, 3)
         readonly property real big: Math.min(height * 0.5, width * 0.34)
@@ -2600,13 +2603,28 @@ Item {
           gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: root.amber } GradientStop { position: 1; color: root.teal } }
         }
 
+        // Last call, while it runs: a small amber tag by the clock.
+        Rectangle {
+          readonly property real closes: root.deck.lastCall || 0
+          visible: closes > 0 && stageClock.stamp < closes
+          x: 36; y: 64
+          height: 26; width: callTag.implicitWidth + 22; radius: 13
+          color: Util.alpha(root.amber, 0.14)
+          border.width: 1; border.color: root.amber
+          Label {
+            id: callTag
+            anchors.centerIn: parent
+            text: "󰄜  " + strings.t("deck.closesAt").arg(new Date(parent.closes * 1000).toLocaleTimeString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat)).toUpperCase()
+            font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption - 1; font.letterSpacing: 2; color: root.amber
+          }
+        }
         // The time, and the way out.
         Label {
           x: 36; y: 28
           text: stageClock.now
           font.pixelSize: 22; font.letterSpacing: 3; color: root.teal
-          Timer { id: stageClock; property string now: ""; interval: 10000; repeat: true; running: stageView.visible; triggeredOnStart: true
-                  onTriggered: now = new Date().toLocaleTimeString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat) }
+          Timer { id: stageClock; property string now: ""; property real stamp: 0; interval: 10000; repeat: true; running: stageView.visible; triggeredOnStart: true
+                  onTriggered: { now = new Date().toLocaleTimeString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat); stamp = Date.now() / 1000 } }
         }
         RowLayout {
           anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 26
@@ -2732,10 +2750,13 @@ Item {
             radius: Style.cornerRadius > 0 ? 8 : 0
             color: "transparent"
             layer.enabled: true
+            // A soft glow all round, centred on the cover, breathing with the bass.
             layer.effect: MultiEffect {
-              shadowEnabled: true; shadowBlur: 1.0; shadowVerticalOffset: 10
-              shadowColor: Util.alpha(root.amber, 0.32 + stageView.bass * 0.5)
-              shadowScale: 1.0 + stageView.bass * 0.04
+              shadowEnabled: true; shadowBlur: 1.0; blurMax: 64
+              shadowHorizontalOffset: 0; shadowVerticalOffset: 0
+              shadowColor: Util.alpha(root.amber, 0.3 + stageView.bass * 0.45)
+              shadowScale: 1.02 + stageView.bass * 0.03
+              autoPaddingEnabled: true
             }
             Cover { anchors.fill: parent; size: stageView.big; url: root.now ? root.now.thumb || "" : "" }
             // A new song: its cover settles in.
@@ -2940,7 +2961,7 @@ Item {
           anchors.fill: parent
           z: 25
           color: root.ground
-          opacity: stageView.moment ? 0.93 : 0
+          opacity: stageView.moment ? 0.97 : 0
           visible: opacity > 0
           Behavior on opacity { NumberAnimation { duration: Style.duration(stageView.moment ? 360 : 260); easing.type: Easing.OutCubic } }
         }
@@ -2952,6 +2973,7 @@ Item {
           opacity: stageView.moment ? 1 : 0
           Behavior on opacity { NumberAnimation { duration: Style.duration(stageView.moment ? 420 : 240); easing.type: Easing.OutCubic } }
           readonly property var m: stageView.speaking || ({})
+          readonly property bool isCall: m.kind === "call"
           readonly property real length: Math.max(1, (m.until || 0) - (m.start || 0))
           readonly property real since: stageView.clock - (m.start || 0)
           // The voice says who it's from first; the words type out while it reads them.
@@ -2968,8 +2990,24 @@ Item {
             anchors.leftMargin: Math.max(64, stageView.width * 0.09); anchors.rightMargin: Math.max(64, stageView.width * 0.09)
             spacing: Math.max(40, stageView.width * 0.04)
 
+            // Last call: the code to scan, big, where a face would be.
+            Rectangle {
+              visible: dedication.isCall && !!root.guests && (root.guests.qr || "") !== ""
+              Layout.preferredWidth: dedication.face; Layout.preferredHeight: dedication.face
+              Layout.alignment: Qt.AlignVCenter
+              radius: Style.cornerRadius > 0 ? 12 : 0
+              color: "white"
+              layer.enabled: true
+              layer.effect: MultiEffect { shadowEnabled: true; shadowColor: Util.alpha(root.amber, 0.4 + stageView.bass * 0.3); shadowBlur: 1.0 }
+              Image {
+                anchors.fill: parent; anchors.margins: 14
+                source: root.guests && root.guests.qr ? "file://" + root.guests.qr + "?" + root.guests.since : ""
+                smooth: false; fillMode: Image.PreserveAspectFit; cache: false
+              }
+            }
             // The face, with sound rippling out from it.
             Item {
+              visible: !dedication.isCall
               Layout.preferredWidth: dedication.face; Layout.preferredHeight: dedication.face
               Layout.alignment: Qt.AlignVCenter
               Repeater {
@@ -3034,7 +3072,8 @@ Item {
               Layout.alignment: Qt.AlignVCenter
               spacing: 16
               Label {
-                text: "󰎈  " + strings.t("deck.dedication").toUpperCase()
+                text: dedication.isCall ? "󰄜  " + strings.t("deck.lastCallTitle").toUpperCase()
+                                        : "󰎈  " + strings.t("deck.dedication").toUpperCase()
                 font.family: "Iosevka Nerd Font Propo"
                 font.pixelSize: Math.max(14, Math.min(20, stageView.width / 90)); font.letterSpacing: 8
                 color: root.teal
@@ -3049,8 +3088,10 @@ Item {
               Label {
                 Layout.fillWidth: true
                 visible: dedication.note !== ""
-                text: "“" + dedication.note.substring(0, Math.round(dedication.note.length * dedication.typed))
-                      + (dedication.typed < 1 ? "▍" : "”")
+                readonly property string words: dedication.isCall ? (dedication.m.title || "") : dedication.note
+                readonly property real shown: dedication.isCall ? Math.min(1, dedication.since / 1.4) : dedication.typed
+                text: (dedication.isCall ? "" : "“") + words.substring(0, Math.round(words.length * shown))
+                      + (shown < 1 ? "▍" : (dedication.isCall ? "" : "”"))
                 font.pixelSize: Math.max(30, Math.min(68, stageView.width / 21))
                 font.italic: true
                 lineHeight: 1.08
@@ -3062,11 +3103,19 @@ Item {
               RowLayout {
                 spacing: 14
                 Label {
+                  visible: dedication.isCall
+                  text: strings.t("deck.lastCallScan")
+                  font.pixelSize: Math.max(18, Math.min(28, stageView.width / 52))
+                  color: root.teal
+                }
+                Label {
+                  visible: !dedication.isCall
                   text: "— " + (dedication.m.by || "")
                   font.pixelSize: Math.max(22, Math.min(36, stageView.width / 44)); font.bold: true
                   color: root.amber
                 }
                 Label {
+                  visible: !dedication.isCall
                   Layout.fillWidth: true
                   text: dedication.m.title ? strings.t("deck.dedicationFor").arg(root.titleParts(dedication.m.title).main) : ""
                   font.pixelSize: Math.max(16, Math.min(24, stageView.width / 64))
@@ -3085,100 +3134,15 @@ Item {
           }
         }
 
-        // ---- A request just in: the guest's face and song slide up, bottom left.
-        Item {
-          id: askPop
-          z: 24
-          // In line with the song's name, in the space under its progress.
-          anchors.left: parent.left; anchors.leftMargin: 64 + stageView.big + 56
-          anchors.bottom: stageViz.top; anchors.bottomMargin: 24
-          width: Math.min(560, stageView.width - (64 + stageView.big + 56) - 64); height: 96
-          opacity: 0
+        // ---- A request just in: the stage dims behind it, and the guest's face
+        // and song slide up under the song's name.
+        Rectangle {
+          anchors.fill: parent
+          z: 23
+          color: root.ground
+          opacity: askPop.opacity * 0.72
           visible: opacity > 0
-          property var queue: []
-          property var item: ({})
-          property real seenAt: Date.now() / 1000
-          property real rise: 24
-          transform: Translate { y: askPop.rise }
-          function check() {
-            const asks = root.deck.asks || []
-            const fresh = asks.filter(a => (a.at || 0) > seenAt)
-            if (!fresh.length) return
-            seenAt = Math.max(...fresh.map(a => a.at || 0))
-            queue = queue.concat(fresh)
-            if (!showing.running) next()
-          }
-          function next() {
-            if (!queue.length) return
-            item = queue[0]; queue = queue.slice(1)
-            showing.restart()
-          }
-          Connections { target: root; function onDeckChanged() { askPop.check() } }
-          SequentialAnimation {
-            id: showing
-            ParallelAnimation {
-              NumberAnimation { target: askPop; property: "opacity"; from: 0; to: 1; duration: Style.duration(360); easing.type: Easing.OutCubic }
-              NumberAnimation { target: askPop; property: "rise"; from: 24; to: 0; duration: Style.duration(420); easing.type: Easing.Bezier; easing.bezierCurve: Style.easeOut }
-            }
-            PauseAnimation { duration: 6500 }
-            ParallelAnimation {
-              NumberAnimation { target: askPop; property: "opacity"; to: 0; duration: Style.duration(240); easing.type: Easing.OutCubic }
-              NumberAnimation { target: askPop; property: "rise"; to: -10; duration: Style.duration(240); easing.type: Easing.OutCubic }
-            }
-            ScriptAction { script: askPop.next() }
-          }
-          Rectangle {
-            anchors.fill: parent
-            radius: Style.cornerRadius > 0 ? 10 : 0
-            color: Util.alpha(root.ground, 0.9)
-            border.width: 1; border.color: Util.alpha(root.amber, 0.45)
-            layer.enabled: true
-            layer.effect: MultiEffect { shadowEnabled: true; shadowColor: Util.alpha(root.amber, 0.35); shadowBlur: 1.0; shadowVerticalOffset: 6 }
-            Rectangle {
-              anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
-              anchors.margins: 1
-              width: 3; radius: 2
-              gradient: Gradient { GradientStop { position: 0; color: root.amber } GradientStop { position: 1; color: root.teal } }
-            }
-            RowLayout {
-              anchors.fill: parent; anchors.leftMargin: 18; anchors.rightMargin: 16
-              spacing: 16
-              Item {
-                Layout.preferredWidth: 72; Layout.preferredHeight: 72
-                Cover { anchors.fill: parent; size: 72; url: askPop.item.thumb || "" }
-                Rectangle {
-                  width: 38; height: 38; radius: 19
-                  x: parent.width - 26; y: parent.height - 26
-                  color: root.ground
-                  border.width: 2; border.color: root.amber
-                  Image {
-                    id: popFace
-                    anchors.fill: parent; anchors.margins: 2
-                    source: (askPop.item.photo || "") !== "" ? "file://" + askPop.item.photo : ""
-                    fillMode: Image.PreserveAspectCrop
-                    asynchronous: true
-                    layer.enabled: true
-                    layer.effect: MultiEffect { maskEnabled: true; maskSource: popMask }
-                  }
-                  Rectangle { id: popMask; anchors.fill: popFace; radius: width / 2; visible: false; layer.enabled: true }
-                  Label { anchors.centerIn: parent; visible: popFace.status !== Image.Ready; text: (askPop.item.by || "?").charAt(0).toUpperCase(); font.bold: true; color: root.amber }
-                }
-              }
-              ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 2
-                Label {
-                  text: "󰄜  " + strings.t("deck.newRequest").toUpperCase() + ((askPop.item.note || "") !== "" ? "  ·  ✦ " + strings.t("deck.withDedication").toUpperCase() : "")
-                  font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption - 1; font.letterSpacing: 3; color: root.teal
-                }
-                Label { Layout.fillWidth: true; text: strings.t("deck.askedFor").arg(askPop.item.by || strings.t("deck.aGuest")); font.pixelSize: Style.font.body; opacity: 0.8; elide: Text.ElideRight }
-                Label { Layout.fillWidth: true; text: root.titleParts(askPop.item.title || "").main; font.pixelSize: 20; font.bold: true; color: root.amber; elide: Text.ElideRight }
-                Label { Layout.fillWidth: true; text: askPop.item.artist || ""; font.pixelSize: Style.font.caption; opacity: 0.65; elide: Text.ElideRight }
-              }
-            }
-          }
         }
-
         // Up next: the next three, and when each starts.
         RowLayout {
           anchors.left: parent.left; anchors.bottom: parent.bottom
@@ -3227,6 +3191,101 @@ Item {
           }
           TapHandler { onTapped: root.qrBig = true }
           Label { width: 150; horizontalAlignment: Text.AlignHCenter; text: strings.t("deck.stageScan"); font.pixelSize: Style.font.caption; color: root.teal; wrapMode: Text.Wrap }
+        }
+      }
+
+      // ---- A request just in: shown over the stage, which blurs and dims behind it.
+      Item {
+        id: askPop
+        // Over the stage (outside it, so the stage can blur behind it), in line
+        // with the song's name, in the space under its progress.
+        z: 41
+        x: 64 + stageView.big + 56
+        y: stageViz.y - 24 - height
+        width: Math.min(560, stageView.width - (64 + stageView.big + 56) - 64); height: 96
+        opacity: 0
+        visible: opacity > 0 && root.stageOn
+        property var queue: []
+        property var item: ({})
+        property real seenAt: Date.now() / 1000
+        property real rise: 24
+        transform: Translate { y: askPop.rise }
+        function check() {
+          const asks = root.deck.asks || []
+          const fresh = asks.filter(a => (a.at || 0) > seenAt)
+          if (!fresh.length) return
+          seenAt = Math.max(...fresh.map(a => a.at || 0))
+          queue = queue.concat(fresh)
+          if (!showing.running) next()
+        }
+        function next() {
+          if (!queue.length) return
+          item = queue[0]; queue = queue.slice(1)
+          showing.restart()
+        }
+        Connections { target: root; function onDeckChanged() { askPop.check() } }
+        SequentialAnimation {
+          id: showing
+          ParallelAnimation {
+            NumberAnimation { target: askPop; property: "opacity"; from: 0; to: 1; duration: Style.duration(360); easing.type: Easing.OutCubic }
+            NumberAnimation { target: askPop; property: "rise"; from: 24; to: 0; duration: Style.duration(420); easing.type: Easing.Bezier; easing.bezierCurve: Style.easeOut }
+          }
+          PauseAnimation { duration: 6500 }
+          ParallelAnimation {
+            NumberAnimation { target: askPop; property: "opacity"; to: 0; duration: Style.duration(240); easing.type: Easing.OutCubic }
+            NumberAnimation { target: askPop; property: "rise"; to: -10; duration: Style.duration(240); easing.type: Easing.OutCubic }
+          }
+          ScriptAction { script: askPop.next() }
+        }
+        Rectangle {
+          anchors.fill: parent
+          radius: Style.cornerRadius > 0 ? 10 : 0
+          color: Util.alpha(root.ground, 0.9)
+          border.width: 1; border.color: Util.alpha(root.amber, 0.45)
+          layer.enabled: true
+          layer.effect: MultiEffect { shadowEnabled: true; shadowColor: Util.alpha(root.amber, 0.35); shadowBlur: 1.0; shadowVerticalOffset: 6 }
+          Rectangle {
+            anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+            anchors.margins: 1
+            width: 3; radius: 2
+            gradient: Gradient { GradientStop { position: 0; color: root.amber } GradientStop { position: 1; color: root.teal } }
+          }
+          RowLayout {
+            anchors.fill: parent; anchors.leftMargin: 18; anchors.rightMargin: 16
+            spacing: 16
+            Item {
+              Layout.preferredWidth: 72; Layout.preferredHeight: 72
+              Cover { anchors.fill: parent; size: 72; url: askPop.item.thumb || "" }
+              Rectangle {
+                width: 38; height: 38; radius: 19
+                x: parent.width - 26; y: parent.height - 26
+                color: root.ground
+                border.width: 2; border.color: root.amber
+                Image {
+                  id: popFace
+                  anchors.fill: parent; anchors.margins: 2
+                  source: (askPop.item.photo || "") !== "" ? "file://" + askPop.item.photo : ""
+                  fillMode: Image.PreserveAspectCrop
+                  asynchronous: true
+                  layer.enabled: true
+                  layer.effect: MultiEffect { maskEnabled: true; maskSource: popMask }
+                }
+                Rectangle { id: popMask; anchors.fill: popFace; radius: width / 2; visible: false; layer.enabled: true }
+                Label { anchors.centerIn: parent; visible: popFace.status !== Image.Ready; text: (askPop.item.by || "?").charAt(0).toUpperCase(); font.bold: true; color: root.amber }
+              }
+            }
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 2
+              Label {
+                text: "󰄜  " + strings.t("deck.newRequest").toUpperCase() + ((askPop.item.note || "") !== "" ? "  ·  ✦ " + strings.t("deck.withDedication").toUpperCase() : "")
+                font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption - 1; font.letterSpacing: 3; color: root.teal
+              }
+              Label { Layout.fillWidth: true; text: strings.t("deck.askedFor").arg(askPop.item.by || strings.t("deck.aGuest")); font.pixelSize: Style.font.body; opacity: 0.8; elide: Text.ElideRight }
+              Label { Layout.fillWidth: true; text: root.titleParts(askPop.item.title || "").main; font.pixelSize: 20; font.bold: true; color: root.amber; elide: Text.ElideRight }
+              Label { Layout.fillWidth: true; text: askPop.item.artist || ""; font.pixelSize: Style.font.caption; opacity: 0.65; elide: Text.ElideRight }
+            }
+          }
         }
       }
 

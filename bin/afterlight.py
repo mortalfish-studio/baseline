@@ -5396,7 +5396,7 @@ def deck_guests_serve(token):
             parts = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
             if len(parts) == 3 and parts[0] == token and parts[1] == "voice":
                 clip = VOICE_DIR / parts[2]
-                if re.fullmatch(r"(?:[0-9a-f]{8}|sample)-[a-z_]{3,12}\.mp3", parts[2]) and clip.is_file():
+                if re.fullmatch(r"(?:[0-9a-f]{8}|sample|call\d{1,3})-[a-z_]{3,12}\.mp3", parts[2]) and clip.is_file():
                     return self.send(200, clip.read_bytes(), "audio/mpeg")
                 return self.send(404, b"", "text/plain")
             where, query = self.route()
@@ -5836,10 +5836,10 @@ def clip_seconds(wav):
 
 def deck_moment(song, length):
     """What the stage shows while a dedication is read: who, what they said,
-    for which song, and until when."""
+    for which song, and until when (kind "call" for a last call)."""
     if not song:
         return None
-    return {"rid": song.get("rid", ""), "by": song.get("by", ""), "photo": song.get("photo", ""), "note": song.get("note", ""),
+    return {"kind": song.get("kind", "dedication"), "rid": song.get("rid", ""), "by": song.get("by", ""), "photo": song.get("photo", ""), "note": song.get("note", ""),
             "title": song.get("title", ""), "artist": song.get("artist", ""), "thumb": song.get("thumb", ""),
             "start": time.time(), "until": time.time() + length}
 
@@ -5925,15 +5925,16 @@ def deck_say(uid, before=False):
     return True
 
 
-def deck_voice_sample(voice):
-    """A voice says hello and a made-up dedication, wherever the Deck plays."""
+def deck_announce(name, text, voice, moment=None):
+    """The voice says text now, over whatever plays (laptop dipped, or a room
+    cut in on and picked up where it was). name keeps the clip (it's made
+    once); moment, the stage shows it meanwhile."""
     deck = deck_read()
-    name = next((v[1] for v in VOICES if v[0] == voice), "")
     if voice not in [v[0] for v in voices_ready()]:
         return False
     VOICE_DIR.mkdir(parents=True, exist_ok=True)
-    wav = VOICE_DIR / f"sample-{voice}.wav"
-    if not wav.is_file() and not voice_speak(VOICE_SAMPLE.format(name=name), voice, wav):
+    wav = VOICE_DIR / f"{name}-{voice}.wav"
+    if not wav.is_file() and not voice_speak(text, voice, wav):
         return False
     length = clip_seconds(wav)
     room = deck_where_room(deck) if deck.get("playing") else None
@@ -5944,9 +5945,38 @@ def deck_voice_sample(voice):
             h, m, sec = (int(x) for x in (position.get("RelTime") or "0:0:0").split(":"))
         except ValueError:
             h = m = sec = 0
-        return bool(mp3) and deck_room_clip(deck, room, mp3, length, int(position.get("Track") or 1), h * 3600 + m * 60 + sec)
-    deck_laptop_clip(deck.get("now") if deck.get("playing") else None, wav, length)
+        return bool(mp3) and deck_room_clip(deck, room, mp3, length, int(position.get("Track") or 1), h * 3600 + m * 60 + sec,
+                                            song=moment)
+    if moment:
+        deck_update(lambda d: d.update(speaking=deck_moment(moment, length)))
+    try:
+        deck_laptop_clip(deck.get("now") if deck.get("playing") else None, wav, length)
+    finally:
+        if moment:
+            deck_update(lambda d: d.update(speaking=None))
     return True
+
+
+def deck_voice_sample(voice):
+    """A voice says hello and a made-up dedication, wherever the Deck plays."""
+    name = next((v[1] for v in VOICES if v[0] == voice), "")
+    return deck_announce("sample", VOICE_SAMPLE.format(name=name), voice)
+
+
+def deck_last_call_say(minutes):
+    """Last call, out loud: how long's left (or that requests are closed)."""
+    deck = deck_read()
+    if not deck.get("voice", True) or not voice_ready():
+        return False
+    if minutes:
+        text = (f"Last call for requests! You've got {minutes} minutes to send in your songs. "
+                "Scan the code on the screen, and get your dedications in.")
+        title = f"{minutes} minutes left to ask"
+    else:
+        text = "That's it for requests tonight. Thank you for all your songs, and keep dancing!"
+        title = "Requests are closed"
+    moment = {"kind": "call", "by": "", "note": text, "title": title, "rid": ""}
+    return deck_announce(f"call{minutes}", text, deck_voice_name(deck), moment)
 
 
 def deck_voice_due(deck):
@@ -6125,6 +6155,9 @@ def deck_command(settings, args):
         deck_update(lambda d: d.update(lastCall=closes))
         if closes:
             toast("Last call", "Requests close at " + time.strftime("%H:%M", time.localtime(closes)), glyph="󰄜")
+        if args[2] != "off":
+            subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "voice", "call", args[2]], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     elif action == "requests" and len(args) == 3 and args[1] == "auto" and args[2] in {"on", "off"}:
         deck_update(lambda d: d.update(requestsAuto=args[2] == "on"))
     elif action == "volume" and len(args) == 2 and re.fullmatch(r"[+-]?\d{1,3}", args[1]):
@@ -6149,6 +6182,8 @@ def deck_command(settings, args):
         deck_update(lambda d: d.update(voiceName=args[2]))
         subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "voice", "sample", args[2]], stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    elif action == "voice" and len(args) == 3 and args[1] == "call" and args[2].isdigit():
+        print("said" if deck_last_call_say(min(240, int(args[2]))) else "the voice is off or not installed")
     elif action == "voice" and len(args) == 3 and args[1] == "sample" and args[2] in [v[0] for v in VOICES]:
         print("said" if deck_voice_sample(args[2]) else "that voice isn't installed")
     elif action == "say" and len(args) in (2, 3) and args[2:] in ([], ["--before"]):
