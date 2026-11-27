@@ -1792,3 +1792,32 @@ class DuckTest(unittest.TestCase):
             level["v"] = 1.0
             al.deck_laptop_clip({"service": "applemusic"}, "x.wav", 1)
         self.assertEqual(level["v"], 1.0)
+
+
+class AutoDJTowardTest(unittest.TestCase):
+    def test_ask_bridges_to_the_destination_then_stays(self):
+        deck = {"played": [], "now": {"uid": "n", "title": "Now", "artist": "B"}, "set": [], "votes": {}, "skipped": [],
+                "toward": {"brief": "deep house", "steps": 6, "done": 2}}
+        with mock.patch.object(al, "deck_details_read", return_value={}):
+            ask, _ = al.deck_autodj_ask(deck)
+            self.assertIn("towards «deep house»", ask)
+            self.assertIn("We're 2 songs into getting there", ask)
+            self.assertIn("over the next 4 songs", ask)
+            self.assertNotIn("carrying on its sound", ask)
+            deck["toward"]["done"] = 6
+            ask, _ = al.deck_autodj_ask(deck)
+            self.assertIn("arrived at «deep house»", ask)
+
+    def test_heading_somewhere_clears_autodjs_queue_but_keeps_yours(self):
+        state = {"set": [{"uid": "a", "from": "✦ Auto-DJ"}, {"uid": "b", "from": "✦ Auto-DJ"},
+                         {"uid": "c", "from": "Friday"}, {"uid": "d", "from": "✦ Auto-DJ", "rid": ""}],
+                 "pinned": ["d"]}
+        with mock.patch.object(al, "deck_edit", side_effect=lambda f: f(state)), \
+             mock.patch.object(al, "deck_after_edit"), mock.patch.object(al, "toast"), \
+             mock.patch.object(al, "deck_read", return_value={"now": None}), \
+             mock.patch.object(al, "deck_fill") as fill, mock.patch.object(al, "deck_watch"):
+            al.deck_toward({}, "deep house")
+        self.assertEqual([x["uid"] for x in state["set"]], ["a", "c", "d"])       # next stays, yours and pinned stay
+        self.assertEqual(state["toward"]["brief"], "deep house")
+        self.assertTrue(state["autodj"])
+        self.assertEqual(fill.call_args.kwargs, {"count": 6, "auto": True})

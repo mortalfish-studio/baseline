@@ -3903,7 +3903,7 @@ DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kin
               "lock": False, "requests": [], "guests": None, "requestsAuto": False, "votes": {}, "lastCall": 0,
               "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": "",
               "micViz": False, "speaking": None, "asks": [], "awoke": False, "phoneSeen": 0, "ready": None,
-              "recapAt": 0, "closedAt": 0, "skipped": [], "direction": ""}
+              "recapAt": 0, "closedAt": 0, "skipped": [], "direction": "", "toward": None}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -6410,9 +6410,11 @@ def deck_command(settings, args):
     elif action == "lock" and len(args) == 2 and args[1] in {"on", "off"}:
         deck_update(lambda d: d.update(lock=args[1] == "on"))
     elif action == "autodj" and len(args) == 2 and args[1] in {"on", "off"}:
-        deck_update(lambda d: d.update(autodj=args[1] == "on", autodjAt=0, **({} if args[1] == "on" else {"direction": ""})))
+        deck_update(lambda d: d.update(autodj=args[1] == "on", autodjAt=0, **({} if args[1] == "on" else {"direction": "", "toward": None})))
         if args[1] == "on":
             deck_watch()
+    elif action == "autodj" and len(args) >= 3 and args[1] == "toward":
+        deck_toward(settings, " ".join(args[2:]))
     elif action == "autodj" and len(args) == 4 and args[1] == "from" and args[2] in DECK_SERVICES:
         # Auto-DJ from a song you picked: it goes next, songs that grow from it
         # follow, and Auto-DJ carries the night on from there.
@@ -6678,10 +6680,16 @@ def deck_fill(settings, count=5, auto=False, seed=None):
             have.add(song_key(match["title"]))
             if idea.get("e"):
                 deck_details_note(song, energy=idea["e"])
-    if anchor:
+    toward = deck.get("toward") or {}
+    if anchor and toward.get("brief") and toward.get("done", 0) < toward.get("steps", 6):
+        # On the way somewhere new: Grok's order is the journey, a step at a time.
+        found = found[:count]
+    elif anchor:
         # Near the song they follow in tempo, in an order that mixes, the way the shape points.
         found = deck_mix_pick(picks, anchor, count, deck.get("direction") or "")
     def place(d):
+        if auto and found and (d.get("toward") or {}).get("brief"):
+            d["toward"]["done"] = d["toward"].get("done", 0) + len(found)
         if seed:                            # straight after the pick
             at = next((i + 1 for i, x in enumerate(d["set"]) if x["uid"] == seed["uid"] or
                        (x["service"], x.get("id"), x.get("video")) == (seed["service"], seed.get("id"), seed.get("video"))), 0)
@@ -6745,9 +6753,20 @@ def deck_autodj_ask(deck, seed=None, compact=False):
     if len(window) > 1:
         ask += ("Where the night is now, oldest to newest (these matter most, the newest most of all): "
                 + "; ".join(deck_mix_words(x, picked=bool(seed) and x is anchor) for x in window)[:1400] + ". ")
+    toward = deck.get("toward") or {}
+    heading = bool(toward.get("brief")) and toward.get("done", 0) < toward.get("steps", 6)
     ask += (f"The next song follows «{deck_mix_words(anchor, picked=bool(seed))}»"
             + (", which the listener just picked" if seed or len(night) == 1 else "")
-            + ": close to it in tempo, in a key that mixes with it, and carrying on its sound, genre and era. ")
+            + (": close to it in tempo and in a key that mixes with it. " if heading
+               else ": close to it in tempo, in a key that mixes with it, and carrying on its sound, genre and era. "))
+    if heading:
+        left = toward.get("steps", 6) - toward.get("done", 0)
+        ask += (f"Then take the night somewhere new: towards «{toward['brief']}». "
+                + (f"We're {toward['done']} songs into getting there; " if toward.get("done") else "")
+                + f"over the next {left} songs make it a smooth transition, each song one step closer, the first still "
+                  "near where we are now, the last fully there. Bridge with songs that share something with both. ")
+    elif toward.get("brief"):
+        ask += f"The night has arrived at «{toward['brief']}»: stay there, keeping it fresh. "
     if any(x.get("rid") for x in night):
         ask += "Songs marked [guest request] are what the room asked for: lean towards their style. "
     crowd = deck_crowd(deck) if not compact else {"up": [], "down": []}
@@ -6804,6 +6823,31 @@ def deck_mix_pick(found, anchor, count, direction=""):
         e = est(best[1])
         here = {k: e[k] or here[k] for k in here}
     return [song for song, _ in ordered]
+
+
+DECK_TOWARD_STEPS = 6          # songs to get from here to somewhere new
+
+
+def deck_toward(settings, brief, steps=DECK_TOWARD_STEPS):
+    """Auto-DJ heads somewhere new ("90s house", "wind down"): its own queued
+    picks after the next song make way, and a transition of a few songs takes
+    the night there, each a step closer; then it stays there. "off" forgets it.
+    Songs you picked and guests' requests stay where they are."""
+    brief = clean_text(brief.replace("»", ""), 120)
+    if not brief or brief.lower() == "off":
+        deck_update(lambda d: d.update(toward=None))
+        return
+    def head(d):
+        d.update(autodj=True, autodjAt=time.time(), toward={"brief": brief, "steps": steps, "done": 0, "at": int(time.time())})
+        pinned = set(d.get("pinned") or [])
+        d["set"] = d["set"][:1] + [x for x in d["set"][1:]
+                                   if x["uid"] in pinned or not str(x.get("from", "")).startswith("✦ Auto-DJ")]
+    deck_edit(head)
+    deck_after_edit()
+    toast("Auto-DJ is heading somewhere new…", brief, glyph="∞")
+    service = (deck_read().get("now") or {}).get("service") or (settings.get("music") or {}).get("service", "applemusic")
+    deck_fill({**settings, "music": {**(settings.get("music") or {}), "service": service}}, count=steps, auto=True)
+    deck_watch()
 
 
 def deck_seed_words(song):

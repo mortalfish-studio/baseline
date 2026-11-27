@@ -688,5 +688,17 @@
   "deck.directionEnergy": "building energy",
   "deck.directionTempo": "raising the tempo",
   "deck.directionHarmonic": "mixing in key",
-  "deck.directionSmooth": "holding the tempo"
+  "deck.directionSmooth": "holding the tempo",
+  "deck.towardLabel": "Take it towards",
+  "deck.towardHint": "a sound, a mood, an era…",
+  "deck.towardGo": "Go",
+  "deck.towardNow": "heading to %1 (%2/%3)",
+  "deck.towardThere": "staying in %1",
+  "deck.towardOff": "Stop heading there",
+  "deck.towardWindDown": "Wind down",
+  "deck.towardPeak": "Peak time",
+  "deck.towardThrowbacks": "Throwbacks",
+  "deck.towardHouse": "Deep house",
+  "deck.towardLatin": "Latin heat",
+  "deck.towardChill": "Chill out"
 }

@@ -653,6 +653,14 @@ Item {
     const k = deck.direction || ""
     return k === "" ? "" : strings.t("deck.direction" + k.charAt(0).toUpperCase() + k.slice(1))
   }
+  // Where Auto-DJ is heading (a sound you named), and how far it's got.
+  readonly property string towardLabel: {
+    const t = deck.toward
+    if (!t || !t.brief) return ""
+    const name = t.brief.split(":")[0]
+    return (t.done || 0) < (t.steps || 6) ? strings.t("deck.towardNow").arg(name).arg(t.done || 0).arg(t.steps || 6)
+                                          : strings.t("deck.towardThere").arg(name)
+  }
   property bool readyAsked: false
   property real readyAskedAt: 0
   readonly property bool readyFresh: !!deck.ready && deck.ready.at >= readyAskedAt - 1
@@ -1678,7 +1686,8 @@ Item {
                     + (!root.deck.autodj ? "" : "  ·  ∞ " + ((root.deck.set || []).length > 3
                         ? strings.t("deck.autodjAt").arg(root.clockAt(root.startsAt[(root.deck.set || []).length - 3] || 0))
                         : strings.t("deck.autodjSoon"))
-                      + (root.directionLabel !== "" ? ", " + root.directionLabel : ""))
+                      + (root.directionLabel !== "" ? ", " + root.directionLabel : "")
+                      + (root.towardLabel !== "" ? ", " + root.towardLabel : ""))
                   : ""
                 font.pixelSize: Style.font.caption
                 opacity: 0.6
@@ -1751,6 +1760,66 @@ Item {
                     }
                   }
                 }
+              }
+            }
+            // Auto-DJ, somewhere new: a transition from where the night is now
+            // to a sound you name (or a preset), a step at a time.
+            Flow {
+              Layout.fillWidth: true
+              visible: root.shapeOpen && !root.locked
+              spacing: 8
+              Label { text: "∞  " + strings.t("deck.towardLabel"); font.pixelSize: Style.font.caption; color: root.teal; height: 30; verticalAlignment: Text.AlignVCenter }
+              Repeater {
+                model: [
+                  { label: strings.t("deck.towardWindDown"), brief: "a gentle wind-down to end the night: slower, warmer, softer" },
+                  { label: strings.t("deck.towardPeak"), brief: "peak time: the biggest, highest-energy floor-fillers" },
+                  { label: strings.t("deck.towardThrowbacks"), brief: "throwbacks: 80s and 90s dance and pop classics everyone knows" },
+                  { label: strings.t("deck.towardHouse"), brief: "deep house: warm, groovy, around 120 BPM" },
+                  { label: strings.t("deck.towardLatin"), brief: "Latin heat: reggaeton, salsa and Latin pop" },
+                  { label: strings.t("deck.towardChill"), brief: "chill-out: downtempo, mellow and easy" }
+                ]
+                delegate: Rectangle {
+                  required property var modelData
+                  implicitWidth: towardChip.implicitWidth + 18
+                  implicitHeight: 30
+                  radius: 15
+                  color: towardHover.hovered ? Util.alpha(root.teal, 0.18) : Util.alpha(root.teal, 0.06)
+                  border.width: 1
+                  border.color: Util.alpha(root.teal, towardHover.hovered ? 0.9 : 0.45)
+                  Label { id: towardChip; anchors.centerIn: parent; text: modelData.label; font.pixelSize: Style.font.caption; color: root.ink }
+                  HoverHandler { id: towardHover; cursorShape: Qt.PointingHandCursor }
+                  TapHandler { onTapped: { root.runLong(["deck", "autodj", "toward", modelData.brief]); root.shapeOpen = false } }
+                }
+              }
+              Rectangle {
+                width: 260; height: 30
+                radius: 15
+                color: Util.alpha(root.ink, 0.04)
+                border.width: 1; border.color: towardInput.activeFocus ? root.teal : Util.alpha(root.teal, 0.45)
+                TextInput {
+                  id: towardInput
+                  anchors.left: parent.left; anchors.right: towardGo.left
+                  anchors.leftMargin: 12; anchors.rightMargin: 6
+                  anchors.verticalCenter: parent.verticalCenter
+                  color: root.ink; clip: true
+                  font.family: Style.font.family; font.pixelSize: Style.font.caption
+                  maximumLength: 120
+                  onAccepted: if (text.trim() !== "") { root.runLong(["deck", "autodj", "toward", text.trim()]); text = ""; root.shapeOpen = false }
+                  Label { visible: towardInput.text === ""; text: strings.t("deck.towardHint"); font.pixelSize: Style.font.caption; opacity: 0.4 }
+                }
+                HeadLink {
+                  id: towardGo
+                  anchors.right: parent.right; anchors.rightMargin: 8
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: strings.t("deck.towardGo")
+                  onTapped: towardInput.accepted()
+                }
+              }
+              HeadLink {
+                visible: !!root.deck.toward
+                height: 30
+                glyph: "󰅖"; text: strings.t("deck.towardOff")
+                onTapped: root.run(["deck", "autodj", "toward", "off"])
               }
             }
             // Naming a set to save (what, and where), or finding a song in this one.
