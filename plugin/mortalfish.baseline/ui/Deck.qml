@@ -3588,8 +3588,14 @@ Item {
             HeadLink {
               glyph: "󰄬"
               text: root.readyAsked && !root.readyFresh ? strings.t("deck.readyChecking") : strings.t("deck.readyCheck")
-              onTapped: { root.readyAsked = true; root.readyAskedAt = Date.now() / 1000; root.run(["deck", "ready"]) }
+              // Tap to check; tap again (while the results show) to put them away.
+              onTapped: {
+                if (root.readyAsked && root.readyFresh) { root.readyAsked = false; return }
+                root.readyAsked = true; root.readyAskedAt = Date.now() / 1000; root.run(["deck", "ready"])
+              }
             }
+            // The results go away by themselves after a while.
+            Timer { running: root.readyAsked && root.readyFresh; interval: 20000; onTriggered: root.readyAsked = false }
             Item { Layout.fillWidth: true }
             HeadLink { glyph: "󰄨"; text: strings.t("deck.recapShow"); onTapped: root.run(["deck", "recap"]) }
           }
