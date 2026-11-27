@@ -43,6 +43,39 @@ Item {
   }
   function pinned(uid) { return (deck.pinned || []).indexOf(uid) >= 0 }
 
+  // ------------------------------------------------------------ rooms
+  // Every Sonos room on its own, its group, its volume, and whether it's busy
+  // with something else (the TV); `afterlight deck rooms`, every few seconds.
+  readonly property bool inSonos: whereId !== "laptop"
+  readonly property real tileWidth: strip.tileWidth
+  readonly property bool open: window.visible
+  readonly property Item stageItem: stage
+  property var roomList: []
+  property string roomText: ""
+  readonly property var partyRooms: roomList.filter(r => r.here).sort((a, b) => (b.lead ? 1 : 0) - (a.lead ? 1 : 0))
+  readonly property var otherRooms: roomList.filter(r => !r.here)
+  property bool roomHeld: false            // a volume being dragged: hold the list still
+  function roomById(id) { for (const r of roomList) if (r.id === id) return r; return null }
+  function readRooms() { if (!roomReader.running) roomReader.running = true }
+  Process {
+    id: roomReader
+    command: [root.tool, "deck", "rooms"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        // Only a real change rebuilds the tiles (a hover or a drag survives a poll).
+        if (text === root.roomText || root.roomHeld || root.dragging) return
+        try { root.roomList = JSON.parse(text).rooms || []; root.roomText = text } catch (error) {}
+      }
+    }
+  }
+  Timer {
+    interval: 5000
+    repeat: true
+    running: window.visible
+    triggeredOnStart: true
+    onTriggered: root.readRooms()
+  }
+
   function read() { if (!reader.running) reader.running = true; else readAgain = true }
   property bool readAgain: false
   Process {
@@ -105,7 +138,7 @@ Item {
     if (!runner.running) next()
   }
   function next() {
-    if (queue.length === 0) { read(); return }
+    if (queue.length === 0) { read(); readRooms(); return }
     const args = queue[0]
     queue = queue.slice(1)
     runner.command = [tool].concat(args)
@@ -751,60 +784,155 @@ Item {
         }
 
         // ============================================== rooms
+        // The laptop, then the rooms playing together inside one capsule
+        // (joined by a line that carries the music), then every other room.
+        // Drag a room into the capsule to add it, out of it to take it out.
         ColumnLayout {
           Layout.fillWidth: true
-          spacing: 6
-          Label { text: strings.t("deck.playIn").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; opacity: 0.55 }
-          Flow {
-            id: roomFlow
+          spacing: 8
+          RowLayout {
             Layout.fillWidth: true
-            spacing: 8
-            // Every room on one line while each can stay 120 wide; then they wrap.
-            readonly property int perLine: Math.max(1, Math.min(roomRepeater.count, Math.floor((width + spacing) / (120 + spacing))))
-            readonly property real tileWidth: Math.min(190, (width - spacing * (perLine - 1)) / perLine)
-            Repeater {
-              id: roomRepeater
-              model: [{ id: "laptop", name: strings.t("deck.laptop"), kind: "laptop" }].concat((root.deck.rooms || []).map(r => ({ id: r.id, name: r.name, kind: "sonos" })))
-              delegate: Rectangle {
-                id: room
-                required property var modelData
-                readonly property bool here: root.whereId === modelData.id
-                width: roomFlow.tileWidth
-                height: roomCol.implicitHeight + 16
-                radius: Style.cornerRadius > 0 ? 5 : 0
-                color: roomDrop.containsDrag ? Util.alpha(root.teal, 0.2) : (here ? Util.alpha(root.amber, 0.12) : Qt.rgba(1, 1, 1, 0.025))
-                border.width: 1
-                border.color: roomDrop.containsDrag ? root.teal : (here ? root.amber : Qt.rgba(1, 1, 1, 0.12))
-                scale: roomDrop.containsDrag ? 1.04 : 1
-                Behavior on scale { NumberAnimation { duration: Style.duration(140); easing.type: Easing.OutCubic } }
-                ColumnLayout {
-                  id: roomCol
-                  anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-                  anchors.margins: 8
-                  spacing: 1
+            Label { text: strings.t("deck.playIn").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; opacity: 0.55 }
+            Item { Layout.fillWidth: true }
+            ActionButton {
+              visible: root.inSonos && root.otherRooms.some(r => !r.busy)
+              icon: "󰇧"
+              text: strings.t("deck.everywhere")
+              tone: root.teal
+              onClicked: root.run(["deck", "everywhere"])
+            }
+          }
+          Item {
+            id: strip
+            Layout.fillWidth: true
+            implicitHeight: 96
+            readonly property int count: 1 + root.partyRooms.length + root.otherRooms.length
+            readonly property real tileWidth: Math.max(100, Math.min(176,
+              (width - 8 * (count - 1) - (root.inSonos ? 20 + 14 * Math.max(0, root.partyRooms.length - 1) : 0)) / Math.max(1, count)))
+
+            // Dropping a room anywhere outside the capsule takes it out.
+            DropArea {
+              anchors.fill: parent
+              keys: ["deck-room"]
+              onDropped: if (root.roomById(root.dragUid) && root.roomById(root.dragUid).here) root.run(["deck", "leave", root.dragUid])
+            }
+
+            RowLayout {
+              anchors.left: parent.left
+              anchors.bottom: parent.bottom
+              spacing: 8
+
+              RoomTile { Layout.alignment: Qt.AlignBottom; roomId: "laptop"; name: strings.t("deck.laptop"); laptop: true; here: !root.inSonos }
+
+              // ---- the capsule: every room the Deck plays in
+              Rectangle {
+                id: capsule
+                visible: root.inSonos
+                Layout.alignment: Qt.AlignBottom
+                implicitWidth: Math.max(party.implicitWidth + 20, legend.implicitWidth + 44)
+                implicitHeight: 96
+                radius: Style.cornerRadius > 0 ? 10 : 0
+                readonly property bool wanted: capsuleDrop.containsDrag && root.dragFrom === "room"
+                color: capsuleDrop.containsDrag ? Util.alpha(root.teal, 0.08) : Util.alpha(root.amber, 0.04)
+                border.width: wanted ? 2 : 1
+                border.color: capsuleDrop.containsDrag ? root.teal : Util.alpha(root.amber, root.deck.playing ? 0.75 : 0.4)
+                Behavior on implicitWidth { NumberAnimation { duration: Style.duration(240); easing.type: Easing.OutCubic } }
+                Behavior on border.color { ColorAnimation { duration: Style.duration(160) } }
+
+                // The legend, sitting on the border.
+                Rectangle {
+                  x: 14
+                  y: -height / 2
+                  width: legend.implicitWidth + 12
+                  height: legend.implicitHeight
+                  color: root.ground
                   Label {
-                    text: room.modelData.kind === "sonos" ? "󰜟  SONOS" : "󰌢  " + strings.t("deck.thisLaptop").toUpperCase()
+                    id: legend
+                    anchors.centerIn: parent
+                    text: root.dragging && root.dragFrom === "room"
+                      ? (root.roomById(root.dragUid) && root.roomById(root.dragUid).here ? strings.t("deck.dropToLeave") : strings.t("deck.dropToJoin"))
+                      : (root.partyRooms.length > 1 ? "󰴸  " + strings.t("deck.together").arg(root.partyRooms.length) : "󰓃  " + strings.t("deck.dragIn"))
                     font.family: "Iosevka Nerd Font Propo"
-                    font.pixelSize: Style.font.caption - 1
-                    font.letterSpacing: 1
-                    color: root.teal
-                  }
-                  Label { Layout.fillWidth: true; text: room.modelData.name; font.bold: true; elide: Text.ElideRight }
-                  Label {
-                    Layout.fillWidth: true
-                    text: room.here ? (root.deck.playing && root.now ? "▶ " + root.now.title : strings.t("deck.here")) : strings.t("deck.dropHere")
                     font.pixelSize: Style.font.caption
-                    color: room.here ? root.amber : root.ink
-                    opacity: room.here ? 1 : 0.4
+                    font.letterSpacing: 1
+                    color: capsuleDrop.containsDrag ? root.teal : root.amber
                   }
                 }
-                HoverHandler { cursorShape: Qt.PointingHandCursor }
-                TapHandler { onTapped: if (!room.here) root.run(["deck", "where", room.modelData.id]) }
+
+                // The line between the rooms, and the light that runs along it.
+                Item {
+                  id: cable
+                  visible: root.partyRooms.length > 1
+                  x: 10 + strip.tileWidth / 2
+                  width: Math.max(0, party.implicitWidth - strip.tileWidth)
+                  y: party.y + 35
+                  height: 2
+                  Rectangle {
+                    anchors.fill: parent
+                    gradient: Gradient {
+                      orientation: Gradient.Horizontal
+                      GradientStop { position: 0; color: root.amber }
+                      GradientStop { position: 1; color: root.teal }
+                    }
+                    opacity: 0.55
+                  }
+                  Rectangle {
+                    id: spark
+                    width: 36
+                    height: 4
+                    y: -1
+                    radius: 2
+                    visible: root.deck.playing && Style.duration(100) > 0
+                    gradient: Gradient {
+                      orientation: Gradient.Horizontal
+                      GradientStop { position: 0; color: "transparent" }
+                      GradientStop { position: 0.5; color: Qt.lighter(root.amber, 1.4) }
+                      GradientStop { position: 1; color: "transparent" }
+                    }
+                    NumberAnimation on x {
+                      running: spark.visible && cable.visible && window.visible
+                      from: -spark.width; to: cable.width
+                      duration: 900 + cable.width * 3
+                      loops: Animation.Infinite
+                    }
+                  }
+                }
+
+                RowLayout {
+                  id: party
+                  x: 10
+                  anchors.bottom: parent.bottom
+                  anchors.bottomMargin: 8
+                  spacing: 22
+                  Repeater {
+                    model: root.partyRooms
+                    delegate: RoomTile {
+                      required property var modelData
+                      roomId: modelData.id; name: modelData.name; volume: modelData.volume
+                      here: true; lead: modelData.lead
+                    }
+                  }
+                }
                 DropArea {
-                  id: roomDrop
+                  id: capsuleDrop
                   anchors.fill: parent
-                  keys: ["deck-song"]
-                  onDropped: root.playDropped(room.modelData.id)
+                  keys: ["deck-room", "deck-song"]
+                  onDropped: {
+                    if (root.dragFrom === "room") {
+                      const r = root.roomById(root.dragUid)
+                      if (r && !r.here) root.run(["deck", "join", r.id])
+                    } else root.playDropped("")
+                  }
+                }
+              }
+
+              Repeater {
+                model: root.otherRooms
+                delegate: RoomTile {
+                  required property var modelData
+                  Layout.alignment: Qt.AlignBottom
+                  roomId: modelData.id; name: modelData.name; volume: modelData.volume
+                  busy: !!modelData.busy
                 }
               }
             }
@@ -825,7 +953,7 @@ Item {
         rotation: -2
         z: 100
         Drag.active: root.dragging
-        Drag.keys: ["deck-song"]
+        Drag.keys: root.dragFrom === "room" ? ["deck-room"] : ["deck-song"]
         Drag.hotSpot.x: 0
         Drag.hotSpot.y: height / 2
         RowLayout {
@@ -833,7 +961,7 @@ Item {
           anchors.verticalCenter: parent.verticalCenter
           x: 6
           spacing: 10
-          Cover { url: root.dragThumb; size: 44 }
+          Cover { url: root.dragThumb; size: 44; glyph: root.dragFrom === "room" ? "󰓃" : "󰎈" }
           Label { text: root.dragTitle; font.bold: true; Layout.maximumWidth: 260 }
         }
       }
@@ -858,13 +986,20 @@ Item {
     color: Qt.rgba(1, 1, 1, 0.05)
     clip: true
     Image {
+      id: art
+      // Apple's image server sometimes drops a request when many go at once:
+      // try again a few times, a little later each time.
+      property int tries: 0
       anchors.fill: parent
-      source: /^https:\/\//.test(cover.url) ? cover.url : ""
+      source: /^https:\/\//.test(cover.url) ? cover.url + (tries > 0 ? "#" + tries : "") : ""
+      onStatusChanged: if (status === Image.Error && tries < 4) retry.start()
       fillMode: Image.PreserveAspectCrop
       asynchronous: true
       sourceSize.width: cover.size * 2
       sourceSize.height: cover.size * 2
     }
+    Timer { id: retry; interval: 700 * (art.tries + 1); onTriggered: art.tries++ }
+    onUrlChanged: art.tries = 0
     Label {
       anchors.centerIn: parent
       visible: !/^https:\/\//.test(cover.url)
@@ -872,6 +1007,193 @@ Item {
       font.family: "Iosevka Nerd Font Propo"
       font.pixelSize: cover.size * 0.4
       color: root.amber
+    }
+  }
+
+  // A room: tap to play the Deck there, drop a song on it to play it there.
+  // In the capsule it has its own volume and can be dragged out; outside, it
+  // can be dragged in (or + on hover).
+  component RoomTile: Rectangle {
+    id: tile
+    property string roomId: ""
+    property string name: ""
+    property bool laptop: false
+    property bool here: false
+    property bool lead: false
+    property bool busy: false
+    property var volume: null
+    property real heldVolume: 0
+    property bool holding: false
+    readonly property real shownVolume: holding ? heldVolume : (volume === null || volume === undefined ? 0 : volume)
+    readonly property bool lifted: root.dragging && root.dragFrom === "room" && root.dragUid === roomId
+    implicitWidth: root.tileWidth
+    implicitHeight: 72
+    radius: Style.cornerRadius > 0 ? 7 : 0
+    // Solid (the tint laid over the ground), so the line between rooms passes behind.
+    color: Qt.tint(root.ground, tileDrop.containsDrag ? Util.alpha(root.teal, 0.18) : here ? Util.alpha(root.amber, 0.12)
+                                : Qt.rgba(1, 1, 1, tileHover.hovered ? 0.05 : 0.025))
+    border.width: 1
+    border.color: tileDrop.containsDrag ? root.teal : here ? Util.alpha(root.amber, 0.8) : Qt.rgba(1, 1, 1, tileHover.hovered ? 0.2 : 0.1)
+    opacity: lifted ? 0.35 : 1
+    scale: tileDrop.containsDrag ? 1.04 : 1
+    Behavior on scale { NumberAnimation { duration: Style.duration(140); easing.type: Easing.OutCubic } }
+    Behavior on color { ColorAnimation { duration: Style.duration(160) } }
+
+    ColumnLayout {
+      anchors.fill: parent
+      anchors.margins: 8
+      anchors.bottomMargin: 6
+      spacing: 2
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: 6
+        Label {
+          text: tile.laptop ? "󰌢" : tile.lead && root.partyRooms.length > 1 ? "󰴸" : "󰓃"
+          font.family: "Iosevka Nerd Font Propo"
+          color: tile.here ? root.amber : root.teal
+        }
+        Label { Layout.fillWidth: true; text: tile.name; font.bold: true; elide: Text.ElideRight }
+      }
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: 6
+        Equalizer { on: tile.here && root.deck.playing; visible: tile.here && !!root.now }
+        Label {
+          Layout.fillWidth: true
+          text: tile.here ? (root.now ? (root.deck.playing ? root.now.title : strings.t("deck.paused")) : strings.t("deck.here"))
+                : tile.busy ? "●  " + strings.t("deck.busy")
+                : strings.t("deck.dropHere")
+          font.pixelSize: Style.font.caption
+          color: tile.here ? root.amber : tile.busy ? root.teal : root.ink
+          opacity: tile.here || tile.busy ? 0.95 : 0.4
+          elide: Text.ElideRight
+        }
+      }
+      Item { Layout.fillHeight: true }
+      // Its own volume, in the capsule: drag along the line.
+      Item {
+        Layout.fillWidth: true
+        implicitHeight: 12
+        visible: tile.here && !tile.laptop && tile.volume !== null && tile.volume !== undefined
+        Rectangle {
+          anchors.verticalCenter: parent.verticalCenter
+          width: parent.width
+          height: 3
+          radius: 2
+          color: Qt.rgba(1, 1, 1, 0.1)
+          Rectangle {
+            height: parent.height
+            radius: 2
+            width: parent.width * tile.shownVolume / 100
+            gradient: Gradient {
+              orientation: Gradient.Horizontal
+              GradientStop { position: 0; color: root.amber }
+              GradientStop { position: 1; color: root.teal }
+            }
+          }
+        }
+        Rectangle {
+          visible: volArea.containsMouse || tile.holding
+          x: parent.width * tile.shownVolume / 100 - width / 2
+          anchors.verticalCenter: parent.verticalCenter
+          width: 10; height: 10; radius: 5
+          color: root.ink
+        }
+        Label {
+          visible: volArea.containsMouse || tile.holding
+          anchors.right: parent.right
+          anchors.bottom: parent.top
+          text: Math.round(tile.shownVolume)
+          font.pixelSize: Style.font.caption - 1
+          color: root.teal
+        }
+        MouseArea {
+          id: volArea
+          anchors.fill: parent
+          anchors.topMargin: -4; anchors.bottomMargin: -4
+          hoverEnabled: true
+          preventStealing: true
+          cursorShape: Qt.PointingHandCursor
+          function at(x) { return Math.max(0, Math.min(100, Math.round(x / width * 100))) }
+          onPressed: function(mouse) { tile.holding = true; root.roomHeld = true; tile.heldVolume = at(mouse.x) }
+          onPositionChanged: function(mouse) { if (pressed) tile.heldVolume = at(mouse.x) }
+          onReleased: {
+            root.run(["deck", "volume", tile.roomId, String(tile.heldVolume)])
+            root.roomHeld = false
+            settle.restart()
+          }
+        }
+        // Keep showing the new level until the speakers report it back.
+        Timer { id: settle; interval: 2500; onTriggered: tile.holding = false }
+      }
+    }
+
+    // + or − on hover: add this room to the music, or take it out.
+    Rectangle {
+      visible: !tile.laptop && root.inSonos && tileHover.hovered && !root.dragging && !(tile.here && root.partyRooms.length < 2)
+      anchors.right: parent.right; anchors.top: parent.top
+      anchors.margins: 5
+      width: 22; height: 22; radius: 11
+      color: linkHover.hovered ? Util.alpha(tile.here ? Commons.Color.urgent : root.teal, 0.3) : Util.alpha(root.ground, 0.85)
+      border.width: 1
+      border.color: tile.here ? Util.alpha(Commons.Color.urgent, 0.7) : root.teal
+      Label {
+        anchors.centerIn: parent
+        text: tile.here ? "󰌺" : "󰌹"
+        font.family: "Iosevka Nerd Font Propo"
+        font.pixelSize: Style.font.caption
+        color: tile.here ? Commons.Color.urgent : root.teal
+      }
+      HoverHandler { id: linkHover; cursorShape: Qt.PointingHandCursor }
+      TapHandler { onTapped: root.run(["deck", tile.here ? "leave" : "join", tile.roomId]) }
+    }
+
+    HoverHandler { id: tileHover; cursorShape: tile.here ? Qt.ArrowCursor : Qt.PointingHandCursor }
+    TapHandler { onTapped: if (!tile.here) root.run(["deck", "where", tile.roomId]) }
+    // Rooms move between the capsule and the rest by dragging (only once the
+    // Deck plays in a Sonos room); the grip is the tile above its volume line.
+    Item {
+      anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+      height: parent.height - 18
+      DragHandler {
+        target: null
+        enabled: !tile.laptop && root.inSonos
+        onActiveChanged: if (active) root.beginDrag("room", tile.roomId, null, tile.name, "")
+                         else if (root.dragging) root.endDrag()
+        onCentroidChanged: if (active) root.moveGhost(tile.mapToItem(root.stageItem, centroid.position.x, centroid.position.y))
+      }
+    }
+    DropArea {
+      id: tileDrop
+      anchors.fill: parent
+      keys: ["deck-song"]
+      onDropped: root.playDropped(tile.here ? "" : tile.roomId)
+    }
+  }
+
+  // Three bars that dance while the music plays.
+  component Equalizer: Row {
+    id: eq
+    property bool on: false
+    spacing: 2
+    height: 10
+    Repeater {
+      model: [520, 380, 610]
+      delegate: Rectangle {
+        required property var modelData
+        width: 2
+        radius: 1
+        anchors.bottom: parent.bottom
+        color: root.amber
+        height: 3
+        SequentialAnimation on height {
+          running: eq.on && root.open && Style.duration(100) > 0
+          loops: Animation.Infinite
+          NumberAnimation { to: 10; duration: modelData; easing.type: Easing.InOutSine }
+          NumberAnimation { to: 3; duration: modelData * 0.8; easing.type: Easing.InOutSine }
+        }
+        Binding on height { when: !eq.on; value: 3 }
+      }
     }
   }
 

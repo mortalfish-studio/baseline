@@ -529,5 +529,12 @@
   "deck.remove": "Remove",
   "deck.playIn": "Play in",
   "deck.here": "Playing here",
-  "deck.dropHere": "Tap or drop a song"
+  "deck.dropHere": "Tap or drop a song",
+  "deck.everywhere": "Everywhere",
+  "deck.together": "Together · %1 rooms",
+  "deck.dragIn": "Drag rooms in",
+  "deck.dropToJoin": "Drop to play here too",
+  "deck.dropToLeave": "Drop outside to take it out",
+  "deck.busy": "In use",
+  "deck.paused": "Paused"
 }

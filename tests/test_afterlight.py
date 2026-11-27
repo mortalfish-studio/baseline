@@ -625,6 +625,95 @@ class DeckTests(TempCase):
         self.assertIsNone(match)
 
 
+Q, M, K, L = ("RINCON_000E58BC46FC01400", "RINCON_000E58B234C701400", "RINCON_347E5CF6D52001400", "RINCON_48A6B8BBE5C001400")
+GROUPED = f"""<ZoneGroupState><ZoneGroups>
+<ZoneGroup Coordinator="{Q}" ID="g1">
+  <ZoneGroupMember UUID="{Q}" Location="http://192.168.1.10:1400/x" ZoneName="Quiet Room - Sonos"/>
+  <ZoneGroupMember UUID="{M}" Location="http://192.168.1.11:1400/x" ZoneName="Master Bedroom - Sonos"/>
+</ZoneGroup>
+<ZoneGroup Coordinator="{K}" ID="g2">
+  <ZoneGroupMember UUID="{K}" Location="http://192.168.1.12:1400/x" ZoneName="Kitchen"/>
+</ZoneGroup>
+<ZoneGroup Coordinator="{L}" ID="g3">
+  <ZoneGroupMember UUID="{L}" Location="http://192.168.1.13:1400/x" ZoneName="Lounge (Arc)">
+    <Satellite UUID="RINCON_000000000000S1400" Location="http://192.168.1.14:1400/x" Invisible="1"/>
+  </ZoneGroupMember>
+</ZoneGroup>
+</ZoneGroups></ZoneGroupState>"""
+
+
+class DeckRoomTests(TempCase):
+    """Rooms playing together: joining, leaving, everywhere, and never
+    disturbing a room that's busy (the TV)."""
+
+    def setUp(self):
+        super().setUp()
+        self.patch("DECK", self.tmp / "deck.json")
+        self.patch("DECK_LOCK", self.tmp / "deck.lock")
+        self.patch("toast", lambda *a, **k: None)
+        self.rooms = al.sonos_parse_groups(GROUPED)
+        self.patch("sonos_rooms", lambda refresh=False: self.rooms)
+        self.calls = []
+        self.volumes = {"192.168.1.10": 20, "192.168.1.11": 15, "192.168.1.12": 60, "192.168.1.13": 30}
+        self.playing = {"192.168.1.13"}          # the TV in the lounge
+        def call(ip, service, action, args=None, timeout=2.5):
+            self.calls.append((ip, action, dict(args or {})))
+            if action == "GetVolume":
+                return {"CurrentVolume": str(self.volumes[ip])}
+            if action == "GetTransportInfo":
+                return {"CurrentTransportState": "PLAYING" if ip in self.playing else "STOPPED"}
+            return {}
+        self.patch("sonos_call", call)
+        al.deck_update(lambda d: d.update(where={"kind": "sonos", "room": Q}))
+
+    def sent(self, action):
+        return [(ip, args) for ip, a, args in self.calls if a == action]
+
+    def test_every_speaker_on_its_own(self):
+        speakers = al.sonos_speakers(self.rooms)
+        self.assertEqual([(s["name"], s["ip"], s["lead"]) for s in speakers],
+                         [("Kitchen", "192.168.1.12", True), ("Lounge (Arc)", "192.168.1.13", True),
+                          ("Quiet Room", "192.168.1.10", True), ("Master Bedroom", "192.168.1.11", False)])
+        self.assertEqual({s["group"] for s in speakers if s["name"] in ("Quiet Room", "Master Bedroom")}, {Q})
+
+    def test_join_is_never_louder_than_the_party(self):
+        self.assertTrue(al.deck_join(K))
+        self.assertEqual(self.sent("SetVolume"), [("192.168.1.12", {"InstanceID": 0, "Channel": "Master", "DesiredVolume": 20})])
+        self.assertEqual(self.sent("SetAVTransportURI")[0], ("192.168.1.12", {"InstanceID": 0, "CurrentURI": f"x-rincon:{Q}",
+                                                                              "CurrentURIMetaData": ""}))
+        self.assertFalse(al.deck_join(M))           # already in
+
+    def test_join_needs_the_deck_in_a_room(self):
+        al.deck_update(lambda d: d.update(where={"kind": "laptop"}))
+        with self.assertRaises(SystemExit):
+            al.deck_join(K)
+
+    def test_lead_leaving_hands_over_and_the_deck_follows(self):
+        self.assertTrue(al.deck_leave(Q))
+        self.assertEqual(self.sent("DelegateGroupCoordinationTo"),
+                         [("192.168.1.10", {"InstanceID": 0, "NewCoordinator": M, "RejoinGroup": 0})])
+        self.assertEqual(al.deck_read()["where"], {"kind": "sonos", "room": M})
+
+    def test_member_leaving_goes_quiet_on_its_own(self):
+        self.assertTrue(al.deck_leave(M))
+        self.assertEqual(self.sent("BecomeCoordinatorOfStandaloneGroup"), [("192.168.1.11", {"InstanceID": 0})])
+        self.assertEqual(al.deck_read()["where"], {"kind": "sonos", "room": Q})
+        self.assertFalse(al.deck_leave(K))         # alone already: nothing to do
+
+    def test_everywhere_leaves_a_busy_room_alone(self):
+        al.deck_everywhere()
+        joined = [ip for ip, args in self.sent("SetAVTransportURI")]
+        self.assertEqual(joined, ["192.168.1.12"])                # the kitchen, not the lounge's TV
+        self.assertNotIn("192.168.1.13", [ip for ip, a, _ in self.calls if a.startswith("Set") or a.startswith("Become")])
+
+    def test_rooms_report_busy_ones(self):
+        rooms = {r["name"]: r for r in al.deck_rooms()["rooms"]}
+        self.assertTrue(rooms["Lounge (Arc)"]["busy"])
+        self.assertFalse(rooms["Kitchen"]["busy"])
+        self.assertTrue(rooms["Master Bedroom"]["here"] and not rooms["Master Bedroom"]["busy"])
+        self.assertEqual(rooms["Kitchen"]["volume"], 60)
+
+
 if __name__ == "__main__":
     unittest.main()
 

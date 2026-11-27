@@ -2219,8 +2219,14 @@ def sonos_parse_groups(xml_text):
         if not sonos_private(ip):
             continue
         names = list(dict.fromkeys(sonos_room_name(m.get("ZoneName")) for m in members))
+        # Each speaker of the group on its own too (rooms join and leave groups).
+        speakers = []
+        for m in members:
+            at = re.sub(r"^https?://([^:/]+).*$", r"\1", m.get("Location", ""))
+            if sonos_private(at) and re.fullmatch(r"RINCON_[0-9A-Fa-f]{12}\d{5}", m.get("UUID", "")):
+                speakers.append({"id": m.get("UUID"), "name": sonos_room_name(m.get("ZoneName")), "ip": at})
         rooms.append({"id": group.get("Coordinator"), "name": " + ".join(names), "ip": ip,
-                      "members": names})
+                      "members": names, "speakers": speakers})
     rooms.sort(key=lambda r: r["name"].lower())
     return rooms
 
@@ -4149,6 +4155,16 @@ def deck_command(settings, args):
         deck_update(lambda d: deck_start(d))
     elif action == "where" and len(args) == 2:
         deck_where(args[1])
+    elif action == "rooms":
+        print(json.dumps(deck_rooms()))
+    elif action == "join" and len(args) == 2:
+        deck_join(args[1])
+    elif action == "leave" and len(args) == 2:
+        deck_leave(args[1])
+    elif action == "everywhere":
+        deck_everywhere()
+    elif action == "volume" and len(args) == 3:
+        deck_room_volume(args[1], args[2])
     elif action == "fill":
         deck_fill(settings)
     elif action == "build" and len(args) >= 3 and args[1].isdigit():
@@ -4160,7 +4176,8 @@ def deck_command(settings, args):
         deck_run()
     else:
         sys.exit("Usage: afterlight deck [state|add <ytmusic|applemusic> <item json> [--next]|move <uid> <index>|"
-                 "remove <uid>|pin <uid>|shuffle|clear|play [uid]|pause|next|where <laptop|room id>|fill|"
+                 "remove <uid>|pin <uid>|shuffle|clear|play [uid]|pause|next|where <laptop|room id>|rooms|join <room id>|"
+                 "leave <room id>|everywhere|volume <room id> <0-100>|fill|"
                  "build <minutes> <what it's for> [--start <song>] [--replace]|run]")
 
 
@@ -4256,6 +4273,13 @@ def deck_where(target):
     def move(d):
         rooms = sonos_rooms()
         room = None if target == "laptop" else sonos_find_room(rooms, target)
+        if room is None and target != "laptop":
+            # A room inside another group: on its own first, then the Deck moves there.
+            speaker = next((s for s in sonos_speakers(rooms) if s["id"] == target), None)
+            if speaker and sonos_call(speaker["ip"], "AVTransport", "BecomeCoordinatorOfStandaloneGroup",
+                                      {"InstanceID": 0}, timeout=5) is not None:
+                time.sleep(1)
+                room = sonos_find_room(sonos_rooms(), target)
         if target != "laptop" and room is None:
             sys.exit("That Sonos room isn't there.")
         before = deck_where_room(d)
@@ -4270,6 +4294,134 @@ def deck_where(target):
             if room is None:
                 where_toast()
     deck_update(move)
+
+
+# ---- rooms together: Sonos groups
+# Any room can join the room the Deck plays in; they play in step. A room that
+# joins is never louder than the loudest one already playing; a room that
+# leaves goes quiet (and if it led the group, the next room takes over with the
+# queue, so the music carries on).
+
+def sonos_speakers(rooms=None):
+    """Every room on its own: [{id, name, ip, group (its group's id), lead}]."""
+    out = []
+    for room in rooms if rooms is not None else sonos_rooms():
+        for speaker in room.get("speakers") or []:
+            out.append({**speaker, "group": room["id"], "lead": speaker["id"] == room["id"]})
+    return out
+
+
+def sonos_speaker_volume(speaker):
+    reply = sonos_call(speaker["ip"], "RenderingControl", "GetVolume", {"InstanceID": 0, "Channel": "Master"}) or {}
+    try:
+        return max(0, min(100, int(reply.get("CurrentVolume", ""))))
+    except ValueError:
+        return None
+
+
+def deck_rooms():
+    """For the Deck window: the laptop's rooms list, each Sonos room with its
+    group and volume, and which group the Deck plays in."""
+    from concurrent.futures import ThreadPoolExecutor
+    speakers = sonos_speakers()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        volumes = list(pool.map(sonos_speaker_volume, speakers))
+    where = deck_read().get("where") or {}
+    group = where.get("room") if where.get("kind") == "sonos" else ""
+    leads = {s["group"]: s for s in speakers if s["lead"]}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        states = dict(zip(leads, pool.map(lambda s: (sonos_call(s["ip"], "AVTransport", "GetTransportInfo", {"InstanceID": 0})
+                                                     or {}).get("CurrentTransportState", ""), leads.values())))
+    return {"group": group, "rooms": [{"id": s["id"], "name": s["name"], "group": s["group"], "lead": s["lead"],
+                                       "volume": v, "here": s["group"] == group,
+                                       "busy": s["group"] != group and states.get(s["group"]) in {"PLAYING", "TRANSITIONING"}}
+                                      for s, v in zip(speakers, volumes)]}
+
+
+def deck_join(speaker_id, quiet=False):
+    """Add a room to the group the Deck plays in."""
+    deck = deck_read()
+    lead = deck_where_room(deck)
+    if lead is None:
+        sys.exit("Play the Deck in a Sonos room first, then add rooms to it.")
+    speakers = sonos_speakers()
+    speaker = next((s for s in speakers if s["id"] == speaker_id), None)
+    if speaker is None:
+        sys.exit("That Sonos room isn't there.")
+    if speaker["group"] == lead["id"]:
+        return False
+    party = [s for s in speakers if s["group"] == lead["id"]]
+    loudest = max((v for v in map(sonos_speaker_volume, party) if v is not None), default=None)
+    volume = sonos_speaker_volume(speaker)
+    if loudest is not None and volume is not None and volume > loudest:
+        sonos_call(speaker["ip"], "RenderingControl", "SetVolume",
+                   {"InstanceID": 0, "Channel": "Master", "DesiredVolume": loudest})
+    done = sonos_call(speaker["ip"], "AVTransport", "SetAVTransportURI",
+                      {"InstanceID": 0, "CurrentURI": f"x-rincon:{lead['id']}", "CurrentURIMetaData": ""}, timeout=5)
+    if done is None:
+        sys.exit(f"{speaker['name']} didn't join.")
+    if not quiet:
+        names = [s["name"] for s in party] + [speaker["name"]]
+        title = (deck.get("now") or {}).get("title", "")
+        toast(f"{speaker['name']} joined", f"Playing in {' + '.join(names)}" + (f" · {title}" if title else ""),
+              art=(deck.get("now") or {}).get("thumb", ""), glyph="󰓃")
+    return True
+
+
+def deck_leave(speaker_id):
+    """Take a room out of its group. If it led the group the Deck plays in,
+    the next room takes over (queue and all) and the Deck follows."""
+    speakers = sonos_speakers()
+    speaker = next((s for s in speakers if s["id"] == speaker_id), None)
+    if speaker is None:
+        sys.exit("That Sonos room isn't there.")
+    others = [s for s in speakers if s["group"] == speaker["group"] and s["id"] != speaker["id"]]
+    if not others:
+        return False
+    if speaker["lead"]:
+        heir = others[0]
+        done = sonos_call(speaker["ip"], "AVTransport", "DelegateGroupCoordinationTo",
+                          {"InstanceID": 0, "NewCoordinator": heir["id"], "RejoinGroup": 0}, timeout=6)
+        if done is None:
+            sys.exit(f"{speaker['name']} couldn't hand the music on.")
+        def follow(d):
+            where = d.get("where") or {}
+            if where.get("kind") == "sonos" and where.get("room") == speaker["id"]:
+                d["where"] = {"kind": "sonos", "room": heir["id"]}
+        deck_update(follow)
+    else:
+        if sonos_call(speaker["ip"], "AVTransport", "BecomeCoordinatorOfStandaloneGroup", {"InstanceID": 0}, timeout=5) is None:
+            sys.exit(f"{speaker['name']} didn't leave.")
+    toast(f"{speaker['name']} left", "Playing in " + " + ".join(s["name"] for s in others), glyph="󰓄")
+    return True
+
+
+def deck_everywhere():
+    """Every free room into the Deck's group: one already playing something
+    else (a TV, its own music) is left alone."""
+    deck = deck_read()
+    lead = deck_where_room(deck)
+    if lead is None:
+        sys.exit("Play the Deck in a Sonos room first.")
+    rooms = sonos_rooms()
+    # A room busy with something else (the TV, someone's own music) is left alone.
+    busy = {r["id"] for r in rooms if r["id"] != lead["id"] and (sonos_call(r["ip"], "AVTransport", "GetTransportInfo",
+            {"InstanceID": 0}) or {}).get("CurrentTransportState") in {"PLAYING", "TRANSITIONING"}}
+    speakers = sonos_speakers(rooms)
+    left = [s["name"] for s in speakers if s["group"] in busy]
+    joined = [s for s in speakers if s["group"] != lead["id"] and s["group"] not in busy and deck_join(s["id"], quiet=True)]
+    names = [s["name"] for s in sonos_speakers() if s["group"] == lead["id"]]
+    toast("Playing everywhere" if joined else "Already everywhere",
+          f"{len(names)} rooms" + (f" · left {', '.join(left)} alone: busy playing" if left else ""),
+          art=(deck.get("now") or {}).get("thumb", ""), glyph="󰓃")
+
+
+def deck_room_volume(speaker_id, value):
+    speaker = next((s for s in sonos_speakers() if s["id"] == speaker_id), None)
+    if speaker is None or not str(value).isdigit():
+        sys.exit("Usage: afterlight deck volume <room id> <0-100>")
+    sonos_call(speaker["ip"], "RenderingControl", "SetVolume",
+               {"InstanceID": 0, "Channel": "Master", "DesiredVolume": max(0, min(100, int(value)))})
 
 
 # ---------------------------------------------------------------- plugin copies

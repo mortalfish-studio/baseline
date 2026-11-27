@@ -116,7 +116,9 @@ The Player tab drives three services in Chrome, through the [Chrome add-on](docs
 - **Build a set** from a brief: say what the party is (a theme, a mood, who's coming, artists to lean on), pick 30 minutes to 3 hours, and Grok's fast model curates it in play order: it eases in, builds, peaks about two thirds of the way and winds down, starting from the song that's playing. Each song carries a few words on its job in the set. **Fill** adds five more that fit what's already there. Both take about half a minute; a message says when the songs land.
 - **Play in** a room: tap the laptop or a Sonos room along the bottom, and the set moves there at the same second. On the laptop, songs play one at a time in their own app and Baseline starts the next when one ends (start something else yourself and the Deck steps back). In a Sonos room the set becomes the room's queue as Apple Music songs (YouTube Music songs are looked up on Apple Music first), so the speaker plays it gaplessly, and skipping on the speaker or in the Sonos app moves the Deck along too.
 
-The same from a terminal: `afterlight deck state|add|move|remove|pin|shuffle|clear|play|pause|next|where <laptop|room id>|fill|build <minutes> <brief> [--start <song>] [--replace]`.
+- **Rooms together**: once the Deck plays in a Sonos room, that room sits in a capsule with the others playing the same music, joined by a line. Drag another room into the capsule (or hover it and press 󰌹) to add it; it plays in step and joins no louder than the loudest room already playing. Drag a room out (or 󰌺) to take it out; if it led the group, the next room carries on with the queue. Each room in the capsule has its own volume line. **Everywhere** adds every free room: a room already playing something else, like the TV, is marked *In use* and left alone.
+
+The same from a terminal: `afterlight deck state|add|move|remove|pin|shuffle|clear|play|pause|next|where <laptop|room id>|rooms|join <room id>|leave <room id>|everywhere|volume <room id> <0-100>|fill|build <minutes> <brief> [--start <song>] [--replace]`.
 
 ## Sonos
 
