@@ -3895,7 +3895,8 @@ DECK_SETS = STATE.parent / "deck-sets.json"           # sets you saved
 DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kind": "laptop"}, "playing": False,
               "paused": False, "sleep": None, "crossfade": False, "autodj": False, "autodjAt": 0, "handoff": "",
               "pushed": [], "pushedFrom": 1, "expect": None, "was": None, "updated": 0,
-              "lock": False, "requests": [], "guests": None, "requestsAuto": False, "votes": {}, "lastCall": 0}
+              "lock": False, "requests": [], "guests": None, "requestsAuto": False, "votes": {}, "lastCall": 0,
+              "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -4350,6 +4351,13 @@ def deck_tick(last):
         deck_update(lambda d: (deck_pause(d), d.update(sleep=None)) if d["playing"] else None)
         toast("Good night", "The Deck stopped, as asked", glyph="󰒲")
         return None
+    if deck_voice_due(deck):
+        rid = deck["now"]["rid"]
+        deck_update(lambda d: d.update(spoken=((d.get("spoken") or []) + [rid])[-200:]))
+        subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "say", deck["now"]["uid"]], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    if (deck.get("voiceUntil") or 0) > time.time():
+        return last         # a Sonos room is saying a dedication: don't follow its queue meanwhile
     status = deck_status(deck)
     write_atomic(DECK_NOW, json.dumps({**status, "uid": deck["now"]["uid"], "at": time.time()}) + "\n")
     room = deck_where_room(deck)
@@ -4624,11 +4632,14 @@ def keys_fit(a, b):
     return (a[-1] == b[-1] and (na - nb) % 12 in (1, 11)) or na == nb
 
 
-def tempos_fit(a, b):
-    """Within 8%, counting half and double time."""
+def tempos_fit(a, b, within=0.08):
+    """Within 8% (or within), counting half and double time."""
     if not a or not b:
         return True
-    return any(abs(a * f - b) / b <= 0.08 for f in (1, 2, 0.5))
+    return any(abs(a * f - b) / b <= within for f in (1, 2, 0.5))
+
+
+DECK_JUMP = 0.15            # a tempo change past this is worth a ◆ (shaping still aims for 8%)
 
 
 def deck_artists(song):
@@ -4636,8 +4647,11 @@ def deck_artists(song):
 
 
 def deck_with_details(deck):
-    """The set with each song's details, and what doesn't sit well after the
-    song before it: a key that clashes, a jump in tempo, the same artist."""
+    """The set with each song's details, and what really doesn't sit well
+    after the song before it: a big jump in tempo, or the same artist again.
+    A key that clashes isn't flagged on its own (the key shows anyway), and
+    songs a shape has already placed aren't flagged at all: only ones added
+    since."""
     details = deck_details_read()
     def fill(song):
         d = details.get(deck_song_key(song), {})
@@ -4646,12 +4660,11 @@ def deck_with_details(deck):
     deck["set"] = [fill(s) for s in deck["set"]]
     deck["played"] = [fill(s) for s in deck["played"]]
     before = deck["now"]
+    shaped = set(deck.get("shaped") or [])
     for song in deck["set"]:
         warn = []
-        if before:
-            if not keys_fit(before.get("key"), song.get("key")):
-                warn.append("key")
-            if not tempos_fit(before.get("bpm"), song.get("bpm")):
+        if before and song["uid"] not in shaped:
+            if not tempos_fit(before.get("bpm"), song.get("bpm"), DECK_JUMP):
                 warn.append("tempo")
             if deck_artists(before) & deck_artists(song):
                 warn.append("artist")
@@ -4953,6 +4966,7 @@ def deck_shape(d, how):
     slots = [i for i, s in enumerate(d["set"]) if s["uid"] not in d["pinned"]]
     songs = [d["set"][i] for i in slots]
     info = lambda s: full.get(s["uid"], {})
+    d["shaped"] = [s["uid"] for s in d["set"]]      # placed by a shape: no ◆ for these
     if how == "bumps":
         return deck_smooth_bumps(d, full, details.get("now"))
     field = {"tempo": "bpm", "smooth": "bpm", "energy": "energy", "arc": "energy", "harmonic": "key"}.get(how)
@@ -5299,7 +5313,7 @@ def deck_guests_serve(token):
         def send(self, code, body, kind="application/json"):
             data = body if isinstance(body, bytes) else json.dumps(body).encode()
             self.send_response(code)
-            self.send_header("Content-Type", kind + "; charset=utf-8")
+            self.send_header("Content-Type", kind + ("; charset=utf-8" if kind.startswith(("text/", "application/json")) else ""))
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -5315,6 +5329,13 @@ def deck_guests_serve(token):
             return (parts[1] if len(parts) == 2 else ""), urllib.parse.parse_qs(path.query)
 
         def do_GET(self):
+            # A spoken dedication, for a Sonos room to play (made by deck say; nothing else is served).
+            parts = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
+            if len(parts) == 3 and parts[0] == token and parts[1] == "voice":
+                clip = VOICE_DIR / parts[2]
+                if re.fullmatch(r"[0-9a-f]{8}\.mp3", parts[2]) and clip.is_file():
+                    return self.send(200, clip.read_bytes(), "audio/mpeg")
+                return self.send(404, b"", "text/plain")
             where, query = self.route()
             if where is None:
                 return self.send(404, b"", "text/plain")
@@ -5542,7 +5563,11 @@ def deck_request_take(rid, where="end"):
         else:
             d["set"].append(song)
         return song
-    return deck_edit(take)
+    song = deck_edit(take)
+    if song and song.get("note") and voice_ready():
+        subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "voice", "make", rid], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    return song
 
 
 DECK_MIX_REACH = 8              # a request mixed in plays within about this many songs
@@ -5584,6 +5609,141 @@ def deck_app_volume(song, level=None):
     return value if isinstance(value, (int, float)) else None
 
 
+# ---- dedications read aloud: Piper (offline speech) says who a request is
+# from and their message as the song starts. On the laptop the music dips
+# under it; a Sonos room plays the clip first (from the guest page's server),
+# then goes back to the song.
+
+PIPER_DIR = HOME / ".local/share/baseline/piper"
+PIPER_VOICE = "en_GB-cori-high"
+PIPER_VOICE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/cori/high/"
+VOICE_DIR = STATE.parent / "deck-voice"
+VOICE_DUCK = 0.3            # the music, while the voice speaks, as a share of its volume
+
+
+def voice_ready():
+    return (PIPER_DIR / "venv/bin/piper").is_file() and (PIPER_DIR / f"{PIPER_VOICE}.onnx").is_file() \
+        and (PIPER_DIR / f"{PIPER_VOICE}.onnx.json").is_file()
+
+
+def voice_install():
+    """Piper in its own Python (via uv) and one English voice: about 175 MB,
+    all in ~/.local/share/baseline/piper."""
+    if voice_ready():
+        return True
+    if not shutil.which("uv"):
+        print("needs uv (omarchy pkg add uv)")
+        return False
+    PIPER_DIR.mkdir(parents=True, exist_ok=True)
+    venv = PIPER_DIR / "venv"
+    steps = [["uv", "venv", "--python", "3.12", str(venv)],
+             ["uv", "pip", "install", "--python", str(venv / "bin/python"), "piper-tts"]]
+    for step in steps:
+        if not (venv / "bin/piper").is_file() and subprocess.run(step, stdin=subprocess.DEVNULL).returncode != 0:
+            return False
+    for name in (f"{PIPER_VOICE}.onnx", f"{PIPER_VOICE}.onnx.json"):
+        target = PIPER_DIR / name
+        if not target.is_file() and subprocess.run(
+                ["curl", "-fL", "--retry", "2", "-o", str(target) + ".part", PIPER_VOICE_URL + name]).returncode == 0:
+            os.replace(str(target) + ".part", target)
+    return voice_ready()
+
+
+def deck_voice_text(song):
+    title = re.split(r"\s+[\(\[]", song.get("title", ""))[0].strip()
+    who = song.get("by") or "a guest"
+    note = song.get("note", "").strip().rstrip(".!?")
+    words = [f"A request from {who}."]
+    if note:
+        words.append(note + ".")
+    words.append(f"Here's {title}" + (f", by {song['artist']}." if song.get("artist") else "."))
+    return " ".join(words)
+
+
+def deck_voice_clip(song, mp3=False):
+    """The spoken dedication for a requested song (made once, kept by its
+    request id): the .wav, or the .mp3 for a Sonos room. None if it can't."""
+    rid = str(song.get("rid", ""))
+    if not re.fullmatch(r"[0-9a-f]{8}", rid) or not song.get("note") or not voice_ready():
+        return None
+    VOICE_DIR.mkdir(parents=True, exist_ok=True)
+    wav, out = VOICE_DIR / f"{rid}.wav", VOICE_DIR / f"{rid}.mp3"
+    if not wav.is_file():
+        made = subprocess.run([str(PIPER_DIR / "venv/bin/piper"), "-m", str(PIPER_DIR / f"{PIPER_VOICE}.onnx"),
+                               "-f", str(wav) + ".part"], input=deck_voice_text(song).encode(),
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        if made.returncode != 0:
+            return None
+        os.replace(str(wav) + ".part", wav)
+    if not mp3:
+        return wav
+    if not out.is_file():
+        if subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-codec:a", "libmp3lame", "-b:a", "128k",
+                           "-ar", "44100", str(out) + ".part.mp3"], stdin=subprocess.DEVNULL, timeout=60).returncode != 0:
+            return None
+        os.replace(str(out) + ".part.mp3", out)
+    return out
+
+
+def clip_seconds(wav):
+    import wave
+    with wave.open(str(wav)) as w:
+        return w.getnframes() / float(w.getframerate() or 1)
+
+
+def deck_say(uid):
+    """Say the dedication for the song now playing (uid), once it's under way."""
+    deck = deck_read()
+    song = deck.get("now") or {}
+    if song.get("uid") != uid or not deck.get("voice", True):
+        return False
+    room = deck_where_room(deck)
+    wav = deck_voice_clip(song, mp3=bool(room))
+    if not wav:
+        return False
+    length = clip_seconds(wav.with_suffix(".wav"))
+    if room:
+        url = (deck.get("guests") or {}).get("url")
+        if not url:
+            return False        # the room fetches the clip from the guest page's server
+        ip = room["ip"]
+        track = int((sonos_call(ip, "AVTransport", "GetPositionInfo", {"InstanceID": 0}) or {}).get("Track") or 0)
+        if not track:
+            return False
+        deck_update(lambda d: d.update(voiceUntil=time.time() + length + 8))
+        try:
+            sonos_call(ip, "AVTransport", "SetAVTransportURI", {"InstanceID": 0, "CurrentURI": f"{url}/voice/{wav.name}",
+                                                                "CurrentURIMetaData": ""})
+            sonos_call(ip, "AVTransport", "Play", {"InstanceID": 0, "Speed": 1})
+            time.sleep(length + 1.2)
+        finally:
+            sonos_call(ip, "AVTransport", "SetAVTransportURI", {"InstanceID": 0, "CurrentURI": f"x-rincon-queue:{room['id']}#0",
+                                                                "CurrentURIMetaData": ""})
+            sonos_call(ip, "AVTransport", "Seek", {"InstanceID": 0, "Unit": "TRACK_NR", "Target": track})
+            if deck.get("crossfade"):
+                sonos_call(ip, "AVTransport", "SetCrossfadeMode", {"InstanceID": 0, "CrossfadeMode": 1})
+            sonos_call(ip, "AVTransport", "Play", {"InstanceID": 0, "Speed": 1})
+            deck_update(lambda d: d.update(voiceUntil=0))
+        return True
+    time.sleep(2.5)             # let the song get going: the voice talks over its intro
+    was = deck_app_volume(song)
+    if was:
+        deck_app_volume(song, round(was * VOICE_DUCK, 3))
+    try:
+        subprocess.run(["pw-play", str(wav)], stdin=subprocess.DEVNULL, timeout=length + 15)
+    finally:
+        if was:
+            deck_app_volume(song, was)
+    return True
+
+
+def deck_voice_due(deck):
+    """The song just started has a dedication not said yet."""
+    song = deck.get("now") or {}
+    return bool(deck.get("voice", True) and song.get("note") and song.get("rid")
+                and song["rid"] not in (deck.get("spoken") or []) and voice_ready())
+
+
 HANDOFF_LEAD = 2.5           # seconds before the end the next song is started (it takes a moment to load)
 
 
@@ -5617,6 +5777,7 @@ def deck_command(settings, args):
         stack = read_list(DECK_UNDO)
         deck["undo"] = len(stack) if isinstance(stack, list) else 0
         deck["people"] = deck_people(deck) if deck.get("guests") or deck.get("requests") else []
+        deck["voiceReady"] = voice_ready()
         print(json.dumps(deck_with_details(deck)))
         sys.stdout.flush()
         deck_details_soon(deck)
@@ -5743,6 +5904,14 @@ def deck_command(settings, args):
             toast("Last call", "Requests close at " + time.strftime("%H:%M", time.localtime(closes)), glyph="󰄜")
     elif action == "requests" and len(args) == 3 and args[1] == "auto" and args[2] in {"on", "off"}:
         deck_update(lambda d: d.update(requestsAuto=args[2] == "on"))
+    elif action == "voice" and len(args) == 2 and args[1] in {"on", "off"}:
+        deck_update(lambda d: d.update(voice=args[1] == "on"))
+    elif action == "voice" and len(args) == 3 and args[1] == "make":
+        deck = deck_read()
+        song = next((s for s in [deck.get("now") or {}] + deck["set"] if s.get("rid") == args[2]), None)
+        print(deck_voice_clip(song, mp3=bool(deck_where_room(deck))) if song else "")
+    elif action == "say" and len(args) == 2:
+        print("said" if deck_say(args[1]) else "nothing to say")
     elif action == "lock" and len(args) == 2 and args[1] in {"on", "off"}:
         deck_update(lambda d: d.update(lock=args[1] == "on"))
     elif action == "autodj" and len(args) == 2 and args[1] in {"on", "off"}:
@@ -7795,6 +7964,11 @@ def main(argv):
             update_all(settings)
             if addon_version() not in (None, addon_wanted()):
                 addon_reload()
+        elif command == "voice" and args[:1] in (["install"], ["status"]):
+            if args[0] == "install":
+                print("ready" if voice_install() else "couldn't install the voice")
+            else:
+                print(json.dumps({"ready": voice_ready(), "voice": PIPER_VOICE, "where": str(PIPER_DIR)}))
         elif command == "addon" and args[:1] in (["version"], ["reload"]):
             if args[0] == "reload":
                 print("reloaded" if addon_reload() else "couldn't: press ↻ on the add-on in chrome://extensions")

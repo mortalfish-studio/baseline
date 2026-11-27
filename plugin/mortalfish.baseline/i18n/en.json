@@ -626,6 +626,9 @@
   "deck.requestDrop": "Turn it down",
   "deck.requestMix": "Mix it in: where it fits best in the next few",
   "deck.requestsAuto": "Mix in by itself",
+  "deck.voice": "Read dedications",
+  "deck.voiceOn": "When a request with a message starts, a voice says who it's from and what they wrote: over the intro on the laptop, just before the song in a Sonos room.",
+  "deck.voiceOff": "Dedications show on screen only.",
   "deck.requestsAutoOn": "Requests go straight into the set, each where it fits best in the next few songs. You can still move or remove them.",
   "deck.requestsAutoOff": "Requests wait here for you: ◆ mixes one in where it fits, or put it next or at the end.",
   "deck.guestsTitle": "Guests' requests",
@@ -648,5 +651,5 @@
   "deck.closeNow": "Close now",
   "deck.reopen": "Reopen",
   "deck.peopleTonight": "Tonight's guests · %1",
-  "deck.personCounts": "%1 asked · %2 played"
+  "deck.personCounts": "%2/%1"
 }

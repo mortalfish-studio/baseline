@@ -753,8 +753,11 @@ class DeckTests(TempCase):
         al.deck_details_note(d["set"][2], bpm=100, key="3B")
         shown = al.deck_with_details(d)
         self.assertEqual(shown["set"][0]["length"], 200)
-        self.assertEqual(shown["set"][1]["warn"], ["key", "tempo", "artist"])
+        self.assertEqual(shown["set"][1]["warn"], ["tempo", "artist"])     # a key clash alone isn't flagged
         self.assertEqual(shown["set"][2]["warn"], [])
+        self.assertTrue(al.tempos_fit(124, 110, al.DECK_JUMP))                # 11%: not worth a mark
+        d["shaped"] = [d["set"][1]["uid"]]
+        self.assertEqual(al.deck_with_details(d)["set"][1]["warn"], [])     # a shape placed it
         self.assertNotIn("warn", al.deck_read()["set"][0])          # shown, never stored
 
     def test_details_are_looked_up_once_and_kept_apart(self):
@@ -863,6 +866,19 @@ class DeckTests(TempCase):
         self.assertEqual(deck["set"][0]["title"], "Asked")
         self.assertEqual(deck["set"][0]["from"], "Request · Sam")
         self.assertFalse(al.deck_request_take("r1"))     # only once
+
+    def test_a_dedication_is_said_once_as_its_song_starts(self):
+        self.patch("voice_ready", lambda: True)
+        song = {"uid": "u1", "rid": "0a1b2c3d", "by": "Sam", "note": "For Jess, happy birthday!",
+                "title": "Lady (Hear Me Tonight) [Radio Edit]", "artist": "Modjo"}
+        self.assertEqual(al.deck_voice_text(song),
+                         "A request from Sam. For Jess, happy birthday. Here's Lady, by Modjo.")
+        deck = {**al.DECK_EMPTY, "now": song, "playing": True}
+        self.assertTrue(al.deck_voice_due(deck))
+        self.assertFalse(al.deck_voice_due({**deck, "spoken": ["0a1b2c3d"]}))      # said already
+        self.assertFalse(al.deck_voice_due({**deck, "voice": False}))              # turned off
+        self.assertFalse(al.deck_voice_due({**deck, "now": {**song, "note": ""}}))  # nothing to say
+        self.assertIsNone(al.deck_voice_clip({**song, "rid": "../x"}))             # only real request ids name files
 
     def test_beatport_is_quieted_with_its_own_pause_button(self):
         sent, keys = [], []

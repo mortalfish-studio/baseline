@@ -2551,6 +2551,7 @@ Item {
               required property var modelData
               required property int index
               spacing: 4
+              readonly property bool leader: (modelData.played || 0) > 0 && modelData.played === (root.people[0].played || 0)
               // How much it bounces: the loudness of a slice of the sound.
               readonly property real beat: {
                 const l = stageViz.levels || []
@@ -2559,15 +2560,29 @@ Item {
                 return Math.min(1, (l[at] || 0) * 1.4)
               }
               Item {
-                width: 52; height: 60
+                width: 64; height: 74
+                // Whoever has had the most played tonight glows softly (ties share it).
+                Rectangle {
+                  visible: fan.leader
+                  width: 64; height: 64; radius: 32
+                  anchors.horizontalCenter: fanRing.horizontalCenter
+                  y: fanRing.y
+                  color: root.amber
+                  opacity: 0.55 + fan.beat * 0.35
+                  scale: 1.18 + fan.beat * 0.08
+                  Behavior on opacity { NumberAnimation { duration: Style.duration(140); easing.type: Easing.OutCubic } }
+                  Behavior on scale { NumberAnimation { duration: Style.duration(140); easing.type: Easing.OutCubic } }
+                  layer.enabled: true
+                  layer.effect: MultiEffect { blurEnabled: true; blur: 1.0; blurMax: 20; autoPaddingEnabled: true }
+                }
                 Rectangle {
                   id: fanRing
-                  width: 52; height: 52; radius: 26
-                  y: 6 - fan.beat * 8
+                  width: 64; height: 64; radius: 32
+                  y: 8 - fan.beat * 9
                   Behavior on y { NumberAnimation { duration: Style.duration(90); easing.type: Easing.OutCubic } }
                   color: root.ground
-                  border.width: fan.index === 0 ? 3 : 2
-                  border.color: fan.index === 0 ? root.amber : root.teal
+                  border.width: fan.leader ? 3 : 2
+                  border.color: fan.leader ? root.amber : root.teal
                   Image {
                     id: fanFace
                     anchors.fill: parent; anchors.margins: 3
@@ -2578,17 +2593,9 @@ Item {
                     layer.effect: MultiEffect { maskEnabled: true; maskSource: fanMask }
                   }
                   Rectangle { id: fanMask; anchors.fill: fanFace; radius: width / 2; visible: false; layer.enabled: true }
-                  Label { anchors.centerIn: parent; visible: fanFace.status !== Image.Ready; text: (fan.modelData.name || "?").charAt(0).toUpperCase(); font.bold: true; font.pixelSize: 20; color: root.teal }
-                  Rectangle {
-                    visible: fan.modelData.played > 0
-                    anchors.right: parent.right; anchors.top: parent.top; anchors.margins: -4
-                    width: 20; height: 20; radius: 10
-                    color: fan.index === 0 ? root.amber : root.teal
-                    Label { anchors.centerIn: parent; text: String(fan.modelData.played); font.pixelSize: 11; font.bold: true; color: root.ground }
-                  }
+                  Label { anchors.centerIn: parent; visible: fanFace.status !== Image.Ready; text: (fan.modelData.name || "?").charAt(0).toUpperCase(); font.bold: true; font.pixelSize: 24; color: root.teal }
                 }
               }
-              Label { anchors.horizontalCenter: parent.horizontalCenter; text: fan.modelData.name; font.pixelSize: Style.font.caption; opacity: 0.75; width: 64; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight }
             }
           }
         }
@@ -2649,6 +2656,78 @@ Item {
             layer.effect: MultiEffect { shadowEnabled: true; shadowColor: Util.alpha(root.amber, 0.45); shadowBlur: 1.0; shadowVerticalOffset: 10 }
             Cover { anchors.fill: parent; size: stageView.big; url: root.now ? root.now.thumb || "" : "" }
           }
+          // A guest's request playing: their face, big, on the cover's corner,
+          // glowing a little and moving with the music.
+          Item {
+            id: spotlight
+            z: 2
+            readonly property bool on: !!root.now && (root.now.by || "") !== ""
+            readonly property real size: Math.round(stageView.big * 0.46)
+            readonly property real beat: {
+              const l = stageViz.levels || []
+              if (!l.length || !root.deck.playing) return 0
+              let sum = 0
+              const n = Math.max(1, Math.floor(l.length / 4))
+              for (let i = 0; i < n; i++) sum += l[i] || 0
+              return Math.min(1, sum / n * 1.3)
+            }
+            width: size; height: size
+            x: stageCoverShadow.width - size * 0.6
+            y: stageCoverShadow.height - size * 0.6
+            visible: on && opacity > 0
+            opacity: 0
+            property string uid: on ? root.now.uid : ""
+            onUidChanged: {
+              if (!uid) { opacity = 0; return }
+              if (Style.reduceMotion || !stageView.visible) { opacity = 1; grow.scale = 1; return }
+              spotIn.restart()
+            }
+            Component.onCompleted: if (on) { opacity = 1; grow.scale = 1 }
+            ParallelAnimation {
+              id: spotIn
+              NumberAnimation { target: spotlight; property: "opacity"; from: 0; to: 1; duration: Style.duration(280); easing.type: Easing.OutCubic }
+              NumberAnimation { target: grow; property: "scale"; from: 0.95; to: 1; duration: Style.duration(280); easing.type: Easing.Bezier; easing.bezierCurve: Style.easeOut }
+            }
+            Item {
+              id: grow
+              anchors.fill: parent
+              scale: 1
+              transform: Scale { origin.x: spotlight.size / 2; origin.y: spotlight.size / 2; xScale: 1 + spotlight.beat * 0.035; yScale: xScale }
+              Rectangle {
+                anchors.fill: parent
+                radius: width / 2
+                color: root.amber
+                opacity: 0.35 + spotlight.beat * 0.3
+                scale: 1.12
+                Behavior on opacity { NumberAnimation { duration: Style.duration(140); easing.type: Easing.OutCubic } }
+                layer.enabled: true
+                layer.effect: MultiEffect { blurEnabled: true; blur: 1.0; blurMax: 32; autoPaddingEnabled: true }
+              }
+              Rectangle {
+                anchors.fill: parent
+                radius: width / 2
+                color: root.ground
+                border.width: 4; border.color: root.amber
+                Image {
+                  id: spotFace
+                  anchors.fill: parent; anchors.margins: 6
+                  source: root.now && (root.now.photo || "") !== "" ? "file://" + root.now.photo : ""
+                  sourceSize.width: 384; sourceSize.height: 384
+                  fillMode: Image.PreserveAspectCrop
+                  asynchronous: true
+                  layer.enabled: true
+                  layer.effect: MultiEffect { maskEnabled: true; maskSource: spotMask }
+                }
+                Rectangle { id: spotMask; anchors.fill: spotFace; radius: width / 2; visible: false; layer.enabled: true }
+                Label {
+                  anchors.centerIn: parent
+                  visible: spotFace.status !== Image.Ready
+                  text: root.now ? (root.now.by || "?").charAt(0).toUpperCase() : ""
+                  font.pixelSize: spotlight.size * 0.4; font.bold: true; color: root.amber
+                }
+              }
+            }
+          }
           ColumnLayout {
             id: stageWords
             anchors.left: stageCoverShadow.right; anchors.leftMargin: 56
@@ -2671,6 +2750,7 @@ Item {
               visible: !!root.now && (root.now.by || "") !== ""
               spacing: 14
               Rectangle {
+                visible: !spotlight.visible        // the big face on the cover says it already
                 width: 64; height: 64; radius: 32
                 color: root.ground
                 border.width: 3; border.color: root.teal
@@ -2859,7 +2939,8 @@ Item {
             text: root.guests ? root.guests.url.replace(/\/[^\/]*$/, "/…") : ""
             font.pixelSize: Style.font.caption; opacity: 0.5
           }
-          RowLayout {
+          // The buttons wrap onto a second line rather than push the card wider.
+          Flow {
             Layout.fillWidth: true
             spacing: 8
             ActionButton {
@@ -2874,11 +2955,25 @@ Item {
               tone: root.deck.requestsAuto ? root.amber : root.teal
               onClicked: root.run(["deck", "requests", "auto", root.deck.requestsAuto ? "off" : "on"])
             }
+            ActionButton {
+              visible: !!root.deck.voiceReady
+              icon: root.deck.voice !== false ? "󰄬" : "󰄱"
+              text: strings.t("deck.voice")
+              tone: root.deck.voice !== false ? root.amber : root.teal
+              onClicked: root.run(["deck", "voice", root.deck.voice !== false ? "off" : "on"])
+            }
           }
           Label {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             text: root.deck.requestsAuto ? strings.t("deck.requestsAutoOn") : strings.t("deck.requestsAutoOff")
+            font.pixelSize: Style.font.caption; opacity: 0.55
+          }
+          Label {
+            visible: !!root.deck.voiceReady
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            text: root.deck.voice !== false ? strings.t("deck.voiceOn") : strings.t("deck.voiceOff")
             font.pixelSize: Style.font.caption; opacity: 0.55
           }
           // Last call: requests close in a while (the phones say when), or now.
