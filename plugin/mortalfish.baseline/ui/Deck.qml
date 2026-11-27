@@ -2933,7 +2933,15 @@ Item {
           x: 14; y: 14
           width: parent.width - 28
           spacing: 10
-          Label { text: strings.t("deck.guestsTitle").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal }
+          RowLayout {
+            Layout.fillWidth: true
+            Label { Layout.fillWidth: true; text: strings.t("deck.guestsTitle").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal }
+            Label {
+              visible: root.locked
+              text: "󰌾  " + strings.t("deck.guestsLocked")
+              font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption - 1; color: root.amber; opacity: 0.8
+            }
+          }
           Label {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
@@ -3019,8 +3027,9 @@ Item {
           }
           Rectangle { Layout.fillWidth: true; Layout.topMargin: 2; height: 1; color: Util.alpha(root.teal, 0.18) }
           // Last call: requests close in a while (the phones say when), or now.
+          // Locked, it only shows once one is set.
           RowLayout {
-            visible: !!root.guests
+            visible: !!root.guests && (!root.locked || !!root.deck.lastCall)
             Layout.fillWidth: true
             spacing: 8
             Label {
