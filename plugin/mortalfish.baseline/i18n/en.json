@@ -716,6 +716,8 @@
   "deck.autodjTip": "Auto-DJ: switch it on, pick a direction, or take the night somewhere new",
   "deck.autodjWorking": "Auto-DJ…",
   "deck.autodjFinding": "Auto-DJ is finding songs",
+  "deck.autodjLining": "Auto-DJ will line up more as these play",
+  "deck.unplayable": "couldn't play, skipped",
   "deck.autodjFindingToward": "Finding songs to head to %1… (about a minute)",
   "deck.autodjFindingSeed": "Finding songs to follow %1… (about a minute)",
   "deck.autodjFindingNext": "Finding songs to carry the night on… (about a minute)"

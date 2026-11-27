@@ -3904,7 +3904,7 @@ DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kin
               "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": "",
               "micViz": False, "speaking": None, "asks": [], "awoke": False, "phoneSeen": 0, "ready": None,
               "recapAt": 0, "closedAt": 0, "skipped": [], "direction": "", "toward": None,
-              "autoTidy": True, "autodjSettle": None, "autodjBusy": None, "softSkip": True}
+              "autoTidy": True, "autodjSettle": None, "autodjBusy": None, "softSkip": True, "unplayable": None}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -4313,6 +4313,7 @@ def deck_unplayable(deck, song, was, tries):
     instead, or after a few in a row the Deck stops and says why."""
     deck["now"] = None
     deck["was"] = was
+    deck["unplayable"] = {"title": song["title"], "artist": song.get("artist", ""), "at": int(time.time())}
     app = {"applemusic": "Apple Music", "ytmusic": "YouTube Music", "beatport": "Beatport"}.get(song.get("service"), "Its app")
     if deck["set"] and tries + 1 < DECK_UNPLAYABLE_TRIES:
         toast(f"Skipped {song['title'][:60]}", f"{app} couldn't play it, so the next song is on",
@@ -6273,43 +6274,71 @@ SOFT_SKIP_OUT = 1.6          # seconds Next takes to bring the song down
 SOFT_SKIP_IN = 1.2           # and to bring the next one up, in the same app
 
 
-def deck_soft_next(deck):
-    """Next, gently, on the laptop: the song fades down over a second or
-    two, the next starts low, then comes up (when both play in the same app;
-    another app starts at its own level). A Sonos room, Beatport (no volume
-    Baseline can reach), a voice clip speaking or a paused Deck: straight on."""
+def deck_soft_ok(deck):
+    """The playing song can fade: on the laptop, in an app whose volume
+    Baseline reaches, with no voice clip dipping it."""
+    song = deck.get("now") or {}
+    return bool(song) and not deck_where_room(deck) and song.get("service") in {"applemusic", "ytmusic"} \
+        and not DECK_DUCK.exists()
+
+
+def deck_ramp(song, start, end, seconds, steps=8, curve=1.0):
+    for i in range(1, steps + 1):
+        share = (i / steps) ** curve
+        deck_app_volume(song, round(max(0.05 * max(start, end), start + (end - start) * share), 3))
+        time.sleep(seconds / steps)
+
+
+def deck_soft(deck, change, rise=True):
+    """Change what plays, gently, on the laptop: the song fades down over a
+    second or two, then change runs (Next, Back, another song, Pause), and
+    with rise a song in the same app starts low and comes up (another app
+    starts at its own level). A Sonos room, Beatport (no volume Baseline can
+    reach), a voice clip speaking or a paused Deck: straight away."""
     song = deck.get("now") or {}
     lock = open(DECK.with_name("deck-skip.lock"), "a")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        # Pressed again mid-fade: straight on (the first press puts the volume back).
+        # Pressed again mid-fade: straight away (the first press puts the volume back).
         lock.close()
-        deck_update(lambda d: deck_start(d))
+        deck_update(change)
         return
-    was = None
-    if deck.get("playing") and not deck_where_room(deck) and song.get("service") in {"applemusic", "ytmusic"} \
-            and not DECK_DUCK.exists():
-        was = deck_app_volume(song)
+    was = deck_app_volume(song) if deck.get("playing") and deck.get("softSkip", True) and deck_soft_ok(deck) else None
     if not was:
         lock.close()
-        deck_update(lambda d: deck_start(d))
+        deck_update(change)
         return
-    steps = 8
     try:
-        for i in range(1, steps + 1):
-            deck_app_volume(song, round(was * max(0.05, (1 - i / steps) ** 2), 3))
-            time.sleep(SOFT_SKIP_OUT / steps)
-        deck_update(lambda d: deck_start(d))
-        after = deck_read().get("now") or {}
-        if after.get("service") == song["service"] and after.get("uid") != song.get("uid"):
+        deck_ramp(song, was, 0, SOFT_SKIP_OUT, curve=0.5)
+        deck_update(change)
+        after = deck_read()
+        if rise and after.get("playing") and (after.get("now") or {}).get("service") == song["service"]:
             time.sleep(0.15)                     # let it begin before it rises
-            for i in range(1, steps + 1):
-                deck_app_volume(song, round(was * max(0.05, (i / steps) ** 1.5), 3))
-                time.sleep(SOFT_SKIP_IN / steps)
+            deck_ramp(song, 0.05 * was, was, SOFT_SKIP_IN, curve=1.5)
     finally:
         deck_app_volume(song, was)
         lock.close()
+
+
+def deck_soft_next(deck):
+    deck_soft(deck, lambda d: deck_start(d))
+
+
+def deck_soft_resume(deck, resume):
+    """Play after Pause: the song comes back up from quiet."""
+    song = deck.get("now") or {}
+    was = deck_app_volume(song) if deck.get("paused") and deck.get("softSkip", True) and deck_soft_ok(deck) else None
+    if not was:
+        deck_update(resume)
+        return
+    try:
+        deck_app_volume(song, round(0.05 * was, 3))
+        deck_update(resume)
+        time.sleep(0.15)
+        deck_ramp(song, 0.05 * was, was, SOFT_SKIP_IN, curve=1.5)
+    finally:
+        deck_app_volume(song, was)
 
 
 def deck_autodj_due(deck):
@@ -6582,9 +6611,13 @@ def deck_command(settings, args):
             if song is not None:
                 d["played"] = [s for s in d["played"] if s["uid"] != uid]
             return deck_start(d, song)
-        deck_update(play)
+        deck = deck_read()
+        if not uid and deck.get("now") and not deck["playing"]:
+            deck_soft_resume(deck, play)
+        else:
+            deck_soft(deck, play)
     elif action == "pause":
-        deck_update(deck_pause)
+        deck_soft(deck_read(), deck_pause, rise=False)
     elif action == "next":
         deck = deck_read()
         if deck.get("now") and deck["playing"]:
@@ -6592,11 +6625,11 @@ def deck_command(settings, args):
             if 3 < at < DECK_SKIP_SECONDS:      # skipped straight away: Auto-DJ hears "not that"
                 gone = {k: deck["now"].get(k, "") for k in ("title", "artist")}
                 deck_update(lambda d: d.update(skipped=((d.get("skipped") or []) + [gone])[-20:]))
-        deck_soft_next(deck) if deck.get("softSkip", True) else deck_update(lambda d: deck_start(d))
+        deck_soft_next(deck)
     elif action == "soft-skip" and len(args) == 2 and args[1] in {"on", "off"}:
         deck_update(lambda d: d.update(softSkip=args[1] == "on"))
     elif action == "previous":
-        deck_update(deck_previous)
+        deck_soft(deck_read(), deck_previous)
     elif action == "where" and len(args) == 2:
         deck_where(args[1], settings)
     elif action == "rooms":

@@ -1813,6 +1813,7 @@ class UnplayableTest(unittest.TestCase):
         self.assertEqual([x["uid"] for x in deck["played"]], ["was"])     # the bad one isn't history
         self.assertEqual([x["uid"] for x in deck["set"]], ["last"])
         self.assertIn("Skipped bad", toast.call_args_list[0].args[0])
+        self.assertEqual(deck["unplayable"]["title"], "bad")                # crossed out under the set
 
     def test_the_deck_stops_after_a_few_in_a_row(self):
         deck = self.deck()
@@ -1854,6 +1855,32 @@ class SoftSkipTest(unittest.TestCase):
         self.assertTrue(all(x >= y for x, y in zip(levels[:low], levels[1:low + 1])))   # down...
         self.assertLess(min(levels), 0.1)
         self.assertEqual(levels[-1], 0.8)                                               # ...and back up
+
+    def test_pause_fades_out_and_play_brings_it_back_up(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        state = {"now": {"uid": "a", "service": "ytmusic"}, "playing": True, "paused": False}
+        levels = []
+        def volume(s, level=None):
+            if level is not None:
+                levels.append(level)
+            return 0.6
+        with mock.patch.object(al, "DECK", Path(tmp.name) / "deck.json"), \
+             mock.patch.object(al, "DECK_DUCK", Path(tmp.name) / "duck.json"), \
+             mock.patch.object(al, "deck_where_room", return_value=None), \
+             mock.patch.object(al, "deck_app_volume", side_effect=volume), \
+             mock.patch.object(al, "deck_update", side_effect=lambda f: f(state)), \
+             mock.patch.object(al, "deck_read", side_effect=lambda: state), \
+             mock.patch.object(al, "media_command"), mock.patch.object(al.time, "sleep"):
+            al.deck_soft(dict(state), al.deck_pause, rise=False)
+            self.assertFalse(state["playing"])
+            self.assertLess(min(levels), 0.05)
+            self.assertEqual(levels[-1], 0.6)                    # put back while paused
+            levels.clear()
+            al.deck_soft_resume(dict(state), lambda d: d.update(playing=True, paused=False))
+        self.assertTrue(state["playing"])
+        self.assertLess(levels[0], 0.05)                         # starts quiet...
+        self.assertEqual(levels[-1], 0.6)                        # ...and comes up
 
     def test_a_sonos_room_skips_straight_on(self):
         state = {"now": {"uid": "a", "service": "applemusic"}, "playing": True}

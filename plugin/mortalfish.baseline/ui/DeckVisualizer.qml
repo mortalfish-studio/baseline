@@ -99,15 +99,18 @@ Item {
     }
   }
 
-  // Peaks hang for a moment, then fall at a steady pace.
+  // Peaks hang for a beat, then drop like something let go: slowly at
+  // first, then faster, landing back on the bar, so the caps move together
+  // with the music rather than hanging about on their own.
+  property var falls: []
   function take(next) {
-    const p = peaks.slice(), h = holds.slice()
+    const p = peaks.slice(), h = holds.slice(), f = falls.length === count ? falls.slice() : blank()
     for (let i = 0; i < count; i++) {
-      if (next[i] >= p[i]) { p[i] = next[i]; h[i] = 14 }
+      if (next[i] >= p[i]) { p[i] = next[i]; h[i] = 6; f[i] = 0 }
       else if (h[i] > 0) h[i]--
-      else p[i] = Math.max(next[i], p[i] - 0.018)
+      else { f[i] = Math.min(0.06, f[i] + 0.0035); p[i] = Math.max(next[i], p[i] - f[i]) }
     }
-    peaks = p; holds = h; levels = next
+    peaks = p; holds = h; falls = f; levels = next
   }
 
   // Without the real sound: a pulse with a beat, a bass-heavy shape and some

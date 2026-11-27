@@ -2028,6 +2028,86 @@ Item {
                   NumberAnimation { properties: "scale"; from: 0.97; to: 1; duration: Style.duration(200); easing.type: Easing.OutCubic }
                 }
 
+                // ---- under the last song: one that wouldn't play (crossed out,
+                // for a minute), and Auto-DJ lining up more.
+                footer: Column {
+                  id: tail
+                  width: setList.width
+                  topPadding: 6
+                  spacing: 6
+                  property real clock: Date.now() / 1000
+                  readonly property var gone: root.deck.unplayable && tail.clock - (root.deck.unplayable.at || 0) < 60
+                                              ? root.deck.unplayable : null
+                  Timer {
+                    interval: 5000; repeat: true
+                    running: !!root.deck.unplayable || !!root.deck.autodj
+                    onTriggered: tail.clock = Date.now() / 1000
+                  }
+                  Connections { target: root; function onDeckChanged() { tail.clock = Date.now() / 1000 } }
+                  Rectangle {
+                    visible: !!tail.gone
+                    width: parent.width - 16
+                    height: 40
+                    radius: Style.cornerRadius > 0 ? 6 : 0
+                    color: Util.alpha(Commons.Color.warning, 0.06)
+                    border.width: 1
+                    border.color: Util.alpha(Commons.Color.warning, 0.3)
+                    Row {
+                      anchors.verticalCenter: parent.verticalCenter
+                      x: 14
+                      spacing: 10
+                      Label { text: "󰒭"; font.family: "Iosevka Nerd Font Propo"; color: Commons.Color.warning; anchors.verticalCenter: parent.verticalCenter }
+                      Label {
+                        anchors.verticalCenter: parent.verticalCenter
+                        textFormat: Text.PlainText
+                        text: tail.gone ? tail.gone.title + "  ·  " + tail.gone.artist : ""
+                        font.strikeout: true
+                        opacity: 0.6
+                      }
+                      Label {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: strings.t("deck.unplayable")
+                        font.pixelSize: Style.font.caption
+                        color: Commons.Color.warning
+                      }
+                    }
+                  }
+                  Rectangle {
+                    visible: !!root.deck.autodj
+                    width: parent.width - 16
+                    height: 52
+                    radius: Style.cornerRadius > 0 ? 6 : 0
+                    color: "transparent"
+                    border.width: 1
+                    border.color: Util.alpha(root.teal, 0.22)
+                    Row {
+                      anchors.centerIn: parent
+                      spacing: 10
+                      Label {
+                        id: tailGlyph
+                        text: "∞"
+                        color: root.teal
+                        anchors.verticalCenter: parent.verticalCenter
+                        SequentialAnimation on opacity {
+                          running: !!root.deck.autodj && root.open && Style.duration(100) > 0
+                          loops: Animation.Infinite
+                          NumberAnimation { to: 0.35; duration: 1100; easing.type: Easing.InOutSine }
+                          NumberAnimation { to: 1; duration: 1100; easing.type: Easing.InOutSine }
+                        }
+                      }
+                      Label {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.djBusy ? root.djBusyText : strings.t("deck.autodjLining")
+                        font.pixelSize: Style.font.caption
+                        font.letterSpacing: 1
+                        color: root.teal
+                        opacity: 0.8
+                      }
+                    }
+                  }
+                  Item { width: 1; height: 8 }
+                }
+
                 // ---- what's played (folded) and the playhead: the set as past, now and next.
                 header: Column {
                   width: setList.width
@@ -4678,9 +4758,10 @@ Item {
       onWidthChanged: requestPaint()
       onHeightChanged: requestPaint()
     }
-    // What you can see.
+    // What you can see (not when it all fits: then the shape reads alone).
     Rectangle {
       readonly property real total: Math.max(1, map.list.contentHeight)
+      visible: map.list.contentHeight > map.list.height + 4
       x: -2
       width: parent.width + 4
       y: Math.max(0, Math.min(parent.height - height, (map.list.contentY - map.list.originY) / total * parent.height))
