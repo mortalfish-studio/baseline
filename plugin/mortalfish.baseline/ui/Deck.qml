@@ -2550,7 +2550,7 @@ Item {
         Row {
           z: 2
           anchors.horizontalCenter: parent.horizontalCenter
-          y: 12
+          y: 30   // clear of the top edge, glow and bounce included
           spacing: 18
           visible: root.people.length > 0
           Repeater {
