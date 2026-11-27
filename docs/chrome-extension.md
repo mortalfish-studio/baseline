@@ -47,7 +47,7 @@ Baseline panel / mouse ──► afterlight beatport … ──► socket ($XDG_
                                   chrome/native/beatport-host.py (started by Chrome)
                                                          │  native messaging
                                   background.js (the add-on's worker) ──► the open Beatport / YouTube Music tab
-                                                                           (bridge.js, autoplay.js, report.js)
+                                                                           (bridge.js, autoplay.js, report.js, cover.js)
 ```
 
 | File | Job |
@@ -58,6 +58,7 @@ Baseline panel / mouse ──► afterlight beatport … ──► socket ($XDG_
 | `background.js` → `appleMusic()` | one fixed function run in the Apple Music page's own world (Apple's player lives there): `now` (with your account's two-letter storefront, so searches use your country's catalogue), `queue` (checked catalogue ids only), `play`, `pause`, `toggle`, `next`, `previous`, `seek`, `volume` (the Deck's fade; without a level it only reads), `export` (the page hands the player's own sign-in tokens to the add-on's worker, which makes the new playlist in your library through Apple's API, 20 seconds at most; the tokens never leave the add-on), `unplaylist` (deletes one playlist from your library, from inside the page as Apple's web app does, and only one whose description is *Saved from Baseline's Deck*, so only playlists Baseline made; anything else is refused), and, reading only, `playlists` (a search of your library playlists and Apple's, or with `*` every playlist in your library) and `tracks` (a checked playlist id's songs) |
 | `autoplay.js` | presses a Beatport page's own Play button when Baseline opens it with `#baseline-play` |
 | `report.js` | reads your playlists from Beatport's sidebar |
+| `cover.js` | runs in the Beatport page's own world: Beatport tells Chrome the playing track's name but not its cover, so the desktop's media popup showed Chrome's logo; this adds the player bar's cover to the page's media details every 1.5 s if it's missing (it only reads the page and sends nothing). On install or reload the worker puts it into Beatport tabs already open, so the music doesn't stop |
 | `../native/beatport-host.py` | Chrome starts it; it saves playlists to `~/.local/state/afterlight/beatport.json` and relays requests from the socket |
 
 ## Tweaking it

@@ -742,5 +742,9 @@
     "one": "Smooth it out (%1 bump)",
     "other": "Smooth it out (%1 bumps)"
   },
-  "deck.smoothItTip": "Reorder so each song flows from the one before. Pinned songs stay; Undo puts it back."
+  "deck.smoothItTip": "Reorder so each song flows from the one before. Pinned songs stay; Undo puts it back.",
+  "deck.playedTip": {
+    "one": "Played tonight (%1 song)",
+    "other": "Played tonight (%1 songs)"
+  }
 }

@@ -1831,6 +1831,12 @@ Item {
                 onTapped: { root.saving = true; root.filterOpen = false }
               }
               HeadLink {
+                visible: root.selectedUids.length === 0 && (root.deck.played || []).length > 0
+                glyph: "󰋚"; on: root.playedOpen
+                tip: strings.tn("deck.playedTip", (root.deck.played || []).length).arg((root.deck.played || []).length)
+                onTapped: { root.playedOpen = !root.playedOpen; if (root.playedOpen) setList.positionViewAtBeginning() }
+              }
+              HeadLink {
                 visible: root.selectedUids.length === 0
                 glyph: "󰍉"; on: root.filterOpen; tip: strings.t("deck.findInSet")
                 onTapped: { root.filterOpen = !root.filterOpen; if (!root.filterOpen) root.filter = ""; root.saving = false }
@@ -2221,20 +2227,12 @@ Item {
                   bottomPadding: 8
                   // It grows once the song and what's played arrive: keep the top in view.
                   onHeightChanged: if (!setList.moved) topAgain.restart()
-                  Item {
-                    width: parent.width
-                    height: 26
-                    visible: (root.deck.played || []).length > 0 && root.filter === ""
-                    Label {
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: (root.playedOpen ? "󰅀  " : "󰅂  ") + strings.t("deck.played").toUpperCase() + "  ·  " + (root.deck.played || []).length
-                      font.family: "Iosevka Nerd Font Propo"
-                      font.pixelSize: Style.font.caption
-                      font.letterSpacing: 2
-                      opacity: playedHover.hovered ? 0.9 : 0.5
-                    }
-                    HoverHandler { id: playedHover; cursorShape: Qt.PointingHandCursor }
-                    TapHandler { onTapped: root.playedOpen = !root.playedOpen }
+                  // What's played, opened from the header's 󰋚: the night so far, newest last.
+                  Label {
+                    visible: root.playedOpen && (root.deck.played || []).length > 0 && root.filter === ""
+                    text: strings.t("deck.played").toUpperCase() + "  ·  " + (root.deck.played || []).length
+                    font.pixelSize: Style.font.caption; font.letterSpacing: 2; opacity: 0.5
+                    bottomPadding: 4
                   }
                   Repeater {
                     model: root.playedOpen && root.filter === "" ? (root.deck.played || []) : []
@@ -2444,13 +2442,16 @@ Item {
                               !ktChip.keyOk ? [strings.t("deck.clash").arg(slot.key).arg(ktChip.before.key)] : [],
                               ktChip.jump ? [strings.t("deck.jump").arg(Math.round(ktChip.before.bpm)).arg(Math.round(slot.bpm))] : [],
                               row.warns.filter(w => w !== "key" && w !== "tempo").map(w => strings.t("deck.warn." + w))).join("  ·  ")
-                          text: root.serviceGlyph(slot.service) + "  " + slot.artist
-                                + (rowHover.hovered ? (reasons !== "" ? "  ·  ◆ " + reasons : slot.from !== "" ? "  ·  " + slot.from : "")
-                                                    : slot.why !== "" ? "  ·  ✦ " + slot.why : "")
+                          // A song that doesn't flow says why, always (no hover needed),
+                          // ahead of the artist so a long name can't hide it.
+                          text: reasons !== "" ? "◆ " + reasons + "  ·  " + slot.artist
+                                : root.serviceGlyph(slot.service) + "  " + slot.artist
+                                  + (rowHover.hovered ? (slot.from !== "" ? "  ·  " + slot.from : "")
+                                                      : slot.why !== "" ? "  ·  ✦ " + slot.why : "")
                           font.family: "Iosevka Nerd Font Propo"
                           font.pixelSize: Style.font.caption
-                          color: rowHover.hovered && reasons !== "" ? Commons.Color.warning : root.ink
-                          opacity: 0.6
+                          color: reasons !== "" ? Commons.Color.warning : root.ink
+                          opacity: reasons !== "" ? 0.85 : 0.6
                           elide: Text.ElideRight
                         }
                       }

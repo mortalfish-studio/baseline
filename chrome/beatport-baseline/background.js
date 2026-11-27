@@ -506,6 +506,15 @@ chrome.runtime.onMessage.addListener((message) => {
 
 // Wake with Chrome (after a reboot nothing else would), and after an update.
 chrome.runtime.onStartup.addListener(() => { if (!port) connect(); });
-chrome.runtime.onInstalled.addListener(() => { if (!port) connect(); });
+chrome.runtime.onInstalled.addListener(() => {
+  if (!port) connect();
+  // Beatport tabs already open get the cover helper now, without a reload
+  // (which would stop the music).
+  chrome.tabs.query({ url: "https://www.beatport.com/*" }).then((tabs) => {
+    for (const tab of tabs) {
+      chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cover.js"], world: "MAIN" }).catch(() => {});
+    }
+  });
+});
 
 connect();
