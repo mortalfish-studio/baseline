@@ -319,7 +319,7 @@ BarWidget {
     onWheel: function(event) {
       pending += event.angleDelta.y
       if (Math.abs(pending) < 120) return
-      root.bar.run("omarchy-audio-output-volume " + (pending > 0 ? "raise" : "lower"))
+      root.bar.run(Quickshell.env("HOME") + "/.local/bin/baseline-volume " + (pending > 0 ? "raise" : "lower"))
       pending = 0
     }
   }

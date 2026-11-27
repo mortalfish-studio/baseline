@@ -21,6 +21,7 @@ The Baseline bar panel drives this; it works on its own from a terminal too.
   afterlight share <look> --preview | --author=<name> --include=<picture ids>   share a look (pull request)
   afterlight looks backup                run your backup command (settings backup.command)
   afterlight apps [set coding|chat <id>|custom …]   which apps own workspaces 3 and 4
+  afterlight sonos [state|use <room>|off|volume <n|+n|-n>|toggle|next|…]   Sonos rooms on your network
   afterlight pictures [<look>]           download the built-in looks' pictures from their links
   afterlight updates [--fetch] | update  is Baseline behind GitHub? / pull, repair, restart
   afterlight repair [--quiet|--keep-bar|--system]  put back what an update knocked out
@@ -86,6 +87,8 @@ DEFAULTS = {
     "apps": {"coding": "t3code", "chat": "grok", "custom": {}},
     # Run after you save or delete a look of your own, e.g. a dotfiles sync.
     "backup": {"command": ""},
+    # Sonos: the room the Player tab controls, and whether it has the volume keys.
+    "sonos": {"on": False, "room": ""},
     "battery": {"limit": False, "limitPercent": 80},
     # Beatport links pinned in the Player tab: [{"name": ..., "url": ...}]
     "beatport": {"pins": []},
@@ -2104,6 +2107,277 @@ def audio_use(name):
         subprocess.run(["pactl", "move-sink-input", str(stream["index"]), name], capture_output=True, timeout=4)
 
 
+# ---------------------------------------------------------------- Sonos, on the home network
+
+# Sonos speakers answer on the local network (UPnP, port 1400): rooms, group
+# volume, mute, play/pause/skip and what's playing, in a fraction of a second,
+# with no account and no internet. Picking Sonos in the Player tab makes the
+# volume slider, mute and the volume keys drive the chosen room; the laptop's
+# own sound stays where it is. Needs "UPnP" left on in the Sonos app
+# (Account > Privacy & Security). Playing something by name goes through the
+# Grok agent instead (OmaRelay: "play ... on Sonos").
+SONOS_CACHE = STATE.parent / "sonos.json"
+SONOS_TARGET = STATE.parent / "sonos-target"      # present while Sonos has the volume keys
+SONOS_ART = HOME / ".cache/afterlight/sonos-art"
+SONOS_PORT = 1400
+SONOS_STEP = 5
+_UPNP = {
+    "AVTransport": "/MediaRenderer/AVTransport/Control",
+    "RenderingControl": "/MediaRenderer/RenderingControl/Control",
+    "GroupRenderingControl": "/MediaRenderer/GroupRenderingControl/Control",
+    "ZoneGroupTopology": "/ZoneGroupTopology/Control",
+}
+
+
+def sonos_private(ip):
+    """Only ever talk to addresses on the local network."""
+    import ipaddress
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return address.is_private and not address.is_loopback
+
+
+def sonos_call(ip, service, action, args=None, timeout=2.5):
+    """One UPnP action on one speaker; the reply's fields as a dict, or None."""
+    import urllib.request
+    import xml.etree.ElementTree as ET
+    from xml.sax.saxutils import escape
+    if not sonos_private(ip):
+        return None
+    body = "".join(f"<{k}>{escape(str(v))}</{k}>" for k, v in (args or {}).items())
+    urn = f"urn:schemas-upnp-org:service:{service}:1"
+    envelope = ('<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+                's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
+                f'<u:{action} xmlns:u="{urn}">{body}</u:{action}></s:Body></s:Envelope>')
+    request = urllib.request.Request(f"http://{ip}:{SONOS_PORT}{_UPNP[service]}", data=envelope.encode(),
+                                     headers={"Content-Type": 'text/xml; charset="utf-8"',
+                                              "SOAPACTION": f'"{urn}#{action}"'})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as reply:
+            root = ET.fromstring(reply.read(512 * 1024))
+    except (OSError, ET.ParseError, ValueError):
+        return None
+    response = next((el for el in root.iter() if el.tag.endswith(f"{action}Response")), None)
+    return {child.tag.split("}")[-1]: (child.text or "") for child in response} if response is not None else None
+
+
+def sonos_discover(timeout=4):
+    """Speakers' addresses, from the system's own discovery service (Avahi,
+    mDNS), which a firewall leaves alone. Sonos announce _sonos._tcp."""
+    out = quiet_out("avahi-browse", "-rtp", "_sonos._tcp", timeout=timeout)
+    found = {line.split(";")[7] for line in out.splitlines()
+             if line.startswith("=") and len(line.split(";")) > 8 and line.split(";")[2] == "IPv4"}
+    return sorted(ip for ip in found if sonos_private(ip))
+
+
+def sonos_room_name(name):
+    """'Kitchen - Sonos' reads as 'Kitchen'; extra spaces go."""
+    name = re.sub(r"\s+-\s+Sonos$", "", re.sub(r"\s+", " ", str(name or "")).strip())
+    return clean_text(name, 40) or "Sonos"
+
+
+def sonos_parse_groups(xml_text):
+    """Rooms from a GetZoneGroupState reply: one per group, named by its
+    visible members, led by its coordinator."""
+    import html as htmlmod
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(htmlmod.unescape(xml_text) if xml_text.lstrip().startswith("&lt;") else xml_text)
+    except ET.ParseError:
+        return []
+    rooms = []
+    for group in root.iter("ZoneGroup"):
+        members = [m for m in group.findall("ZoneGroupMember") if m.get("Invisible") != "1"]
+        coordinator = next((m for m in group.findall("ZoneGroupMember") if m.get("UUID") == group.get("Coordinator")), None)
+        if coordinator is None or not members:
+            continue
+        ip = re.sub(r"^https?://([^:/]+).*$", r"\1", coordinator.get("Location", ""))
+        if not sonos_private(ip):
+            continue
+        names = list(dict.fromkeys(sonos_room_name(m.get("ZoneName")) for m in members))
+        rooms.append({"id": group.get("Coordinator"), "name": " + ".join(names), "ip": ip,
+                      "members": names})
+    rooms.sort(key=lambda r: r["name"].lower())
+    return rooms
+
+
+def sonos_rooms(refresh=False):
+    """The rooms right now, from any speaker we know (found again when none answer)."""
+    cache = read_json(SONOS_CACHE, {})
+    known = [ip for ip in cache.get("speakers", []) if sonos_private(ip)]
+    tries = [lambda: known, sonos_discover] if known and not refresh else [sonos_discover]
+    for find in tries:      # the search only runs if no known speaker answers
+        ips = find()
+        for ip in ips[:6]:
+            reply = sonos_call(ip, "ZoneGroupTopology", "GetZoneGroupState")
+            rooms = sonos_parse_groups(reply.get("ZoneGroupState", "")) if reply else []
+            if rooms:
+                speakers = sorted({r["ip"] for r in rooms} | set(ips))[:32]
+                if speakers != known:
+                    write_atomic(SONOS_CACHE, json.dumps({"speakers": speakers}) + "\n")
+                return rooms
+    return []
+
+
+def sonos_parse_track(meta_xml, uri=""):
+    """Title, artist, album and art from a track's DIDL metadata. TV and
+    line-in say so."""
+    import xml.etree.ElementTree as ET
+    track = {"title": "", "artist": "", "album": "", "art": ""}
+    if uri.startswith("x-sonos-htastream:"):
+        track["title"] = "TV"
+        return track
+    if uri.startswith("x-rincon-stream:"):
+        track["title"] = "Line-in"
+        return track
+    if not meta_xml or meta_xml == "NOT_IMPLEMENTED":
+        return track
+    try:
+        root = ET.fromstring(meta_xml)
+    except ET.ParseError:
+        return track
+    def find(name):
+        el = next((e for e in root.iter() if e.tag.split("}")[-1] == name), None)
+        return (el.text or "").strip() if el is not None else ""
+    stream = find("streamContent")      # radio: "Artist - Title"
+    track.update(title=clean_text(find("title"), 120), artist=clean_text(find("creator") or find("albumArtist"), 120),
+                 album=clean_text(find("album"), 120), art=find("albumArtURI"))
+    if stream and not track["artist"]:
+        artist, _, title = stream.partition(" - ")
+        track.update(artist=clean_text(artist, 120), title=clean_text(title or stream, 120))
+    return track
+
+
+def sonos_art(ip, art):
+    """Cache a cover the speaker serves (/getaa?...) and return its path.
+    Covers elsewhere on the internet aren't fetched."""
+    import urllib.request
+    if not art.startswith("/getaa?") or not sonos_private(ip):
+        return ""
+    target = SONOS_ART / (hashlib.sha256(art.encode()).hexdigest()[:24] + ".jpg")
+    if target.is_file():
+        return str(target)
+    try:
+        with urllib.request.urlopen(f"http://{ip}:{SONOS_PORT}{art}", timeout=3) as reply:
+            kind = reply.headers.get("Content-Type", "")
+            data = reply.read(3 * 1024 * 1024 + 1)
+    except OSError:
+        return ""
+    if len(data) > 3 * 1024 * 1024 or not kind.startswith("image/"):
+        return ""
+    SONOS_ART.mkdir(parents=True, exist_ok=True)
+    old = sorted(SONOS_ART.glob("*.jpg"), key=lambda p: p.stat().st_mtime)
+    for stale in old[:-40]:
+        stale.unlink(missing_ok=True)
+    target.write_bytes(data)
+    return str(target)
+
+
+def sonos_room(settings, rooms):
+    wanted = (settings.get("sonos") or {}).get("room", "")
+    return next((r for r in rooms if r["id"] == wanted), None)
+
+
+def sonos_now(room):
+    """What the room is doing: playing state, track, volume, mute."""
+    ip = room["ip"]
+    transport = sonos_call(ip, "AVTransport", "GetTransportInfo", {"InstanceID": 0}) or {}
+    position = sonos_call(ip, "AVTransport", "GetPositionInfo", {"InstanceID": 0}) or {}
+    volume = sonos_call(ip, "GroupRenderingControl", "GetGroupVolume", {"InstanceID": 0}) or {}
+    mute = sonos_call(ip, "GroupRenderingControl", "GetGroupMute", {"InstanceID": 0}) or {}
+    track = sonos_parse_track(position.get("TrackMetaData", ""), position.get("TrackURI", ""))
+    track["art"] = sonos_art(ip, track["art"]) if track["art"] else ""
+    state = transport.get("CurrentTransportState", "")
+    try:
+        level = max(0, min(100, int(volume.get("CurrentVolume", ""))))
+    except ValueError:
+        level = None
+    return {"playing": state in {"PLAYING", "TRANSITIONING"}, "state": state.lower(), "track": track,
+            "volume": level, "muted": mute.get("CurrentMute") == "1",
+            "canSkip": not track["title"] in {"TV", "Line-in"}}
+
+
+def sonos_state(settings):
+    """For the Player tab: rooms, which one is picked, and what it's doing."""
+    rooms = sonos_rooms()
+    picked = sonos_room(settings, rooms)
+    on = bool((settings.get("sonos") or {}).get("on")) and picked is not None
+    return {"available": bool(rooms), "on": on,
+            "rooms": [{"id": r["id"], "name": r["name"]} for r in rooms],
+            "room": {"id": picked["id"], "name": picked["name"], **sonos_now(picked)} if picked else None}
+
+
+def sonos_set_target(settings, on):
+    settings.setdefault("sonos", {})["on"] = bool(on)
+    save(settings)
+    if on:
+        write_atomic(SONOS_TARGET, settings["sonos"].get("room", "") + "\n")
+    else:
+        SONOS_TARGET.unlink(missing_ok=True)
+
+
+def sonos_use(settings, room_id):
+    rooms = sonos_rooms()
+    if not any(r["id"] == room_id for r in rooms):
+        sys.exit("That Sonos room isn't there.")
+    settings.setdefault("sonos", {})["room"] = room_id
+    sonos_set_target(settings, True)
+
+
+def sonos_volume(settings, value, osd=False):
+    """Set ('30'), nudge ('+5', '-5', 'raise', 'lower') or mute ('mute-toggle')
+    the picked room's group volume."""
+    room = sonos_room(settings, sonos_rooms())
+    if room is None:
+        sys.exit("No Sonos room picked.")
+    ip = room["ip"]
+    def failed():
+        if osd:
+            run("omarchy-osd", "-i", "volume-muted", "-m", f"{room['name']} isn't answering")
+        sys.exit("That Sonos room didn't answer.")
+    if value == "mute-toggle":
+        reply = sonos_call(ip, "GroupRenderingControl", "GetGroupMute", {"InstanceID": 0})
+        if reply is None:
+            failed()
+        muted = reply.get("CurrentMute") == "1"
+        sonos_call(ip, "GroupRenderingControl", "SetGroupMute", {"InstanceID": 0, "DesiredMute": 0 if muted else 1})
+        if osd:
+            run("omarchy-osd", "-i", "volume-muted" if not muted else "volume", "-m", f"{room['name']} · " +
+                ("muted" if not muted else "sound on"))
+        return
+    step = {"raise": f"+{SONOS_STEP}", "lower": f"-{SONOS_STEP}"}.get(value, value)
+    if not re.fullmatch(r"[+-]?\d{1,3}", step):
+        sys.exit("Volume is 0-100, or +N / -N.")
+    sonos_call(ip, "GroupRenderingControl", "SnapshotGroupVolume", {"InstanceID": 0})
+    if step[0] in "+-":
+        reply = sonos_call(ip, "GroupRenderingControl", "SetRelativeGroupVolume", {"InstanceID": 0, "Adjustment": int(step)})
+        if reply is None:
+            failed()
+        level = int(reply.get("NewVolume", "0") or 0)
+    else:
+        level = max(0, min(100, int(step)))
+        if sonos_call(ip, "GroupRenderingControl", "SetGroupVolume", {"InstanceID": 0, "DesiredVolume": level}) is None:
+            failed()
+    if osd:
+        run("omarchy-osd", "-i", "volume", "-p", str(level), "-m", room["name"])
+
+
+def sonos_transport(settings, action):
+    room = sonos_room(settings, sonos_rooms())
+    if room is None:
+        sys.exit("No Sonos room picked.")
+    ip = room["ip"]
+    if action == "toggle":
+        state = (sonos_call(ip, "AVTransport", "GetTransportInfo", {"InstanceID": 0}) or {}).get("CurrentTransportState")
+        action = "pause" if state in {"PLAYING", "TRANSITIONING"} else "play"
+    args = {"InstanceID": 0, **({"Speed": 1} if action == "play" else {})}
+    name = {"play": "Play", "pause": "Pause", "next": "Next", "previous": "Previous"}[action]
+    if sonos_call(ip, "AVTransport", name, args) is None:
+        sys.exit("Sonos didn't take that (nothing to skip on TV or line-in).")
+
+
 def quiet_out(*argv, timeout=4):
     try:
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout).stdout
@@ -3259,6 +3533,7 @@ def repo_links():
         (LOCAL_BIN / "afterlight", REPO / "bin/afterlight", "afterlight command"),
         (LOCAL_BIN / "afterlight-mode", REPO / "system/bin/afterlight-mode", "Mode helper"),
         (LOCAL_BIN / "afterlight-wallpaper", REPO / "system/bin/afterlight-wallpaper", "Wallpaper helper"),
+        (LOCAL_BIN / "baseline-volume", REPO / "system/bin/baseline-volume", "Volume keys helper"),
         (PLUGINS_DIR / "mortalfish.baseline", REPO / "plugin/mortalfish.baseline", "Baseline plugin"),
         (CONFIG / "hypr/home.lua", REPO / "system/hypr/home.lua", "Workspaces and window rules"),
         (HOOKS / "post-boot.d/baseline-boot", REPO / "system/hooks/baseline-boot", "Boot hook"),
@@ -4095,7 +4370,7 @@ def main(argv):
     with lock_path.open("a") as lock:
         # Read-only and network-bound commands don't hold the lock (a slow
         # GitHub shouldn't freeze the panel); `share` saves only the author.
-        if command not in {"state", "agents", "audio", "quick", "wifi", "bt", "media", "updates", "share", "check"} \
+        if command not in {"state", "agents", "audio", "quick", "wifi", "bt", "media", "updates", "share", "check", "sonos"} \
                 and not (command == "mouse" and args[:1] in (["daemon"], ["status"])) \
                 and not (command == "catalog" and args[:1] in ([], ["list"])):
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -4184,6 +4459,23 @@ def main(argv):
                 audio_swap()
             else:
                 sys.exit("Usage: afterlight audio [list|use <sink name>|swap]")
+        elif command == "sonos":
+            action = args[0] if args else "state"
+            if action == "state":
+                print(json.dumps(sonos_state(settings)))
+            elif action == "rooms":
+                print(json.dumps(sonos_rooms(refresh="--find" in args)))
+            elif action == "use" and len(args) == 2:
+                sonos_use(settings, args[1])
+            elif action == "off":
+                sonos_set_target(settings, False)
+            elif action == "volume" and len(args) >= 2:
+                sonos_volume(settings, args[1], osd="--osd" in args)
+            elif action in {"play", "pause", "toggle", "next", "previous"}:
+                sonos_transport(settings, action)
+            else:
+                sys.exit("Usage: afterlight sonos [state|rooms|use <room id>|off|volume <n|+n|-n|raise|lower|mute-toggle>"
+                         " [--osd]|play|pause|toggle|next|previous]")
         elif command == "wifi":
             wifi_command(args)
         elif command == "bt":

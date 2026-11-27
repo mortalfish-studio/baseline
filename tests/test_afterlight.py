@@ -646,3 +646,104 @@ class BuiltinPictureTests(TempCase):
         self.assertEqual(fetched, [self.looks / "rose/backgrounds/1-alley.jpg"])
         # Stock pictures are never fetched, so they don't count as missing.
         self.assertEqual(al.look_pictures_missing(), [])
+
+
+# ---------------------------------------------------------------- Sonos on the home network
+
+ZONES = """<ZoneGroupState><ZoneGroups>
+<ZoneGroup Coordinator="RINCON_A" ID="g1">
+  <ZoneGroupMember UUID="RINCON_A" Location="http://192.168.1.20:1400/xml/device_description.xml" ZoneName="Kitchen - Sonos"/>
+  <ZoneGroupMember UUID="RINCON_B" Location="http://192.168.1.21:1400/xml/device_description.xml" ZoneName="Lounge  (Arc) - Sonos">
+    <Satellite UUID="RINCON_S" Location="http://192.168.1.22:1400/x" ZoneName="Lounge (Arc) - Sonos" Invisible="1"/>
+  </ZoneGroupMember>
+</ZoneGroup>
+<ZoneGroup Coordinator="RINCON_C" ID="g2">
+  <ZoneGroupMember UUID="RINCON_C" Location="http://192.168.1.30:1400/x" ZoneName="Quiet Room"/>
+  <ZoneGroupMember UUID="RINCON_D" Location="http://192.168.1.31:1400/x" ZoneName="Quiet Room" Invisible="1"/>
+</ZoneGroup>
+<ZoneGroup Coordinator="RINCON_X" ID="g3">
+  <ZoneGroupMember UUID="RINCON_X" Location="http://8.8.8.8:1400/x" ZoneName="Somewhere else"/>
+</ZoneGroup>
+</ZoneGroups></ZoneGroupState>"""
+
+
+class SonosTests(TempCase):
+
+    def test_rooms_from_groups(self):
+        rooms = al.sonos_parse_groups(ZONES)
+        self.assertEqual([(r["name"], r["ip"], r["id"]) for r in rooms],
+                         [("Kitchen + Lounge (Arc)", "192.168.1.20", "RINCON_A"), ("Quiet Room", "192.168.1.30", "RINCON_C")])
+
+    def test_escaped_reply_parses_too(self):
+        import html
+        self.assertEqual(len(al.sonos_parse_groups(html.escape(ZONES))), 2)
+
+    def test_only_local_addresses(self):
+        for ip in ("192.168.1.5", "10.0.0.7", "172.16.4.2"):
+            self.assertTrue(al.sonos_private(ip), ip)
+        for ip in ("8.8.8.8", "127.0.0.1", "example.com", ""):
+            self.assertFalse(al.sonos_private(ip), ip)
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            self.assertIsNone(al.sonos_call("8.8.8.8", "AVTransport", "Play"))
+            urlopen.assert_not_called()
+
+    def test_track_metadata(self):
+        didl = ('<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" '
+                'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item><dc:title>Second Hand News</dc:title>'
+                '<dc:creator>Fleetwood Mac</dc:creator><upnp:album>Rumours</upnp:album>'
+                '<upnp:albumArtURI>/getaa?s=1&amp;u=x</upnp:albumArtURI></item></DIDL-Lite>')
+        track = al.sonos_parse_track(didl, "x-sonos-spotify:abc")
+        self.assertEqual((track["title"], track["artist"], track["album"], track["art"]),
+                         ("Second Hand News", "Fleetwood Mac", "Rumours", "/getaa?s=1&u=x"))
+        self.assertEqual(al.sonos_parse_track("", "x-sonos-htastream:RINCON_A:spdif")["title"], "TV")
+        self.assertEqual(al.sonos_parse_track("", "x-rincon-stream:RINCON_A")["title"], "Line-in")
+        self.assertEqual(al.sonos_parse_track("not xml", "")["title"], "")
+
+    def test_radio_stream_content(self):
+        didl = ('<DIDL-Lite xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                '<item><dc:title>x-sonosapi-stream</dc:title><r:streamContent>Bonobo - Kerala</r:streamContent></item></DIDL-Lite>')
+        track = al.sonos_parse_track(didl, "x-sonosapi-stream:s1")
+        self.assertEqual((track["artist"], track["title"]), ("Bonobo", "Kerala"))
+
+    def test_art_only_from_the_speaker(self):
+        self.patch("SONOS_ART", self.tmp / "art")
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            self.assertEqual(al.sonos_art("192.168.1.20", "https://example.com/cover.jpg"), "")
+            self.assertEqual(al.sonos_art("8.8.8.8", "/getaa?x"), "")
+            urlopen.assert_not_called()
+
+    def test_volume_values_are_checked(self):
+        rooms = [{"id": "RINCON_A", "name": "Kitchen", "ip": "192.168.1.20", "members": ["Kitchen"]}]
+        settings = {"sonos": {"on": True, "room": "RINCON_A"}}
+        with mock.patch.object(al, "sonos_rooms", return_value=rooms), \
+                mock.patch.object(al, "sonos_call", return_value={"NewVolume": "30"}) as call:
+            for bad in ("loud", "1000", "+", "5; rm"):
+                with self.assertRaises(SystemExit):
+                    al.sonos_volume(settings, bad)
+            al.sonos_volume(settings, "150")
+            self.assertEqual(call.call_args[0][3]["DesiredVolume"], 100)
+            al.sonos_volume(settings, "raise")
+            self.assertEqual(call.call_args[0][3]["Adjustment"], al.SONOS_STEP)
+
+    def test_volume_keys_follow_the_target(self):
+        """baseline-volume: Sonos while picked, the laptop otherwise."""
+        bin_dir = self.tmp / "bin"
+        (self.tmp / ".local/bin").mkdir(parents=True)
+        bin_dir.mkdir()
+        log = self.tmp / "calls"
+        for name, where in (("afterlight", self.tmp / ".local/bin"), ("omarchy-audio-output-volume", bin_dir)):
+            tool = where / name
+            tool.write_text(f'#!/bin/bash\necho "{name} $*" >> "{log}"\n')
+            tool.chmod(0o755)
+        env = {"HOME": str(self.tmp), "PATH": f"{bin_dir}:/usr/bin:/bin", "XDG_STATE_HOME": str(self.tmp / "state")}
+        script = str(ROOT / "system/bin/baseline-volume")
+        import subprocess
+        subprocess.run([script, "raise"], env=env, check=True)
+        target = self.tmp / "state/afterlight/sonos-target"
+        target.parent.mkdir(parents=True)
+        target.write_text("RINCON_A\n")
+        subprocess.run([script, "-1"], env=env, check=True)
+        subprocess.run([script, "mute-toggle"], env=env, check=True)
+        self.assertEqual(log.read_text().splitlines(), [
+            "omarchy-audio-output-volume raise", "afterlight sonos volume -1 --osd",
+            "afterlight sonos volume mute-toggle --osd"])

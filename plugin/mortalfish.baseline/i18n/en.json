@@ -195,7 +195,10 @@
   "status.updates": "Omarchy",
   "status.baseline": "Baseline",
   "status.baselineOk": "Up to date, every part in place",
-  "status.baselineBehind": { "one": "%1 new change on GitHub", "other": "%1 new changes on GitHub" },
+  "status.baselineBehind": {
+    "one": "%1 new change on GitHub",
+    "other": "%1 new changes on GitHub"
+  },
   "status.updateReady": "An update is ready",
   "status.upToDate": "Up to date",
   "status.updateNow": "Update",
@@ -286,7 +289,10 @@
   "health.title": "Health",
   "health.checking": "Checking…",
   "health.allGood": "All %1 parts in place",
-  "health.failing": {"one": "%1 part needs repair", "other": "%1 parts need repair"},
+  "health.failing": {
+    "one": "%1 part needs repair",
+    "other": "%1 parts need repair"
+  },
   "health.checked": "Checked at %1",
   "health.fixed": "Put back: %1",
   "health.repair": "Repair",
@@ -423,7 +429,10 @@
   "studio.confirmDelete": "Delete %1? Its folder goes to the trash.",
   "studio.open": "Studio",
   "studio.browse": "Browse",
-  "studio.browseCount": { "one": "Shared looks · %1", "other": "Shared looks · %1" },
+  "studio.browseCount": {
+    "one": "Shared looks · %1",
+    "other": "Shared looks · %1"
+  },
   "studio.browseOnGithub": "Catalog",
   "studio.browseRefresh": "Refresh",
   "studio.browseDisclaimer": "Looks here are palettes shared by others. Their pictures are links to other sites: Baseline doesn't host, own or vouch for them, and their rights stay with their creators. Fetch them for your own desktop only.",
@@ -433,9 +442,15 @@
   "studio.browseBroken": "Didn't pass Baseline's checks, so it can't be added: %1",
   "studio.browseAdded": "Added",
   "studio.browseBy": "by %1",
-  "studio.browsePictures": { "one": "%1 picture link", "other": "%1 picture links" },
+  "studio.browsePictures": {
+    "one": "%1 picture link",
+    "other": "%1 picture links"
+  },
   "studio.browsePaletteOnly": "palette only",
-  "studio.browseFetch": { "one": "Fetch its picture from its original site", "other": "Fetch its %1 pictures from their original sites" },
+  "studio.browseFetch": {
+    "one": "Fetch its picture from its original site",
+    "other": "Fetch its %1 pictures from their original sites"
+  },
   "studio.browseAdd": "Add",
   "studio.browseUpdate": "Update to v%1",
   "studio.browseUse": "Use",
@@ -452,11 +467,19 @@
   "studio.shareAuthorHint": "A handle, not your name: 2–40 letters, numbers, spaces, . _ -",
   "studio.sharePictures": "Pictures (links only)",
   "studio.sharePaletteOnly": "None of this look's pictures has a recorded source, so it's shared as a palette only.",
-  "studio.shareWithoutSource": { "one": "%1 picture has no recorded source and stays private.", "other": "%1 pictures have no recorded source and stay private." },
+  "studio.shareWithoutSource": {
+    "one": "%1 picture has no recorded source and stays private.",
+    "other": "%1 pictures have no recorded source and stay private."
+  },
   "studio.shareConsent": "This opens a public pull request on %1. Palette and picture links only; nothing personal. It appears in the catalog once it's reviewed and merged.",
   "studio.sharePublish": "Open pull request",
   "studio.shareCancel": "Not now",
   "studio.shareClose": "Done",
   "studio.shareDone": "Pull request opened",
-  "studio.openLink": "Open"
+  "studio.openLink": "Open",
+  "sonos.choose": "Pick a room",
+  "sonos.nothing": "Nothing playing",
+  "sonos.playingIn": "Playing in %1",
+  "sonos.pausedIn": "Paused in %1",
+  "sonos.volume": "%1 volume"
 }

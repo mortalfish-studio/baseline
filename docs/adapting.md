@@ -16,6 +16,7 @@ Coding apps that Omarchy installs include:
 | Which apps' notifications pop up | Grok Bot, T3 Code, Baseline | `Delivery.js` in the `mortalfish.notifications` copy; also `shownApps` in `plugin/…/ui/StatusTab.qml` |
 | Voice: questions | sent into Grok Bot | OmaRelay: `bin/omarelay_settings.py` (`FEATURES`, `ASSISTANTS`) and `bin/omarelay_grok.py` |
 | Voice: code tasks | start a T3 Code thread | OmaRelay: `bin/omarelay_t3.py` |
+| Sonos in the Player tab | your speakers on the local network (UPnP); the volume keys follow the picked room | `bin/afterlight`: the `sonos_*` functions; `system/bin/baseline-volume`; `ui/OutputSwitch.qml` |
 | Voice: Sonos | anything with "Sonos" in it goes to the Grok agent (`grok -p`), which uses the Sonos MCP | OmaRelay: `bin/omarelay_sonos.py` (`command()`: swap in another agent's headless command, such as `claude -p`, with the same Sonos MCP added to it) |
 | Agent threads in Baseline | read from T3 Code's database | `bin/afterlight`: `agents_from_db` / `agents_from_cli` |
 | Agent usage limits | `omarchy agent account list` (Claude, Codex, Grok) | `bin/afterlight` (morning check) and `ui/BarWidget.qml` |

@@ -27,5 +27,14 @@ pcall(require, "hypr.baseline_apps")
 -- The Razer mouse's side buttons and wheel tilt, written by `afterlight mouse` (Baseline > System > Mouse).
 pcall(require, "hypr.mouse")
 
+-- Volume keys: the Sonos room while Sonos is picked in Baseline's Player tab,
+-- otherwise the laptop, through Omarchy's own volume command (baseline-volume).
+local volume = os.getenv("HOME") .. "/.local/bin/baseline-volume"
+o.rebind("XF86AudioRaiseVolume", "Volume up", volume .. " raise", { locked = true, repeating = true })
+o.rebind("XF86AudioLowerVolume", "Volume down", volume .. " lower", { locked = true, repeating = true })
+o.rebind("XF86AudioMute", "Mute", volume .. " mute-toggle", { locked = true })
+o.rebind("ALT + XF86AudioRaiseVolume", "Volume up precise", volume .. " +1", { locked = true, repeating = true })
+o.rebind("ALT + XF86AudioLowerVolume", "Volume down precise", volume .. " -1", { locked = true, repeating = true })
+
 -- Baseline Studio (the picture library and look maker): a centred float.
 o.window({ title = "^Baseline Studio$" }, { float = true, center = true, size = { 1240, 840 } })

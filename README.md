@@ -101,6 +101,10 @@ Each look's theme folders carry a `chromium.theme` with the mode's accent (writt
 
 The theme-set hook also runs `afterlight prompt`, which writes a `[palettes.baseline]` block (accent, highlight, alert, dim) into `~/.config/starship.toml` from the current theme. The prompt's folder and `◇` use the accent, git uses the highlight, and a failed command's `◆` uses red. Omarchy retints foot's own 16 colours.
 
+## Sonos
+
+When Sonos speakers answer on your network, the Player tab's output row gets a **Sonos** tile. Pick it, then a room (groups show as "Kitchen + Lounge"): the card shows what that room is playing, with its cover, play/pause and skip, and the volume slider, mute and the keyboard's volume keys now drive that room (`system/bin/baseline-volume`). Pick Speaker or Headphones to hand them back. The laptop's own sound isn't moved. It all talks to the speakers directly on the local network (`afterlight sonos …`), so it's instant and needs no account; keep UPnP on in the Sonos app. Playing something by name goes through OmaRelay and the Grok agent: "play Bonobo on Sonos in the kitchen".
+
 ## Apps on workspaces 3 and 4
 
 Setup → Apps picks the coding app (workspace 3) and chat app (workspace 4): T3 Code and Grok Bot by default, or none. Any other app: `afterlight apps custom coding|chat <name> <window class> <command>` (find a window's class with `hyprctl clients`), then pick it in Setup. Baseline writes the choice to `~/.config/hypr/baseline_apps.lua`. More in [docs/adapting.md](docs/adapting.md).

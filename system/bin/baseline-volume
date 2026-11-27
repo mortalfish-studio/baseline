@@ -1,0 +1,14 @@
+#!/bin/bash
+# The volume keys (and scrolling on the bar's readout): the Sonos room while
+# Sonos is picked in Baseline's Player tab, otherwise the laptop's own sound
+# through Omarchy's volume command, exactly as before.
+#   baseline-volume raise|lower|mute-toggle|+N|-N
+action=${1:?usage: baseline-volume raise|lower|mute-toggle|+N|-N}
+target="${XDG_STATE_HOME:-$HOME/.local/state}/afterlight/sonos-target"
+if [[ -s $target ]]; then
+  case $action in
+    raise | lower | mute-toggle | +[0-9]* | -[0-9]*)
+      exec "$HOME/.local/bin/afterlight" sonos volume "$action" --osd ;;
+  esac
+fi
+exec omarchy-audio-output-volume "$action"

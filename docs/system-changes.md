@@ -30,8 +30,9 @@ These are symlinks back to your checkout, so the repo stays the single source. `
 |---|---|
 | `~/.local/bin/afterlight` | the `afterlight` command |
 | `~/.local/bin/afterlight-mode`, `~/.local/bin/afterlight-wallpaper` | small helpers used by the menu, timer and boot hook |
+| `~/.local/bin/baseline-volume` | the volume keys: the picked Sonos room, or else the laptop through Omarchy's own `omarchy-audio-output-volume` |
 | `~/.config/omarchy/plugins/mortalfish.baseline` | the Baseline bar widget, panel and Studio |
-| `~/.config/hypr/home.lua` | home workspaces, window rules, autostart, mouse buttons (below) |
+| `~/.config/hypr/home.lua` | home workspaces, window rules, autostart, mouse buttons (below), and the volume keys (rebound to `baseline-volume`) |
 | `~/.config/omarchy/hooks/post-boot.d/baseline-boot` | picks Day or Night and a wallpaper at login; a once-a-day greeting |
 | `~/.config/omarchy/hooks/post-update.d/baseline-repair` | after `omarchy update`: check and repair everything, quietly |
 | `~/.config/omarchy/hooks/theme-set.d/baseline-theme` | after a theme switch: T3 Code's neon layer and the prompt colours |
@@ -58,12 +59,12 @@ These are symlinks back to your checkout, so the repo stays the single source. `
 | `~/.config/omarchy/afterlight/settings.json`, `sources.json` | Baseline's settings, and where each added picture came from |
 | `~/.config/omarchy/backgrounds/afterlight-*` | pictures you add, and darkened Night/Saver copies made from them |
 | `~/.config/systemd/user/afterlight-mode.timer` | the Day/Night schedule |
-| `~/.local/state/afterlight/` | state: health report, liked tracks, Beatport playlists |
+| `~/.local/state/afterlight/` | state: health report, liked tracks, Beatport playlists, the Sonos speakers found (`sonos.json`) and, while Sonos has the volume keys, `sonos-target` |
 | `~/.local/share/baseline/looks/` | looks added from the [catalog](https://github.com/mortalfish-studio/baseline-looks) |
 | `~/.local/share/baseline/mine/` | looks you make in the Studio |
 | `~/.local/share/baseline-before/` | the snapshot taken before installing (moved aside by `afterlight uninstall`) |
 | `looks/*/backgrounds/` in the checkout | the built-in looks' pictures, downloaded from their links (not tracked by git) |
-| `~/.cache/afterlight/`, `~/.cache/baseline/` | thumbnails, a copy of the catalog |
+| `~/.cache/afterlight/`, `~/.cache/baseline/` | thumbnails, Sonos covers, a copy of the catalog |
 
 With `--dotfiles=<owner/repo>`, the installer also replaces key bindings, input, window look, autostart and night-light settings, menus, foot, default apps and Chrome flags from your backup. They're in the snapshot, so uninstalling puts your own versions back.
 
@@ -82,6 +83,7 @@ Chrome's colour follows the look through Omarchy's own browser policy (`/etc/opt
 - **Day / Night / Saver**: switched by the clock (07:00 and 20:00 by default). Saver lowers the screen brightness, warms the colours, picks the power-saver profile and a solid bar, and puts all four back afterwards. Night and Saver also change the colour temperature.
 - **Mouse** (Razer Basilisk V3 only; other mice need [adapting](adapting.md#a-different-mouse)): lights in the look's colours; slow-down button = hold to dictate, front side button = OmaRelay voice, rear side button = next track, wheel tilt = previous/next workspace. All changeable in Setup.
 - **Superwhisper**: Setup can change its recording indicator style.
+- **Volume keys**: Omarchy's volume up, down, mute (and Alt + up/down) are rebound to `baseline-volume`. With the laptop picked they do exactly what they did; with Sonos picked in the Player tab they change that room's volume.
 
 ## Background activity and network
 
@@ -96,6 +98,7 @@ Chrome's colour follows the look through Omarchy's own browser policy (`/etc/opt
 | Studio → Browse / Add | clones the public catalog; downloads pictures **only if you choose to**, from Wallhaven, Unsplash or Wikimedia |
 | adding a Wallhaven link | asks Wallhaven's API for the picture and its credit |
 | Share… | opens a public pull request on the catalog (only when you press it) |
+| Player tab, while it's open | asks your Sonos speakers on the **local network** (port 1400) for rooms, volume and what's playing, every few seconds; finds them through Avahi (mDNS). Nothing leaves your network |
 | saying "Sonos" to OmaRelay | the Grok agent (`grok -p`, Sonos tools only) talks to Sonos's cloud; only if you've added and signed in to the Sonos MCP yourself |
 
 Nothing is sent anywhere else, and nothing personal goes into shared looks: commits use your GitHub no-reply address and an author handle you choose.
