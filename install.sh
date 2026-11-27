@@ -139,6 +139,8 @@ if (( use_dotfiles )); then
   restore config/omarchy/afterlight/settings.json "$C/omarchy/afterlight/settings.json"
   restore config/omarchy/afterlight/sources.json "$C/omarchy/afterlight/sources.json"
   restore config/omarchy/backgrounds/afterlight-2049 "$C/omarchy/backgrounds/afterlight-2049"
+  restore baseline/mine "$HOME/.local/share/baseline/mine"                 # looks you made
+  restore baseline/afterlight-backgrounds "$BASELINE_DIR/backgrounds"      # Afterlight's own pictures
   for p in mortalfish.calendar mortalfish.focus; do
     restore "config/omarchy/plugins/$p" "$C/omarchy/plugins/$p"
   done

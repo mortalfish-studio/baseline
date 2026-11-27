@@ -61,7 +61,7 @@ The installer:
 9. ends with a health check
 
 Options:
-- `--dotfiles=<owner/repo>`: restore key bindings, input, menus, foot, default apps and Baseline's settings from your own dotfiles repo (laid out like `config/hypr/…`, `config/omarchy/…`; signs in to GitHub if it's private)
+- `--dotfiles=<owner/repo>`: restore key bindings, input, menus, foot, default apps, Baseline's settings, your looks (`baseline/mine/`) and pictures from your own dotfiles repo (laid out like `config/hypr/…`, `config/omarchy/…`; signs in to GitHub if it's private)
 - `--no-apps`: don't install T3 Code, Grok Bot, Superwhisper or Chrome
 - `--no-omarelay`: skip voice control
 - `--look=<id>`: start on a particular look
