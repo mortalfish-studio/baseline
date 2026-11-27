@@ -10,7 +10,9 @@ A small add-on, **Baseline for Beatport**, lets Baseline work those pages. It ca
 - start them playing
 - list your Beatport playlists in the panel
 - add tracks to your likes (♥)
-- play Apple Music search results through Apple's own player in the page (MusicKit): a song within its album, an album, or an artist's top songs; and read what it's playing, where it is and how long it is (so the [Deck](../README.md#the-deck) knows when a song ends); find playlists (yours in your library, and Apple's), list all of yours, and read a playlist's songs, for the Deck. Reading only: it never changes your library
+- play Apple Music search results through Apple's own player in the page (MusicKit): a song within its album, an album, or an artist's top songs; and read what it's playing, where it is and how long it is (so the [Deck](../README.md#the-deck) knows when a song ends); find playlists (yours in your library, and Apple's), list all of yours, and read a playlist's songs, for the Deck. It only changes your library when you ask the Deck to *Save to Apple Music*, which makes one new playlist
+- for the Deck's *Save to*, make a new private playlist of a set's songs in your YouTube Music or Beatport account (Beatport's own sign-in is used inside its page and never leaves it); only when you press it
+- turn a page's volume down and back up, so the Deck can fade one app into the next
 - keep only one thing playing at a time
 
 None of this is required. Without the add-on, Baseline still opens these pages and the media keys still work. You just lose playing them in place and the playlist list.

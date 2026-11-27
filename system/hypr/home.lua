@@ -52,3 +52,5 @@ o.window({ title = "^Baseline Studio$" }, { float = true, center = true, size = 
 -- it; opened from anywhere else it pops up over that workspace as a float and
 -- goes home again with Escape or when you switch away (ui/Deck.qml).
 o.window({ title = "^Baseline Deck$" }, { workspace = "7 silent" })
+-- Super+Alt+D pops the Deck over whatever you're doing (again sends it home).
+o.bind("SUPER + ALT + D", "Deck", "omarchy-shell mortalfish.baseline deck")

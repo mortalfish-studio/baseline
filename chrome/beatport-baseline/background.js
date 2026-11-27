@@ -67,7 +67,7 @@ const AM_PLAYLIST = /^(pl\.[A-Za-z0-9.-]{1,80}|p\.[A-Za-z0-9]{1,40})$/;
 async function appleMusic(op, tab) {
   tab = tab || await appleMusicTab();
   if (!tab) return { ok: false, error: "no Apple Music tab" };
-  const actions = ["now", "queue", "play", "pause", "toggle", "next", "previous", "seek", "playlists", "tracks"];
+  const actions = ["now", "queue", "play", "pause", "toggle", "next", "previous", "seek", "playlists", "tracks", "volume", "export"];
   if (!op || !actions.includes(op.action)) return { ok: false };
   const clean = { action: op.action };
   if (op.action === "queue") {
@@ -93,6 +93,16 @@ async function appleMusic(op, tab) {
     if (!AM_PLAYLIST.test(String(op.id))) return { ok: false };
     clean.id = String(op.id);
   }
+  if (op.action === "volume") {
+    clean.level = op.level === undefined || op.level === null ? null : Number(op.level);
+    if (clean.level !== null && (!Number.isFinite(clean.level) || clean.level < 0 || clean.level > 1)) return { ok: false };
+  }
+  if (op.action === "export") {
+    // A new playlist in your library, with these catalogue songs. Only ever creates.
+    clean.name = String(op.name || "").replace(/[\u0000-\u001f]/g, "").slice(0, 100);
+    clean.ids = (Array.isArray(op.ids) ? op.ids : []).map(String).filter((i) => /^\d{1,15}$/.test(i)).slice(0, 300);
+    if (!clean.name || !clean.ids.length) return { ok: false };
+  }
   if (op.action === "seek") {
     clean.seconds = Number(op.seconds);
     if (!Number.isFinite(clean.seconds) || clean.seconds < 0 || clean.seconds > 86400) return { ok: false };
@@ -116,6 +126,21 @@ async function appleMusic(op, tab) {
                              time: Math.floor(kit.currentPlaybackTime || 0),
                              duration: Math.floor(kit.currentPlaybackDuration || 0), item: now() });
       if (op.action === "now") return state();
+      if (op.action === "volume") {
+        const was = kit.volume;
+        if (op.level !== null) kit.volume = op.level;
+        return { ok: true, level: was };
+      }
+      if (op.action === "export") {
+        if (!kit.isAuthorized) return { ok: false, error: "signed out" };
+        try {
+          const reply = await kit.api.music("/v1/me/library/playlists", {}, { fetchOptions: { method: "POST",
+            body: JSON.stringify({ attributes: { name: op.name, description: "Saved from Baseline's Deck" },
+                                   relationships: { tracks: { data: op.ids.map((id) => ({ id, type: "songs" })) } } }) } });
+          const made = (((reply || {}).data || {}).data || [])[0];
+          return { ok: !!made, id: made ? String(made.id) : "" };
+        } catch (error) { return { ok: false, error: String(error).slice(0, 120) }; }
+      }
       // Reading only: playlists for a search (yours, then the catalogue's),
       // and a playlist's songs as catalogue songs (what Sonos can play).
       const art = (a) => (a && a.url ? String(a.url).replace("{w}", "300").replace("{h}", "300") : "");

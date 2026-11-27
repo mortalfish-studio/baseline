@@ -1,6 +1,7 @@
 // Lets Baseline look at and press the page's own controls, for jobs like
-// "add the playing track to <3". It can only list visible controls and click
-// one; it never runs code it's sent.
+// "add the playing track to <3". It can list visible controls and click one,
+// set the player's volume, and make a new playlist from checked ids; it
+// never runs code it's sent.
 (() => {
   // Loaded by the manifest and maybe again by background.js: listen once
   // per version (a reloaded extension brings a newer one).
@@ -81,8 +82,7 @@
   // Your YouTube Music library (playlists and the like), asked for the way
   // the page asks: signed in with your own cookies, from this page. Only
   // fixed library pages (browse ids starting FEmusic_) can be read.
-  async function ytmBrowse(browseId) {
-    if (!/^FEmusic_[a-z_]+$/.test(String(browseId))) return { ok: false };
+  async function ytmCall(endpoint, body) {
     const sapisid = (document.cookie.match(/(?:^|;\s*)(?:__Secure-3PAPISID|SAPISID)=([^;]+)/) || [])[1];
     if (!sapisid) return { ok: false, error: "signed out" };
     const html = document.documentElement.innerHTML;
@@ -90,14 +90,61 @@
     const stamp = Math.floor(Date.now() / 1000);
     const digest = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(`${stamp} ${sapisid} https://music.youtube.com`));
     const hash = [...new Uint8Array(digest)].map((x) => x.toString(16).padStart(2, "0")).join("");
-    const response = await fetch("/youtubei/v1/browse?prettyPrint=false", {
+    const response = await fetch(`/youtubei/v1/${endpoint}?prettyPrint=false`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json", "Authorization": `SAPISIDHASH ${stamp}_${hash}`,
                  "X-Origin": "https://music.youtube.com", "X-Goog-AuthUser": "0" },
-      body: JSON.stringify({ context: { client: { clientName: "WEB_REMIX", clientVersion: version, hl: "en" } }, browseId }),
+      body: JSON.stringify({ context: { client: { clientName: "WEB_REMIX", clientVersion: version, hl: "en" } }, ...body }),
     });
     return { ok: response.ok, status: response.status, text: (await response.text()).slice(0, 3000000) };
+  }
+  async function ytmBrowse(browseId) {
+    if (!/^FEmusic_[a-z_]+$/.test(String(browseId))) return { ok: false };
+    return ytmCall("browse", { browseId });
+  }
+
+  // A new private playlist in your YouTube Music library, with these songs
+  // (checked video ids only). Only ever creates; never changes or deletes.
+  async function ytmExport(op) {
+    const title = String(op.title || "").replace(/[\u0000-\u001f]/g, "").slice(0, 150);
+    const ids = (Array.isArray(op.ids) ? op.ids : []).map(String).filter((v) => /^[\w-]{11}$/.test(v)).slice(0, 300);
+    if (!title || !ids.length) return { ok: false };
+    const reply = await ytmCall("playlist/create", { title, description: "Saved from Baseline's Deck", privacyStatus: "PRIVATE", videoIds: ids });
+    let playlistId = "";
+    try { playlistId = String(JSON.parse(reply.text || "{}").playlistId || ""); } catch (error) { /* not JSON */ }
+    return { ok: reply.ok && !!playlistId, status: reply.status, playlistId };
+  }
+
+  // A new playlist in your Beatport library, with these tracks (checked ids
+  // only), through Beatport's own API as the page is signed in. The sign-in
+  // stays in this page. Only ever creates; never changes or deletes.
+  async function beatportExport(op) {
+    const name = String(op.name || "").replace(/[\u0000-\u001f]/g, "").slice(0, 100);
+    const ids = (Array.isArray(op.ids) ? op.ids : []).map(Number).filter((n) => Number.isInteger(n) && n > 0 && n < 1e12).slice(0, 300);
+    if (!name || !ids.length) return { ok: false };
+    const session = await (await fetch("/api/auth/session", { credentials: "include" })).json().catch(() => ({}));
+    const token = session && session.token && !session.token.anon ? session.token.accessToken : "";
+    if (!token) return { ok: false, error: "signed out" };
+    const api = (path, body) => fetch(`https://api.beatport.com/v4/my/playlists/${path}`, {
+      method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` }, body: JSON.stringify(body) });
+    const made = await api("", { name });
+    const playlist = await made.json().catch(() => ({}));
+    if (!made.ok || !playlist.id) return { ok: false, status: made.status };
+    const added = await api(`${playlist.id}/tracks/bulk/`, { track_ids: ids });
+    return { ok: added.ok, status: added.status, id: playlist.id };
+  }
+
+  // The page's own player volume (0-1): Beatport's and YouTube Music's are
+  // audio and video elements. Returns what it was, so it can be put back.
+  function volume(op) {
+    const media = [...document.querySelectorAll("audio, video")];
+    const was = media.length ? media[0].volume : null;
+    const level = Number(op.level);
+    if (op.level !== undefined && op.level !== null && Number.isFinite(level)) {
+      for (const el of media) el.volume = Math.max(0, Math.min(1, level));
+    }
+    return { ok: media.length > 0, level: was };
   }
 
   async function run(op) {
@@ -109,6 +156,9 @@
     }
     if (op.type === "click") return clickWhenReady(op);
     if (op.type === "ytm-browse" && location.hostname === "music.youtube.com") return ytmBrowse(op.browseId);
+    if (op.type === "ytm-export" && location.hostname === "music.youtube.com") return ytmExport(op);
+    if (op.type === "bp-export" && location.hostname === "www.beatport.com") return beatportExport(op);
+    if (op.type === "volume") return volume(op);
     if (op.type === "steps") {
       const done = [];
       for (const step of (op.steps || []).slice(0, 8)) {

@@ -253,7 +253,28 @@ Item {
       }
     }
   }
+  // An album or playlist opened in the crate, to pick songs out of it.
+  property var openList: null
+  property var listSongs: []
+  readonly property bool listLoading: opener.running
+  Process {
+    id: opener
+    stdout: StdioCollector {
+      onStreamFinished: {
+        try { const v = JSON.parse(text); root.listSongs = Array.isArray(v) ? v : [] } catch (error) { root.listSongs = [] }
+      }
+    }
+  }
+  function openPlaylist(item) {
+    if (opener.running) return
+    openList = item
+    listSongs = []
+    opener.command = [tool, "deck", "songs", service, JSON.stringify(item)]
+    opener.running = true
+  }
+  function closePlaylist() { openList = null; listSongs = [] }
   function find(words) {
+    openList = null
     if (words.trim() === "" || finder.running) return
     finder.command = [tool, "deck", "search", service, words.trim()]
     finder.running = true
@@ -273,6 +294,9 @@ Item {
   // The crate (Build a set and search) folds away to give the music room;
   // remembered in settings (deck.crate).
   property bool crateFolded: false
+  // A song picked in the crate to grow a set (or Auto-DJ) from.
+  property var seed: null
+  property string seedService: ""
   readonly property bool crateOpen: !crateFolded
   function applyCrate() {
     const d = root.host && root.host.afterState ? root.host.afterState.settings.deck : null
@@ -302,7 +326,15 @@ Item {
   property int bloomPick: -1
   property point bloomAt: Qt.point(0, 0)
   readonly property bool bloomMany: !!bloomItem && (bloomItem.kind === "album" || bloomItem.kind === "playlist")
-  readonly property var petals: [
+  readonly property var savePetals: [
+    { key: "applemusic", glyph: "󰀵", label: "Apple Music", angle: 0 },
+    { key: "ytmusic", glyph: "󰗃", label: "YouTube Music", angle: 90 },
+    { key: "beatport", glyph: "󰋋", label: "Beatport", angle: 180 }
+  ]
+  // Save and Export use the same flower: where to (here, or a new playlist on a service).
+  readonly property var petals: bloomFrom === "save" ? [{ key: "baseline", glyph: "󰆓", label: strings.t("deck.saveHere"), angle: -90 }].concat(savePetals)
+    : bloomFrom === "export" ? savePetals.map((p, i) => Object.assign({}, p, { angle: [-90, 30, 150][i] }))
+    : [
     { key: "now", glyph: "󰐊", label: strings.t("deck.bloomNow"), angle: -90 },
     { key: "next", glyph: "󰒭", label: strings.t("deck.bloomNext"), angle: 0 },
     { key: "later", glyph: "󰐒", label: strings.t("deck.bloomLater"), angle: 90 },
@@ -340,6 +372,17 @@ Item {
     const key = petals[i].key
     const item = bloomItem
     const count = (deck.set || []).length
+    if (bloomFrom === "save") {
+      saveTo = key
+      saveAs(item.title)
+      closeBloom()
+      return
+    }
+    if (bloomFrom === "export") {
+      runLong(["deck", "export", key, item.title, "--saved"])
+      closeBloom()
+      return
+    }
     if (bloomFrom === "found") {
       const json = JSON.stringify(item)
       if (key === "now") run(["deck", "add", service, json, "--play"])
@@ -548,6 +591,7 @@ Item {
   property bool filterOpen: false
   property bool shapeOpen: false
   readonly property var shapes: [
+    { key: "shuffle", glyph: "󰒝", label: strings.t("deck.shuffle") },
     { key: "arc", glyph: "󱗿", label: strings.t("deck.shapeArc") },
     { key: "harmonic", glyph: "󰽰", label: strings.t("deck.shapeHarmonic") },
     { key: "smooth", glyph: "󰾆", label: strings.t("deck.shapeSmooth") },
@@ -577,11 +621,15 @@ Item {
   onSeenChanged: if (seen) readShelf()
   property bool saving: false
   property string savePart: "next"          // what's to come, what's played, or the whole night
+  property string saveTo: "baseline"        // or a service: a new playlist there, with the songs it has
   function saveAs(name) {
     if (name.trim() === "") return
-    run(["deck", "save", name.trim()].concat(savePart === "next" ? [] : ["--" + savePart]))
+    const part = savePart === "next" ? [] : ["--" + savePart]
+    if (saveTo === "baseline") run(["deck", "save", name.trim()].concat(part))
+    else runLong(["deck", "export", saveTo, name.trim()].concat(part))
     saving = false
     savePart = "next"
+    saveTo = "baseline"
     shelfAgain.start()
   }
   Timer { id: shelfAgain; interval: 800; onTriggered: root.readShelf() }
@@ -618,6 +666,7 @@ Item {
       focus: true
       Keys.onEscapePressed: {
         if (root.bloomOpen) root.closeBloom()
+        else if (root.openList) root.closePlaylist()
         else if (root.selectedUids.length) root.clearPicked()
         else if (root.filterOpen || root.saving) { root.filterOpen = false; root.saving = false; root.filter = "" }
         else if (root.popped) root.goHome()
@@ -788,9 +837,9 @@ Item {
                   Layout.fillWidth: true
                   implicitHeight: Math.max(54, brief.implicitHeight + 12)
                   radius: Style.cornerRadius > 0 ? 4 : 0
-                  color: Qt.rgba(1, 1, 1, 0.04)
+                  color: Util.alpha(root.ink, 0.04)
                   border.width: 1
-                  border.color: brief.activeFocus ? root.amber : Qt.rgba(1, 1, 1, 0.14)
+                  border.color: brief.activeFocus ? root.amber : Util.alpha(root.ink, 0.14)
                   TextEdit {
                     id: brief
                     anchors.fill: parent
@@ -823,7 +872,7 @@ Item {
                       radius: Style.cornerRadius > 0 ? 3 : 0
                       color: on ? Util.alpha(root.amber, 0.2) : "transparent"
                       border.width: 1
-                      border.color: on ? root.amber : Qt.rgba(1, 1, 1, 0.15)
+                      border.color: on ? root.amber : Util.alpha(root.ink, 0.15)
                       Label {
                         id: lenLabel
                         anchors.centerIn: parent
@@ -838,19 +887,59 @@ Item {
                   ActionButton {
                     icon: "✦"
                     text: strings.t("deck.buildGo")
-                    enabled: brief.text.trim() !== ""
+                    enabled: brief.text.trim() !== "" || !!root.seed
                     onClicked: {
-                      const args = ["deck", "build", String(build.minutes), brief.text.trim(), "--service", root.service]
-                      if (root.now) args.push("--start", root.now.title + " by " + root.now.artist)
+                      const args = ["deck", "build", String(build.minutes)]
+                      if (brief.text.trim() !== "") args.push(brief.text.trim())
+                      if (root.seed) args.push("--seed", JSON.stringify(root.seed))
+                      else if (root.now) args.push("--start", root.now.title + " by " + root.now.artist)
                       if ((root.deck.set || []).length === 0) args.push("--replace")
+                      args.push("--service", root.seed ? root.seedService : root.service)
                       root.runLong(args)
+                      root.seed = null
                     }
+                  }
+                }
+                // The song it grows from, picked with ✦ on a song below.
+                Rectangle {
+                  visible: !!root.seed
+                  Layout.fillWidth: true
+                  implicitHeight: 46
+                  radius: Style.cornerRadius > 0 ? 4 : 0
+                  color: Util.alpha(root.amber, 0.1)
+                  border.width: 1
+                  border.color: Util.alpha(root.amber, 0.4)
+                  RowLayout {
+                    anchors.fill: parent
+                    anchors.margins: 5
+                    spacing: 8
+                    Cover { url: root.seed ? root.seed.thumb || "" : ""; size: 34 }
+                    ColumnLayout {
+                      Layout.fillWidth: true
+                      spacing: 0
+                      Label { Layout.fillWidth: true; text: strings.t("deck.seedFrom"); font.pixelSize: Style.font.caption; color: root.amber; opacity: 0.85 }
+                      Label {
+                        Layout.fillWidth: true
+                        text: root.seed ? root.seed.title + " · " + String(root.seed.subtitle || "").split(" • ")[0] : ""
+                        font.bold: true; font.pixelSize: Style.font.caption
+                      }
+                    }
+                    RoundButton {
+                      glyph: "∞"
+                      tip: strings.t("deck.seedAutodj")
+                      onClicked: {
+                        root.runLong(["deck", "autodj", "from", root.seedService, JSON.stringify(root.seed)])
+                        root.seed = null
+                      }
+                    }
+                    RoundButton { glyph: "󰅖"; tip: strings.t("deck.seedClear"); onClicked: root.seed = null }
                   }
                 }
                 Label {
                   Layout.fillWidth: true
                   wrapMode: Text.Wrap
-                  text: root.now ? strings.t("deck.buildFrom").arg(root.now.title) : strings.t("deck.buildNote")
+                  text: root.seed ? strings.t("deck.seedNote")
+                    : root.now ? strings.t("deck.buildFrom").arg(root.now.title) : strings.t("deck.buildNote")
                   font.pixelSize: Style.font.caption
                   opacity: 0.55
                 }
@@ -872,7 +961,7 @@ Item {
                   radius: Style.cornerRadius > 0 ? 3 : 0
                   color: on ? Util.alpha(root.amber, 0.16) : "transparent"
                   border.width: 1
-                  border.color: on ? root.amber : Qt.rgba(1, 1, 1, 0.15)
+                  border.color: on ? root.amber : Util.alpha(root.ink, 0.15)
                   Label {
                     id: svcLabel
                     anchors.centerIn: parent
@@ -885,6 +974,7 @@ Item {
                     onTapped: {
                       root.pickedService = modelData.id
                       root.results = []
+                      root.closePlaylist()
                       if (query.text.trim() !== "") root.find(query.text)
                     }
                   }
@@ -895,9 +985,9 @@ Item {
               Layout.fillWidth: true
               implicitHeight: query.implicitHeight + 14
               radius: Style.cornerRadius > 0 ? 4 : 0
-              color: Qt.rgba(1, 1, 1, 0.04)
+              color: Util.alpha(root.ink, 0.04)
               border.width: 1
-              border.color: query.activeFocus ? root.amber : Qt.rgba(1, 1, 1, 0.14)
+              border.color: query.activeFocus ? root.amber : Util.alpha(root.ink, 0.14)
               TextInput {
                 id: query
                 anchors.left: parent.left; anchors.right: searchIcon.left
@@ -924,14 +1014,44 @@ Item {
                 TapHandler { onTapped: root.find(query.text) }
               }
             }
+            // An album or playlist you opened: back, what it is, and all of it at once.
+            Rectangle {
+              visible: !!root.openList
+              Layout.fillWidth: true
+              implicitHeight: 58
+              radius: Style.cornerRadius > 0 ? 4 : 0
+              color: Util.alpha(root.amber, 0.08)
+              border.width: 1
+              border.color: Util.alpha(root.amber, 0.35)
+              RowLayout {
+                anchors.fill: parent
+                anchors.margins: 6
+                spacing: 8
+                RoundButton { glyph: "󰁍"; tip: strings.t("deck.listBack"); onClicked: root.closePlaylist() }
+                Cover { url: root.openList ? root.openList.thumb || "" : ""; size: 42; glyph: "󰲸" }
+                ColumnLayout {
+                  Layout.fillWidth: true
+                  spacing: 0
+                  Label { Layout.fillWidth: true; text: root.openList ? root.openList.title : ""; font.bold: true; font.pixelSize: Style.font.caption }
+                  Label {
+                    Layout.fillWidth: true
+                    text: root.listLoading ? strings.t("deck.listLoading") : strings.tn("deck.listCount", root.listSongs.length).arg(root.listSongs.length)
+                    font.pixelSize: Style.font.caption; opacity: 0.6
+                  }
+                }
+                RoundButton { glyph: "󰐊"; tip: strings.t("deck.playNow"); onClicked: root.run(["deck", "add", root.service, JSON.stringify(root.openList), "--play"]) }
+                RoundButton { glyph: "󰒝"; tip: strings.t("deck.bloomMix"); onClicked: root.run(["deck", "add", root.service, JSON.stringify(root.openList), "--scatter"]) }
+                RoundButton { glyph: "󰐒"; tip: strings.t("deck.add"); onClicked: root.run(["deck", "add", root.service, JSON.stringify(root.openList)]) }
+              }
+            }
             ListView {
               id: found
               Layout.fillWidth: true
               Layout.fillHeight: true
               clip: true
               spacing: 2
-              readonly property bool shelf: root.results.length === 0 && query.text.trim() === ""
-              model: shelf ? root.myPlaylists : root.results
+              readonly property bool shelf: !root.openList && root.results.length === 0 && query.text.trim() === ""
+              model: root.openList ? root.listSongs : shelf ? root.myPlaylists : root.results
               // Before a search: your saved sets, then your own playlists.
               header: Column {
                 width: found.width
@@ -988,6 +1108,14 @@ Item {
                           opacity: 0.8
                         }
                       }
+                      RoundButton {
+                        id: exportGo
+                        visible: savedHover.hovered
+                        glyph: "󰈝"
+                        tip: strings.t("deck.exportTo")
+                        onClicked: root.openBloom("export", { title: saved.modelData.name, thumb: (saved.modelData.thumbs || [])[0] || "" }, "",
+                                                  exportGo.mapToItem(root.stageItem, exportGo.width / 2, exportGo.height / 2))
+                      }
                       RoundButton { visible: savedHover.hovered; glyph: "󰆴"; onClicked: { root.run(["deck", "forget", saved.modelData.name]); forgetDone.start() } }
                       RoundButton { glyph: "󰐊"; onClicked: { root.run(["deck", "load", saved.modelData.name, "--replace"]); root.run(["deck", "next"]) } }
                       RoundButton { glyph: "󰐒"; onClicked: root.run(["deck", "load", saved.modelData.name]) }
@@ -1011,7 +1139,7 @@ Item {
                 width: found.width
                 implicitHeight: 52
                 radius: Style.cornerRadius > 0 ? 4 : 0
-                color: hitHover.hovered ? Qt.rgba(1, 1, 1, 0.05) : "transparent"
+                color: hitHover.hovered ? Util.alpha(root.ink, 0.05) : "transparent"
                 RowLayout {
                   anchors.fill: parent
                   anchors.margins: 5
@@ -1035,6 +1163,19 @@ Item {
                       opacity: 0.6
                     }
                   }
+                  RoundButton {
+                    visible: hit.modelData.kind === "album" || hit.modelData.kind === "playlist"
+                    glyph: "󰁔"
+                    tip: strings.t("deck.listOpen")
+                    onClicked: root.openPlaylist(hit.modelData)
+                  }
+                  RoundButton {
+                    visible: (hit.modelData.kind || "song") === "song"
+                    glyph: "✦"
+                    tip: strings.t("deck.seedPick")
+                    on: !!root.seed && root.seed.id === hit.modelData.id && root.seed.video === hit.modelData.video
+                    onClicked: { root.seed = hit.modelData; root.seedService = root.service }
+                  }
                   RoundButton { glyph: "󰐊"; tip: strings.t("deck.playNow"); onClicked: root.run(["deck", "add", root.service, JSON.stringify(hit.modelData), "--play"]) }
                   RoundButton {
                     glyph: hit.modelData.kind === "playlist" || hit.modelData.kind === "album" ? "󰐒" : "󰐕"
@@ -1049,7 +1190,8 @@ Item {
                   id: hitTap
                   longPressThreshold: 0.35
                   onTapped: function(point) {
-                    if (point.position.x > hit.width - 76) return          // the ▶ and + buttons
+                    if (point.position.x > hit.width - 110) return         // the ✦ (or 󰁔), ▶ and + buttons
+                    if (hit.modelData.kind === "album" || hit.modelData.kind === "playlist") { root.openPlaylist(hit.modelData); return }
                     root.tapFound(hit.modelData, hit.mapToItem(root.stageItem, point.position.x, point.position.y))
                   }
                   onLongPressed: root.openBloom("found", hit.modelData, "", hit.mapToItem(root.stageItem, hitTap.point.position.x, hitTap.point.position.y))
@@ -1188,7 +1330,7 @@ Item {
                     anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
                     height: 3
                     radius: 2
-                    color: Qt.rgba(1, 1, 1, 0.1)
+                    color: Util.alpha(root.ink, 0.1)
                     Rectangle {
                       height: parent.height
                       radius: 2
@@ -1224,14 +1366,22 @@ Item {
                     onClicked: root.run(["deck", root.deck.playing ? "pause" : "play"])
                   }
                   ActionButton { icon: "󰒭"; text: strings.t("deck.next"); tone: root.teal; enabled: (root.deck.set || []).length > 0; onClicked: root.run(["deck", "next"]) }
-                  ActionButton { icon: "󰒝"; text: strings.t("deck.shuffle"); tone: root.teal; enabled: (root.deck.set || []).length > 1; onClicked: root.run(["deck", "shuffle"]) }
+                  // Playing above; the set and the night below the bar.
+                  Rectangle { width: 1; height: 30; color: Util.alpha(root.ink, 0.18) }
                   ActionButton { icon: "✦"; text: strings.t("deck.fill"); onClicked: root.runLong(["deck", "fill", "--service", root.service]) }
                   ActionButton {
                     icon: "󰘶"
                     text: strings.t("deck.shape")
                     tone: root.shapeOpen ? root.amber : root.teal
-                    enabled: (root.deck.set || []).length > 2
+                    enabled: (root.deck.set || []).length > 1
                     onClicked: { root.shapeOpen = !root.shapeOpen; root.saving = false; root.filterOpen = false }
+                  }
+                  // Auto-DJ: with three songs left, Grok adds more that carry the night on.
+                  ActionButton {
+                    icon: "∞"
+                    text: strings.t("deck.autodj")
+                    tone: root.deck.autodj ? root.amber : root.teal
+                    onClicked: root.run(["deck", "autodj", root.deck.autodj ? "off" : "on"])
                   }
                   // Sleep: off, 15, 30, 60 minutes, the end of this song.
                   ActionButton {
@@ -1327,65 +1477,89 @@ Item {
                     Label { text: modelData.label; font.pixelSize: Style.font.caption; color: root.ink }
                   }
                   HoverHandler { id: chipHover; cursorShape: Qt.PointingHandCursor }
-                  TapHandler { onTapped: { root.run(["deck", "shape", modelData.key]); root.shapeOpen = false } }
+                  TapHandler {
+                    onTapped: {
+                      root.run(modelData.key === "shuffle" ? ["deck", "shuffle"] : ["deck", "shape", modelData.key])
+                      root.shapeOpen = false
+                    }
+                  }
                 }
               }
             }
-            // Naming a set to save, or finding a song in this one.
+            // Naming a set to save (what, and where), or finding a song in this one.
             Rectangle {
               Layout.fillWidth: true
               visible: root.saving || root.filterOpen
-              implicitHeight: 36
+              implicitHeight: panel.implicitHeight + 12
               radius: Style.cornerRadius > 0 ? 4 : 0
               color: Util.alpha(root.ink, 0.04)
               border.width: 1
               border.color: root.amber
-              RowLayout {
-                anchors.fill: parent
-                anchors.leftMargin: 10; anchors.rightMargin: 6
-                spacing: 8
-                Label { text: root.saving ? "󰆓" : "󰍉"; font.family: "Iosevka Nerd Font Propo"; color: root.amber }
-                TextInput {
-                  id: lineInput
+              ColumnLayout {
+                id: panel
+                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                anchors.margins: 6
+                anchors.leftMargin: 10
+                spacing: 6
+                RowLayout {
                   Layout.fillWidth: true
-                  color: root.ink
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.body
-                  clip: true
-                  onVisibleChanged: if (visible) {
-                    text = root.saving ? strings.t("deck.saveDefault").arg(new Date().toLocaleDateString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat)) : root.filter
-                    forceActiveFocus(); selectAll()
+                  spacing: 8
+                  Label { text: root.saving ? "󰆓" : "󰍉"; font.family: "Iosevka Nerd Font Propo"; color: root.amber }
+                  TextInput {
+                    id: lineInput
+                    Layout.fillWidth: true
+                    color: root.ink
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                    clip: true
+                    onVisibleChanged: if (visible) {
+                      text = root.saving ? strings.t("deck.saveDefault").arg(new Date().toLocaleDateString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat)) : root.filter
+                      forceActiveFocus(); selectAll()
+                    }
+                    onTextChanged: if (root.filterOpen && !root.saving) root.filter = text
+                    onAccepted: { if (root.saving) root.saveAs(text); else stage.forceActiveFocus() }
+                    Keys.onEscapePressed: { root.saving = false; root.filterOpen = false; root.filter = ""; stage.forceActiveFocus() }
+                    Label {
+                      visible: lineInput.text === ""
+                      text: root.saving ? strings.t("deck.saveHint") : strings.t("deck.findInSet")
+                      opacity: 0.4
+                    }
                   }
-                  onTextChanged: if (root.filterOpen && !root.saving) root.filter = text
-                  onAccepted: {
-                    if (root.saving && text.trim() !== "") root.saveAs(text)
-                    else stage.forceActiveFocus()
+                  ActionButton {
+                    id: saveGo
+                    visible: root.saving
+                    icon: "󰆓"; text: strings.t("deck.save")
+                    enabled: lineInput.text.trim() !== ""
+                    onClicked: root.openBloom("save", { title: lineInput.text.trim(), thumb: root.now ? root.now.thumb || "" : "" }, "",
+                                              saveGo.mapToItem(root.stageItem, saveGo.width / 2, saveGo.height / 2))
                   }
-                  Keys.onEscapePressed: { root.saving = false; root.filterOpen = false; root.filter = ""; stage.forceActiveFocus() }
-                  Label {
-                    visible: lineInput.text === ""
-                    text: root.saving ? strings.t("deck.saveHint") : strings.t("deck.findInSet")
-                    opacity: 0.4
-                  }
+                  RoundButton { glyph: "󰅖"; onClicked: { root.saving = false; root.filterOpen = false; root.filter = ""; stage.forceActiveFocus() } }
                 }
-                // What to save: what's to come, what's played, the whole night.
-                Repeater {
-                  model: root.saving ? [{ key: "next", label: strings.t("deck.saveNext") }, { key: "played", label: strings.t("deck.savePlayed") },
-                                        { key: "all", label: strings.t("deck.saveAll") }] : []
-                  delegate: HeadLink {
-                    required property var modelData
-                    glyph: root.savePart === modelData.key ? "󰄵" : "󰄱"
-                    text: modelData.label
-                    on: root.savePart === modelData.key
-                    onTapped: root.savePart = modelData.key
-                  }
-                }
-                ActionButton {
+                // What to save, and where to.
+                Flow {
+                  Layout.fillWidth: true
                   visible: root.saving
-                  icon: "󰆓"; text: strings.t("deck.save")
-                  onClicked: root.saveAs(lineInput.text)
+                  spacing: 14
+                  Repeater {
+                    model: [{ key: "next", label: strings.t("deck.saveNext") }, { key: "played", label: strings.t("deck.savePlayed") },
+                            { key: "all", label: strings.t("deck.saveAll") }]
+                    delegate: HeadLink {
+                      required property var modelData
+                      glyph: root.savePart === modelData.key ? "󰄵" : "󰄱"
+                      text: modelData.label
+                      on: root.savePart === modelData.key
+                      onTapped: root.savePart = modelData.key
+                    }
+                  }
                 }
-                RoundButton { glyph: "󰅖"; onClicked: { root.saving = false; root.filterOpen = false; root.filter = ""; stage.forceActiveFocus() } }
+                Label {
+                  visible: root.saving
+                  Layout.fillWidth: true
+                  wrapMode: Text.Wrap
+                  text: strings.t("deck.saveThereHint")
+                  font.pixelSize: Style.font.caption
+                  opacity: 0.55
+                }
               }
             }
 
@@ -1704,6 +1878,14 @@ Item {
                               color: root.teal
                             }
                           }
+                          // Something doesn't sit well with the song before: a quiet mark; hover says what.
+                          Label {
+                            visible: row.warns.length > 0
+                            text: "◆"
+                            font.pixelSize: Style.font.caption - 1
+                            color: Commons.Color.warning
+                            opacity: rowHover.hovered ? 1 : 0.7
+                          }
                           Item { Layout.fillWidth: true }
                         }
                         Label {
@@ -1714,12 +1896,13 @@ Item {
                         }
                         Label {
                           Layout.fillWidth: true
-                          visible: slot.why !== "" || row.warns.length > 0
-                          text: row.warns.length > 0
+                          readonly property bool warning: row.warns.length > 0 && (rowHover.hovered || slot.why === "")
+                          visible: slot.why !== "" || (row.warns.length > 0 && rowHover.hovered)
+                          text: warning
                                 ? "◆ " + row.warns.map(w => strings.t("deck.warn." + w)).join("  ·  ")
                                 : "✦ " + slot.why
                           font.pixelSize: Style.font.caption
-                          color: row.warns.length > 0 ? Commons.Color.warning : root.amber
+                          color: warning ? Commons.Color.warning : root.amber
                           opacity: 0.85
                         }
                       }
@@ -1894,8 +2077,8 @@ Item {
               }
 
               // ---- back to the top, or to the end, once you've scrolled away
-              Column {
-                anchors.right: parent.right; anchors.bottom: parent.bottom
+              Row {
+                anchors.horizontalCenter: parent.horizontalCenter; anchors.bottom: parent.bottom
                 anchors.margins: 12
                 spacing: 8
                 readonly property var list: root.wall ? wallView : setList
@@ -2144,7 +2327,7 @@ Item {
               anchors.margins: 3
               url: root.bloomItem ? root.bloomItem.thumb || "" : ""
               size: 48
-              glyph: root.bloomMany ? "󰲸" : "󰎈"
+              glyph: root.bloomFrom === "save" || root.bloomFrom === "export" ? "󰆓" : root.bloomMany ? "󰲸" : "󰎈"
             }
           }
           Repeater {
@@ -2284,7 +2467,7 @@ Item {
     implicitWidth: size
     implicitHeight: size
     radius: Style.cornerRadius > 0 ? 3 : 0
-    color: Qt.rgba(1, 1, 1, 0.05)
+    color: Util.alpha(root.ink, 0.05)
     clip: true
     Image {
       id: art
@@ -2332,9 +2515,9 @@ Item {
     radius: Style.cornerRadius > 0 ? 7 : 0
     // Solid (the tint laid over the ground), so the line between rooms passes behind.
     color: Qt.tint(root.ground, tileDrop.containsDrag ? Util.alpha(root.teal, 0.18) : here ? Util.alpha(root.amber, 0.12)
-                                : Qt.rgba(1, 1, 1, tileHover.hovered ? 0.05 : 0.025))
+                                : Util.alpha(root.ink, tileHover.hovered ? 0.05 : 0.025))
     border.width: 1
-    border.color: tileDrop.containsDrag ? root.teal : here ? Util.alpha(root.amber, 0.8) : Qt.rgba(1, 1, 1, tileHover.hovered ? 0.2 : 0.1)
+    border.color: tileDrop.containsDrag ? root.teal : here ? Util.alpha(root.amber, 0.8) : Util.alpha(root.ink, tileHover.hovered ? 0.2 : 0.1)
     opacity: lifted ? 0.35 : 1
     scale: tileDrop.containsDrag ? 1.04 : 1
     Behavior on scale { NumberAnimation { duration: Style.duration(140); easing.type: Easing.OutCubic } }
@@ -2381,7 +2564,7 @@ Item {
           width: parent.width
           height: 3
           radius: 2
-          color: Qt.rgba(1, 1, 1, 0.1)
+          color: Util.alpha(root.ink, 0.1)
           Rectangle {
             height: parent.height
             radius: 2
@@ -2624,7 +2807,7 @@ Item {
     implicitWidth: 28
     implicitHeight: 28
     radius: 14
-    color: rbHover.hovered ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+    color: rbHover.hovered ? Util.alpha(root.ink, 0.08) : "transparent"
     Label {
       anchors.centerIn: parent
       text: rb.glyph

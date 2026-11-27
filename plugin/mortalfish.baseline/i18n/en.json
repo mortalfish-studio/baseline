@@ -506,7 +506,7 @@
   "deck.buildFrom": "Starts from %1, then eases in, builds, peaks and winds down. Grok takes about half a minute.",
   "deck.buildNote": "Grok eases in, builds, peaks and winds down. It takes about half a minute; the songs land in the set.",
   "deck.search": "Find a song, album or playlist",
-  "deck.findHint": "Search for a song, album or playlist (yours come first). Tap one to choose: now, next, later or somewhere in the set; or drag it in, onto the cover, or onto a room.",
+  "deck.findHint": "Search for a song, album or playlist (yours come first). Tap a song to choose: now, next, later or somewhere in the set; tap an album or playlist to open it and pick songs; or drag either in, onto the cover, or onto a room.",
   "deck.playNow": "Play now",
   "deck.add": "Add to the set",
   "deck.played": "Played",
@@ -586,5 +586,22 @@
   "deck.saveNext": "What's to come",
   "deck.savePlayed": "What's played",
   "deck.saveAll": "The whole night",
-  "deck.savePlayedShort": "Save what's played"
+  "deck.savePlayedShort": "Save what's played",
+  "deck.saveHere": "Baseline",
+  "deck.saveThere": "Make playlist",
+  "deck.autodj": "Auto-DJ",
+  "deck.saveThereHint": "Save opens petals: keep it here in the Deck, or make a new private playlist on Apple Music, YouTube Music or Beatport with the songs that service has (the rest are left out).",
+  "deck.exportTo": "Save as a playlist on a music service",
+  "deck.seedPick": "Grow a set from this song",
+  "deck.seedFrom": "Grows from",
+  "deck.seedAutodj": "Auto-DJ from this song: it plays next, then songs that grow from it",
+  "deck.seedClear": "Don't start from this song",
+  "deck.seedNote": "Build opens with your pick and grows the set from its sound, tempo and key; the brief is optional. ∞ plays it next and lets Auto-DJ take it from there.",
+  "deck.listBack": "Back",
+  "deck.listLoading": "Reading its songs…",
+  "deck.listCount": {
+    "one": "%1 song: pick some, or take it all",
+    "other": "%1 songs: pick some, or take them all"
+  },
+  "deck.listOpen": "Open it and pick songs"
 }

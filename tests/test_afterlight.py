@@ -5,7 +5,9 @@ and nothing here touches the network or runs hyprctl, systemctl or omarchy.
 Run from the repo root: python3 -m unittest discover -s tests -q
 """
 
+import contextlib
 import copy
+import io
 import importlib.machinery
 import importlib.util
 import json
@@ -633,6 +635,53 @@ class DeckTests(TempCase):
         self.assertEqual([s["chapter"] for s in d["set"]], ["Warm up", "Build"])
         self.assertEqual(al.deck_with_details(d)["set"][1]["energy"], 7)
 
+    def test_build_from_a_picked_song_opens_with_it(self):
+        asked = {}
+        def ideas(query, ask=None, count=6, timeout=45, shape=False):
+            asked.update(ask=ask)
+            return {"songs": [{"t": "Lady", "a": "Modjo", "w": "follows", "e": 6, "c": "Build"},
+                              {"t": "Seed", "a": "Someone", "w": "again", "e": 0, "c": ""}], "q": []}
+        self.patch("grok_ideas", ideas)
+        self.patch("find_songs", lambda service, wanted: [(i, self.apple(n + 5, i["t"], i["a"])) for n, i in enumerate(wanted)])
+        with mock.patch("shutil.which", return_value="/usr/bin/grok"):
+            al.deck_command({"music": {"service": "applemusic"}},
+                            ["build", "30", "--seed", json.dumps(self.apple(1, "Seed", "Someone")), "--replace"])
+        d = al.deck_read()
+        self.assertEqual([s["title"] for s in d["set"]], ["Seed", "Lady"])     # the pick first, never twice
+        self.assertIn("It opens with «Seed by Someone»", asked["ask"])
+        self.assertIn("grows from Seed by Someone", asked["ask"])
+        with self.assertRaises(SystemExit):                                     # neither a brief nor a song
+            al.deck_command({"music": {"service": "applemusic"}}, ["build", "30"])
+
+    def test_autodj_from_a_picked_song_puts_it_next_and_follows_it(self):
+        self.patch("deck_watch", lambda: None)
+        for n in range(2):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        def ideas(query, ask=None, count=6, timeout=45, shape=False):
+            self.assertIn("The next song is «Seed by Someone»", ask)
+            return {"songs": [{"t": "More", "a": "Someone", "w": ""}, {"t": "Other", "a": "Else", "w": ""}], "q": []}
+        self.patch("grok_ideas", ideas)
+        self.patch("find_songs", lambda service, wanted: [(i, self.apple(n + 9, i["t"], i["a"])) for n, i in enumerate(wanted)])
+        with mock.patch("shutil.which", return_value="/usr/bin/grok"):
+            al.deck_command({"music": {"service": "applemusic"}},
+                            ["autodj", "from", "applemusic", json.dumps(self.apple(7, "Seed", "Someone"))])
+        d = al.deck_read()
+        self.assertTrue(d["autodj"])
+        self.assertEqual([s["title"] for s in d["set"]], ["Seed", "Other", "Song 0", "Song 1"])   # same artist skipped
+
+    def test_an_opened_playlist_lists_its_songs_to_pick_from(self):
+        self.patch("deck_expand_songs", lambda service, item: [al.deck_item(service, self.apple(3, "Picked", "Them"))])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.deck("songs", "applemusic", json.dumps({"kind": "playlist", "id": "pl.x", "title": "Friday"}))
+        [song] = json.loads(out.getvalue())
+        self.assertEqual((song["kind"], song["title"], song["subtitle"], song["from"]), ("song", "Picked", "Them • An Album", "Friday"))
+        self.patch("deck_expand_songs", lambda service, item: [al.deck_item(service, item)])
+        d = self.deck("add", "applemusic", json.dumps(song))                 # picked and added: it remembers where from
+        self.assertEqual((d["set"][0]["title"], d["set"][0]["from"]), ("Picked", "Friday"))
+        with self.assertRaises(SystemExit):
+            self.deck("songs", "applemusic", json.dumps(self.apple(1)))
+
     def test_mix_in_scatters_songs_after_the_next_one(self):
         for n in range(6):
             self.deck("add", "applemusic", json.dumps(self.apple(n)))
@@ -821,6 +870,44 @@ class DeckTests(TempCase):
         al.deck_command({}, ["save", "Mixed"])
         [saved] = al.deck_set_list()
         self.assertEqual((saved["services"], saved["from"]), (["Apple Music 2", "Beatport 1"], ["Friday Disco", "search"]))
+
+    def test_export_finds_each_song_on_the_service(self):
+        songs = [{"uid": "a", "service": "applemusic", "id": "11", "title": "Lady (Hear Me Tonight)", "artist": "Modjo"},
+                 {"uid": "b", "service": "ytmusic", "video": "abcdefghijk", "title": "Finally", "artist": "CeCe Peniston"},
+                 {"uid": "c", "service": "ytmusic", "video": "bcdefghijkl", "title": "Nowhere", "artist": "Nobody"}]
+        self.patch("beatport_search_tracks", lambda q: [
+            {"kind": "song", "id": "901", "title": "Lady (Hear Me Tonight) (Original Mix)", "subtitle": "Modjo • Sound of Barclay"},
+            {"kind": "song", "id": "902", "title": "Finally (Choice Mix)", "subtitle": "Someone Else • X"},
+            {"kind": "song", "id": "903", "title": "Finally (Classic Mix)", "subtitle": "CeCe Peniston • A&M"}])
+        sent = {}
+        self.patch("beatport_bridge", lambda request, timeout=5: sent.update(request) or {"ok": True, "id": 7})
+        result = al.deck_export("beatport", "Friday", songs)
+        self.assertEqual(sent["op"], {"type": "bp-export", "name": "Friday", "ids": ["901", "903"]})
+        self.assertEqual((result["ok"], result["found"], result["missing"]), (True, 2, ["Nowhere"]))
+
+    def test_the_last_seconds_fade_into_the_next_song(self):
+        volumes, started = [], []
+        self.patch("deck_where_room", lambda d: None)
+        self.patch("deck_watch", lambda: None)
+        self.patch("time", mock.Mock(time=lambda: 1000.0, sleep=lambda s: None))
+        self.patch("deck_app_volume", lambda song, level=None: volumes.append((song["uid"], level)) or 0.8)
+        self.patch("deck_play_laptop", lambda song, start_at=0: started.append(song["uid"]))
+        self.patch("deck_quiet", lambda song: None)
+        a, b = ({"uid": u, "service": "applemusic", "id": i, "title": u} for u, i in (("a", "1"), ("b", "2")))
+        al.deck_update(lambda d: d.update(now=a, set=[b], playing=True, expect={"uid": "a", "since": 900}))
+        self.patch("deck_status", lambda d: {"time": 196, "length": 200, "playing": True, "id": "1"})
+        al.deck_tick({"time": 194, "length": 200, "playing": True, "id": "1"})
+        self.assertEqual(started, ["b"])
+        self.assertEqual(volumes[1:4], [("a", 0.648), ("a", 0.512), ("a", 0.392)])     # easing out
+        self.assertEqual(volumes[-1], ("a", 0.8))                                      # and put back
+        self.assertEqual(al.deck_read()["now"]["uid"], "b")
+
+    def test_autodj_tops_up_a_short_set(self):
+        d = {**al.DECK_EMPTY, "autodj": True, "playing": True, "set": [{"uid": "x"}] * 3}
+        self.assertTrue(al.deck_autodj_due(d))
+        self.assertFalse(al.deck_autodj_due({**d, "set": [{"uid": "x"}] * 4}))
+        self.assertFalse(al.deck_autodj_due({**d, "autodjAt": al.time.time()}))
+        self.assertFalse(al.deck_autodj_due({**d, "autodj": False}))
 
     def test_sonos_queue_entry_for_an_apple_song(self):
         uri, meta = al.sonos_apple_uri("1440833098", "13")
