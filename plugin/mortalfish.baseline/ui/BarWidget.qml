@@ -688,13 +688,21 @@ BarWidget {
   property string trackShown: ""
   property bool trackWatchReady: false
   Timer { interval: 6000; running: true; onTriggered: { root.trackWatchReady = true; root.trackShown = root.trackKey } }
-  onTrackKeyChanged: if (trackWatchReady && trackKey !== "") trackSettle.restart()
+  onTrackKeyChanged: if (trackWatchReady && trackKey !== "") { trackWaits = 0; trackSettle.restart() }
+  // Chrome sends a track's cover a moment after its name (and a Beatport page
+  // still loading can name the last track for a beat): wait for the name to
+  // hold and the cover to come, up to about three seconds, then show it.
+  property int trackWaits: 0
+  readonly property string trackArt: playingPlayer ? (playingPlayer.trackArtUrl || "") : ""
+  // A cover that arrives while the popup shows goes straight in.
+  onTrackArtChanged: if (trackToast.opened && trackKey === trackShown && trackArt !== "") trackToast.art = trackArt
   Timer {
     id: trackSettle
     interval: 800
     onTriggered: {
       const p = root.playingPlayer
       if (!p || root.trackKey === "" || root.trackKey === root.trackShown) return
+      if (!p.trackArtUrl && root.trackWaits < 3) { root.trackWaits++; trackSettle.restart(); return }
       root.trackShown = root.trackKey
       const from = p.identity === "Chrome" || !p.identity ? root.musicSourceInfo.name : p.identity
       // Both popups sit at the top: take over from "Next track" rather than stack on it.

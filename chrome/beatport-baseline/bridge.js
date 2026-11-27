@@ -38,11 +38,22 @@
     const style = getComputedStyle(el);
     return style.visibility !== "hidden" && style.display !== "none" && style.opacity !== "0";
   };
+  // Pinned to the window (the player bar, a header), not scrolling with the page.
+  const pinned = (el) => {
+    for (let node = el, depth = 0; node && node !== document.body && depth < 14; node = node.parentElement, depth += 1) {
+      const position = getComputedStyle(node).position;
+      if (position === "fixed" || position === "sticky") return true;
+    }
+    return false;
+  };
   const inRegion = (el, region) => {
     if (!region || region === "any") return true;
     const r = el.getBoundingClientRect();
-    // The player bar: the band along the bottom of the window, not below it.
-    const bar = r.top >= window.innerHeight - 160 && r.top <= window.innerHeight;
+    // The player bar: pinned along the bottom of the window. In a short
+    // window (sharing its workspace) the page keeps a minimum height, so the
+    // bar can sit just below what shows: it still counts.
+    const bottom = r.top >= window.innerHeight - 160 && r.top <= window.innerHeight;
+    const bar = bottom || (r.top > window.innerHeight && r.top < window.innerHeight + 400 && pinned(el));
     return region === "bar" ? bar : !bar;
   };
   const regex = (source) => (source ? new RegExp(source, "i") : null);

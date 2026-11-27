@@ -170,7 +170,7 @@ When Sonos speakers answer on your network, the Player tab's output row gets a *
 
 **Send to Sonos.** While the laptop plays something (YouTube Music, Apple Music, Beatport, YouTube), the Sonos card offers *Continue … in Kitchen*, and OmaRelay takes "send this to the kitchen". Sonos can't play a browser tab, so the Grok agent finds the same album on Apple Music in that room (linked in the Sonos app); then Baseline skips to the same song and second and pauses the laptop, which keeps playing until the room starts. It takes 15–45 seconds and needs the Sonos MCP set up as above (`afterlight sonos send [room]`). Sonos's agent tools can't play YouTube Music yet, so Apple Music is the bridge; Beatport isn't on Sonos at all.
 
-Sonos messages (sending, playing, a room switched) show in the music popup at the top of the screen, with the cover; the hover card shows where music is playing.
+A new song shows in the music popup at the top of the screen, with its cover (it waits a moment for the name to settle and the cover to arrive, and a cover that arrives late goes straight in). Sonos messages (sending, playing, a room switched) show there too, with the cover; the hover card shows where music is playing.
 
 ## Apps on workspaces 3 and 4
 
