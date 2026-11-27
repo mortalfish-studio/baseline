@@ -578,7 +578,7 @@
   "deck.yourSets": "Your sets",
   "deck.yourPlaylists": "Your playlists",
   "deck.shape": "Shape",
-  "deck.shapeHint": "Shape the set (pinned songs stay):",
+  "deck.shapeHint": "Shape the set (pinned songs stay; Auto-DJ carries on that way):",
   "deck.shapeArc": "Party arc",
   "deck.shapeHarmonic": "Harmonic mix",
   "deck.shapeSmooth": "Smooth tempo",
@@ -683,5 +683,10 @@
   "deck.recapShow": "Recap",
   "deck.readyCheck": "Check everything",
   "deck.readyChecking": "Checking…",
-  "deck.voiceFriendly": "Dedications with swearing or slurs are turned away on the phone."
+  "deck.voiceFriendly": "Dedications with swearing or slurs are turned away on the phone.",
+  "deck.directionArc": "following the night's arc",
+  "deck.directionEnergy": "building energy",
+  "deck.directionTempo": "raising the tempo",
+  "deck.directionHarmonic": "mixing in key",
+  "deck.directionSmooth": "holding the tempo"
 }

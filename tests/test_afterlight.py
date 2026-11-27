@@ -617,7 +617,7 @@ class DeckTests(TempCase):
 
     def test_build_asks_for_the_right_length_and_keeps_reasons(self):
         asked = {}
-        def ideas(query, ask=None, count=6, timeout=45, shape=False):
+        def ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False):
             asked.update(ask=ask, count=count, shape=shape)
             return {"songs": [{"t": "Lady", "a": "Modjo", "w": "opener", "e": 5, "c": "Warm up"},
                               {"t": "Finally", "a": "CeCe Peniston", "w": "builds", "e": 7, "c": "Build"},
@@ -638,7 +638,7 @@ class DeckTests(TempCase):
 
     def test_build_from_a_picked_song_opens_with_it(self):
         asked = {}
-        def ideas(query, ask=None, count=6, timeout=45, shape=False):
+        def ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False):
             asked.update(ask=ask)
             return {"songs": [{"t": "Lady", "a": "Modjo", "w": "follows", "e": 6, "c": "Build"},
                               {"t": "Seed", "a": "Someone", "w": "again", "e": 0, "c": ""}], "q": []}
@@ -658,8 +658,9 @@ class DeckTests(TempCase):
         self.patch("deck_watch", lambda: None)
         for n in range(2):
             self.deck("add", "applemusic", json.dumps(self.apple(n)))
-        def ideas(query, ask=None, count=6, timeout=45, shape=False):
-            self.assertIn("The next song is «Seed by Someone»", ask)
+        def ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False):
+            self.assertIn("The next song follows «Seed by Someone», which the listener just picked", ask)
+            self.assertTrue(mix)
             return {"songs": [{"t": "More", "a": "Someone", "w": ""}, {"t": "Other", "a": "Else", "w": ""}], "q": []}
         self.patch("grok_ideas", ideas)
         self.patch("find_songs", lambda service, wanted: [(i, self.apple(n + 9, i["t"], i["a"])) for n, i in enumerate(wanted)])
@@ -1666,7 +1667,7 @@ class SuggestionTests(TempCase):
         argv = runner.call_args[0][0]
         self.assertEqual(argv[argv.index("-m") + 1], al.GROK_FAST)
         self.assertEqual(argv[argv.index("--tools") + 1], "")
-        self.assertEqual(ideas, {"songs": [{"t": "Lovely Day", "a": "Bill Withers", "w": "Sunny classic", "e": 0, "c": ""}], "q": ["golden hour"]})
+        self.assertEqual(ideas, {"songs": [{"t": "Lovely Day", "a": "Bill Withers", "w": "Sunny classic", "e": 0, "c": "", "b": 0, "k": ""}], "q": ["golden hour"]})
         with mock.patch("subprocess.run", return_value=mock.Mock(stdout="no json here")):
             self.assertEqual(al.grok_ideas("x"), {"songs": [], "q": []})
 
@@ -1731,3 +1732,63 @@ class RecapTest(unittest.TestCase):
         self.assertEqual(popen.call_count, 1)
         self.assertEqual(popen.call_args[0][0][-3:], ["voice", "call", "0"])
         self.assertTrue(state["recapAt"])
+
+
+class AutoDJMixTest(unittest.TestCase):
+    def test_keeps_near_tempo_and_orders_into_key(self):
+        anchor = {"service": "applemusic", "id": "1"}
+        found = [({"title": "Far"}, {"b": 160, "k": "8A", "e": 6}),
+                 ({"title": "Clash"}, {"b": 121, "k": "3B", "e": 6}),
+                 ({"title": "Fits"}, {"b": 119, "k": "8A", "e": 6}),
+                 ({"title": "Next"}, {"b": 122, "k": "9A", "e": 7})]
+        with mock.patch.object(al, "deck_details_read", return_value={"am:1": {"bpm": 120, "key": "8A", "energy": 6}}):
+            picked = al.deck_mix_pick(found, anchor, 3)
+        self.assertEqual([s["title"] for s in picked], ["Fits", "Next", "Clash"])      # Far is out of tempo
+
+    def test_building_energy_avoids_a_drop(self):
+        anchor = {"service": "applemusic", "id": "1"}
+        found = [({"title": "Calmer"}, {"b": 120, "k": "8A", "e": 4}), ({"title": "Lift"}, {"b": 121, "k": "8A", "e": 7})]
+        with mock.patch.object(al, "deck_details_read", return_value={"am:1": {"bpm": 120, "key": "8A", "energy": 6}}):
+            self.assertEqual(al.deck_mix_pick(found, anchor, 1, "energy")[0]["title"], "Lift")
+
+    def test_ask_weights_the_newest_and_says_what_the_room_wants(self):
+        now = time.time()
+        played = [{"uid": f"p{i}", "title": f"Old {i}", "artist": f"A{i}", "playedAt": now - 3000 + i * 100} for i in range(8)]
+        played.append({"uid": "old", "title": "Last week", "artist": "X", "playedAt": now - 86400 * 7})
+        played.sort(key=lambda x: x["playedAt"])
+        deck = {"played": played, "now": {"uid": "n", "title": "Now", "artist": "B", "rid": "r1"},
+                "set": [{"uid": "s", "title": "Queued", "artist": "C", "from": "✦ Auto-DJ"}],
+                "votes": {}, "skipped": [{"title": "Nope", "artist": "D"}], "direction": "energy"}
+        with mock.patch.object(al, "deck_details_read", return_value={}):
+            ask, anchor = al.deck_autodj_ask(deck)
+        self.assertEqual(anchor["title"], "Queued")
+        self.assertNotIn("Last week", ask)                       # only tonight
+        self.assertIn("Earlier tonight: Old 0 by A0", ask)
+        self.assertIn("Now by B [guest request]", ask)
+        self.assertIn("follows «Queued by C [Auto-DJ's pick]»", ask)
+        self.assertIn("Nope by D", ask)
+        self.assertIn("Build the energy", ask)
+
+
+class DuckTest(unittest.TestCase):
+    def test_overlapping_clips_never_stack_the_dip(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        level = {"v": 1.0}
+        def volume(song, value=None):
+            was = level["v"]
+            if value is not None:
+                level["v"] = value
+            return was
+        with mock.patch.object(al, "DECK_DUCK", Path(tmp.name) / "duck.json"), \
+             mock.patch.object(al, "deck_app_volume", side_effect=volume), \
+             mock.patch.object(al, "deck_update"), mock.patch.object(al.time, "sleep"), \
+             mock.patch.object(al.subprocess, "run"):
+            first = al.deck_duck({}, True)
+            level["v"] = 0.3                                   # dipped by the first clip
+            self.assertEqual(al.deck_duck({}, True), first)    # the second sees the real level, not the dip
+            self.assertFalse(al.deck_duck({}, False))          # not the last out
+            self.assertTrue(al.deck_duck({}, False))
+            level["v"] = 1.0
+            al.deck_laptop_clip({"service": "applemusic"}, "x.wav", 1)
+        self.assertEqual(level["v"], 1.0)

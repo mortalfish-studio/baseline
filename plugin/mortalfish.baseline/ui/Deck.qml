@@ -648,6 +648,11 @@ Item {
   property bool forgetArmed: false
   property bool clearArmed: false
   property string dropArmed: ""
+  // The way Auto-DJ takes the night: the last shape picked (until Auto-DJ is turned off).
+  readonly property string directionLabel: {
+    const k = deck.direction || ""
+    return k === "" ? "" : strings.t("deck.direction" + k.charAt(0).toUpperCase() + k.slice(1))
+  }
   property bool readyAsked: false
   property real readyAskedAt: 0
   readonly property bool readyFresh: !!deck.ready && deck.ready.at >= readyAskedAt - 1
@@ -1454,12 +1459,12 @@ Item {
                 Rectangle {
                   anchors.fill: parent
                   anchors.margins: -3
-                  radius: Style.cornerRadius > 0 ? 8 : 0
+                  radius: 15
                   color: "transparent"
                   border.width: 2
                   border.color: nowDrop.containsDrag ? root.teal : Util.alpha(root.amber, root.deck.playing ? 0.9 : 0.35)
                 }
-                Cover { anchors.fill: parent; url: root.now ? root.now.thumb || "" : ""; size: 176; glyph: "󰎆" }
+                Cover { anchors.fill: parent; url: root.now ? root.now.thumb || "" : ""; size: 176; glyph: "󰎆"; radius: 12 }
                 DropArea {
                   id: nowDrop
                   anchors.fill: parent
@@ -1668,7 +1673,8 @@ Item {
                     + "  ·  " + root.span(root.setSeconds) + "  ·  " + strings.t("deck.endsAt").arg(root.clockAt(root.setSeconds))
                     + (!root.deck.autodj ? "" : "  ·  ∞ " + ((root.deck.set || []).length > 3
                         ? strings.t("deck.autodjAt").arg(root.clockAt(root.startsAt[(root.deck.set || []).length - 3] || 0))
-                        : strings.t("deck.autodjSoon")))
+                        : strings.t("deck.autodjSoon"))
+                      + (root.directionLabel !== "" ? ", " + root.directionLabel : ""))
                   : ""
                 font.pixelSize: Style.font.caption
                 opacity: 0.6
@@ -2757,7 +2763,7 @@ Item {
           Rectangle {
             id: stageCoverShadow
             width: stageView.big; height: width
-            radius: Style.cornerRadius > 0 ? 8 : 0
+            radius: Math.round(stageView.big * 0.04)
             color: "transparent"
             layer.enabled: true
             // A soft glow all round, centred on the cover, breathing with the bass.
@@ -2768,14 +2774,39 @@ Item {
               shadowScale: 1.02 + stageView.bass * 0.03
               autoPaddingEnabled: true
             }
-            Cover { anchors.fill: parent; size: stageView.big; url: root.now ? root.now.thumb || "" : "" }
-            // A new song: its cover settles in.
-            property string uid: root.now ? root.now.uid : ""
-            onUidChanged: if (stageView.visible && !Style.reduceMotion) coverIn.restart()
-            ParallelAnimation {
-              id: coverIn
-              NumberAnimation { target: stageCoverShadow; property: "opacity"; from: 0; to: 1; duration: Style.duration(420); easing.type: Easing.OutCubic }
-              NumberAnimation { target: stageCoverShadow; property: "scale"; from: 0.96; to: 1; duration: Style.duration(420); easing.type: Easing.Bezier; easing.bezierCurve: Style.easeOut }
+            // Two covers: a new song's loads behind the scenes, then dissolves
+            // in over the old one (settling from a touch larger), never a blank.
+            readonly property string want: root.now ? root.now.thumb || "" : ""
+            property bool aFront: true
+            property bool pending: false
+            readonly property var front: aFront ? coverA : coverB
+            readonly property var back: aFront ? coverB : coverA
+            Cover { id: coverA; anchors.fill: parent; size: stageView.big; radius: stageCoverShadow.radius; z: stageCoverShadow.aFront ? 0 : 1 }
+            Cover { id: coverB; anchors.fill: parent; size: stageView.big; radius: stageCoverShadow.radius; z: stageCoverShadow.aFront ? 1 : 0; opacity: 0 }
+            Component.onCompleted: coverA.url = want
+            onWantChanged: {
+              if (want === front.url) { pending = false; return }
+              if (!stageView.visible || Style.reduceMotion || front.url === "") { front.url = want; return }
+              swap.stop()
+              back.opacity = 0; back.scale = 1.03
+              back.url = want
+              pending = true; waited.restart()
+            }
+            // The new cover's loaded (or it's taken too long): cross over.
+            Timer { id: waited; interval: 4000; onTriggered: if (stageCoverShadow.pending) swap.restart() }
+            Timer {
+              running: stageCoverShadow.pending && !swap.running
+              interval: 40; repeat: true
+              onTriggered: if (stageCoverShadow.back.ready) swap.restart()
+            }
+            SequentialAnimation {
+              id: swap
+              ScriptAction { script: stageCoverShadow.pending = false }
+              ParallelAnimation {
+                NumberAnimation { target: stageCoverShadow.back; property: "opacity"; to: 1; duration: Style.duration(900); easing.type: Easing.InOutQuad }
+                NumberAnimation { target: stageCoverShadow.back; property: "scale"; to: 1; duration: Style.duration(1400); easing.type: Easing.OutCubic }
+              }
+              ScriptAction { script: { stageCoverShadow.aFront = !stageCoverShadow.aFront; stageCoverShadow.back.opacity = 0 } }
             }
           }
           // A guest's request playing: their face, big, on the cover's corner,
@@ -4114,6 +4145,7 @@ Item {
   component Cover: Rectangle {
     id: cover
     property string url: ""
+    readonly property bool ready: art.status === Image.Ready
     property int size: 48
     property string glyph: "󰎈"
     implicitWidth: size
@@ -4133,7 +4165,11 @@ Item {
       asynchronous: true
       sourceSize.width: cover.size * 2
       sourceSize.height: cover.size * 2
+      // Rounded corners (clip alone keeps them square): only on big covers.
+      layer.enabled: cover.radius > 4
+      layer.effect: MultiEffect { maskEnabled: true; maskSource: artMask; maskThresholdMin: 0.5; maskSpreadAtMin: 1.0 }
     }
+    Rectangle { id: artMask; anchors.fill: art; radius: cover.radius; visible: false; layer.enabled: true; antialiasing: true }
     Timer { id: retry; interval: 700 * (art.tries + 1); onTriggered: art.tries++ }
     onUrlChanged: art.tries = 0
     Label {
