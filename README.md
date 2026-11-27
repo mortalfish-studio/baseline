@@ -101,9 +101,17 @@ Each look's theme folders carry a `chromium.theme` with the mode's accent (writt
 
 The theme-set hook also runs `afterlight prompt`, which writes a `[palettes.baseline]` block (accent, highlight, alert, dim) into `~/.config/starship.toml` from the current theme. The prompt's folder and `◇` use the accent, git uses the highlight, and a failed command's `◆` uses red. Omarchy retints foot's own 16 colours.
 
+## Music
+
+The Player tab drives three services in Chrome, through the [Chrome add-on](docs/chrome-extension.md): **Beatport** (Top 100 charts and your playlists), and **YouTube Music** or **Apple Music**. *Find music* has a switch between those two: search songs, albums and artists and play one in that service's window without leaving what you're doing. On Apple Music a song plays within its album, so the album carries on after it, and an artist plays their top songs. The service picked there is also where OmaRelay's "play …" looks when it isn't a Beatport chart or playlist (`afterlight set music.service ytmusic|applemusic`); naming one always wins: "play Rumours on Apple Music". Apple Music is searched with Apple's public catalogue (`afterlight applemusic search …`) and played through Apple's own player in the page, so you need to be signed in there.
+
 ## Sonos
 
 When Sonos speakers answer on your network, the Player tab's output row gets a **Sonos** tile. Pick it, then a room (groups show as "Kitchen + Lounge"): the card shows what that room is playing, with its cover, play/pause and skip, and the volume slider, mute and the keyboard's volume keys now drive that room (`system/bin/baseline-volume`). Pick Speaker or Headphones to hand them back. The laptop's own sound isn't moved. It all talks to the speakers directly on the local network (`afterlight sonos …`), so it's instant and needs no account; keep UPnP on in the Sonos app. Playing something by name goes through OmaRelay and the Grok agent: "play Bonobo on Sonos in the kitchen".
+
+**Send to Sonos.** While the laptop plays something (YouTube Music, Apple Music, Beatport, YouTube), the Sonos card offers *Continue … in Kitchen*, and OmaRelay takes "send this to the kitchen". Sonos can't play a browser tab, so the Grok agent finds the same album on Apple Music in that room (linked in the Sonos app); then Baseline skips to the same song and second and pauses the laptop, which keeps playing until the room starts. It takes 15–45 seconds and needs the Sonos MCP set up as above (`afterlight sonos send [room]`). Sonos's agent tools can't play YouTube Music yet, so Apple Music is the bridge; Beatport isn't on Sonos at all.
+
+Sonos messages (sending, playing, a room switched) show in the music popup at the top of the screen, with the cover; the hover card shows where music is playing.
 
 ## Apps on workspaces 3 and 4
 

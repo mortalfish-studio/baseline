@@ -163,7 +163,7 @@ Column {
     height: 1
     color: root.text
     opacity: 0.12
-    visible: nowPlaying.visible
+    visible: nowPlaying.visible || sonosPlaying.visible
   }
   // What's playing: a small cover beside the title and artist.
   RowLayout {
@@ -212,6 +212,77 @@ Column {
           ? root.host.musicSourceInfo.name : nowPlaying.player.identity || ""].filter(x => x !== "").join(" · ") : ""
         font.pixelSize: Style.font.caption
         opacity: 0.75
+      }
+      Label {
+        Layout.fillWidth: true
+        visible: text !== ""
+        text: root.host && root.host.laptopOutput ? "󰓃  " + strings.t("hover.playingOn").arg(root.host.laptopOutput) : ""
+        font.family: "Iosevka Nerd Font Propo"
+        font.pixelSize: Style.font.caption
+        color: root.teal
+      }
+    }
+  }
+  // And the Sonos room, when one is picked and playing.
+  RowLayout {
+    id: sonosPlaying
+    readonly property var room: root.host ? root.host.sonosNow : null
+    readonly property var track: room ? room.track : null
+    width: parent.width
+    visible: !!room && room.playing && !!track && track.title !== ""
+    spacing: Style.space(8)
+    Rectangle {
+      Layout.preferredWidth: Style.space(38)
+      Layout.preferredHeight: Style.space(38)
+      color: "black"
+      radius: Style.cornerRadius > 0 ? Style.space(3) : 0
+      border.width: 1
+      border.color: Qt.rgba(root.teal.r, root.teal.g, root.teal.b, 0.4)
+      clip: true
+      SizedImage {
+        anchors.fill: parent
+        anchors.margins: 1
+        crop: true
+        url: sonosPlaying.track && sonosPlaying.track.art ? "file://" + sonosPlaying.track.art : ""
+        visible: url !== ""
+      }
+      Label {
+        anchors.centerIn: parent
+        visible: !sonosPlaying.track || !sonosPlaying.track.art
+        text: "󰜟"
+        font.family: "Iosevka Nerd Font Propo"
+        color: root.teal
+      }
+    }
+    ColumnLayout {
+      Layout.fillWidth: true
+      spacing: 0
+      Label {
+        Layout.fillWidth: true
+        textFormat: Text.PlainText
+        elide: Text.ElideRight
+        text: sonosPlaying.track ? sonosPlaying.track.title : ""
+        font.pixelSize: Style.font.caption
+        font.bold: true
+        color: root.amber
+      }
+      Label {
+        Layout.fillWidth: true
+        textFormat: Text.PlainText
+        elide: Text.ElideRight
+        visible: text !== ""
+        text: sonosPlaying.track ? sonosPlaying.track.artist || "" : ""
+        font.pixelSize: Style.font.caption
+        opacity: 0.75
+      }
+      Label {
+        Layout.fillWidth: true
+        textFormat: Text.PlainText
+        elide: Text.ElideRight
+        text: sonosPlaying.room ? "󰜟  " + strings.t("hover.playingIn").arg(sonosPlaying.room.name) : ""
+        font.family: "Iosevka Nerd Font Propo"
+        font.pixelSize: Style.font.caption
+        color: root.teal
       }
     }
   }

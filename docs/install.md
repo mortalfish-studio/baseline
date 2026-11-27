@@ -37,7 +37,7 @@ Most of it is ordinary Omarchy configuration and should work on any machine, x86
   - **[Google Chrome](https://www.google.com/chrome/)**: the browser, plus the YouTube and Beatport apps.
 - Optional:
   - a **Razer Basilisk V3** mouse for the lighting and extra buttons (other mice need tweaking; see [Built on](#built-on))
-  - **[Beatport](https://www.beatport.com)** and/or **[YouTube Music](https://music.youtube.com)** with the [Chrome add-on](chrome-extension.md) for the Player tab
+  - **[Beatport](https://www.beatport.com)**, **[YouTube Music](https://music.youtube.com)** and/or **[Apple Music](https://music.apple.com)** with the [Chrome add-on](chrome-extension.md) for the Player tab
   - **Sonos**: the Player tab finds your rooms on the network, shows what's playing, and its volume slider, mute and the volume keys control the room you pick (leave **UPnP** on in the Sonos app: Account → Privacy & Security). With S2 you can also say "play … on Sonos in the kitchen" to OmaRelay and the Grok agent plays it, through [Sonos's MCP server](https://support.sonos.com/en/article/control-your-sonos-system-with-ai-using-sonos-27mcp). Set up in [OmaRelay's README](https://github.com/mortalfish-studio/omarelay#sonos-through-the-grok-agent)
 
 Using a different coding or chat app, such as [Herdr](https://herdr.dev) (`omarchy install ai herdr`), Claude or ChatGPT? See [adapting.md](adapting.md).
@@ -73,7 +73,7 @@ Run it again any time: it updates and puts back anything missing.
 
 1. **Log out and back in.** The six home apps start on their workspaces. Using other coding or chat apps? Pick them in **Setup → Apps**.
 2. **Sign in** to T3 Code, Grok Bot, Superwhisper, Chrome, and your music sites.
-3. **Load the Chrome add-on** if you want the Player tab to drive Beatport or YouTube Music: [chrome-extension.md](chrome-extension.md).
+3. **Load the Chrome add-on** if you want the Player tab to drive Beatport, YouTube Music or Apple Music: [chrome-extension.md](chrome-extension.md).
 4. Open the panel (click Baseline on the bar). **Setup → Health** should say every part is in place.
 5. Pick a look in **Look**, or browse more in **Studio → Browse**.
 

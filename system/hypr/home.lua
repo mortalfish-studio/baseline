@@ -9,7 +9,7 @@ local homes = {
   { "1", { class = "^foot$" } },                                   -- term: the terminal
   { "2", { class = "^(google-chrome|chrome-outlook[.]office[.]com__mail_-Default)$" } }, -- web: browser and email
   { "5", { class = "^chrome-youtube[.]com__-Default$" } },          -- video: YouTube
-  { "6", { class = "^(chrome-jopilafkghibglefecikcmpaoolnpcjg-Default|chrome-cinhimbnkkaeohfgghhklpknlkffjgod-Default|chrome-music[.]youtube[.]com__-Default)$" } }, -- music: Beatport, YouTube Music
+  { "6", { class = "^(chrome-jopilafkghibglefecikcmpaoolnpcjg-Default|chrome-cinhimbnkkaeohfgghhklpknlkffjgod-Default|chrome-music[.]youtube[.]com__-Default|chrome-music[.]apple[.]com__-Default)$" } }, -- music: Beatport, YouTube Music, Apple Music
 }
 
 for _, home in ipairs(homes) do

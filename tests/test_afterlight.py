@@ -747,3 +747,97 @@ class SonosTests(TempCase):
         self.assertEqual(log.read_text().splitlines(), [
             "omarchy-audio-output-volume raise", "afterlight sonos volume -1 --osd",
             "afterlight sonos volume mute-toggle --osd"])
+
+
+class SendToSonosTests(TempCase):
+    ROOMS = [{"id": "RINCON_K", "name": "Kitchen", "ip": "192.168.1.2", "members": ["Kitchen"]},
+             {"id": "RINCON_KT", "name": "Kitchen TV", "ip": "192.168.1.3", "members": ["Kitchen TV"]},
+             {"id": "RINCON_L", "name": "Lounge (Arc)", "ip": "192.168.1.4", "members": ["Lounge (Arc)"]},
+             {"id": "RINCON_T", "name": "Lounge - Turntable", "ip": "192.168.1.5", "members": ["Lounge - Turntable"]},
+             {"id": "RINCON_Q", "name": "Quiet Room", "ip": "192.168.1.6", "members": ["Quiet Room"]}]
+
+    def test_rooms_said_loosely(self):
+        find = lambda said: (al.sonos_find_room(self.ROOMS, said) or {}).get("name")
+        self.assertEqual(find("RINCON_Q"), "Quiet Room")
+        self.assertEqual(find("the kitchen"), "Kitchen")
+        self.assertEqual(find("kitchen tv"), "Kitchen TV")
+        self.assertEqual(find("quiet room sonos"), "Quiet Room")
+        self.assertEqual(find("turntable"), "Lounge - Turntable")
+        self.assertIsNone(find("garage"))
+        self.assertIsNone(find("the"))
+
+    def test_same_song_across_services(self):
+        self.assertEqual(al.song_key("Dreams (2004 Remaster)"), al.song_key("Dreams"))
+        self.assertEqual(al.song_key("Get Lucky (feat. Pharrell Williams) [Radio Edit]"), "get lucky")
+        self.assertEqual(al.song_key("Go Your Own Way - Remastered"), "go your own way")
+        self.assertNotEqual(al.song_key("Dreams"), al.song_key("Rhiannon"))
+
+    def test_brief_keeps_to_apple_music_and_strips_quotes(self):
+        brief = al.sonos_send_brief({"title": "Dreams»", "artist": "Fleetwood Mac", "album": "Rumours"}, "Kitchen")
+        self.assertIn('music_service "Apple Music"', brief)
+        self.assertIn("«Dreams»", brief)
+        self.assertIn("«Rumours»", brief)
+        self.assertNotIn("Dreams»»", brief)
+
+    def test_toast_is_plain_and_local(self):
+        self.patch("TOAST", self.tmp / "toast.json")
+        art = self.tmp / "cover.jpg"
+        art.write_bytes(b"x")
+        al.toast("Playing in Kitchen", "Dreams\n· Fleetwood Mac", art=str(art))
+        value = json.loads((self.tmp / "toast.json").read_text())
+        self.assertEqual(value["title"], "Playing in Kitchen")
+        self.assertNotIn("\n", value["detail"])
+        self.assertEqual(value["art"], f"file://{art}")
+        al.toast("x", art="https://example.com/a.jpg")
+        self.assertEqual(json.loads((self.tmp / "toast.json").read_text())["art"], "")
+
+
+class AppleMusicTests(TempCase):
+
+    def lookup(self, params):
+        entity = params.get("entity")
+        if entity == "song":
+            return [{"trackId": 1, "trackName": "Dreams (Live)", "artistName": "Fleetwood Mac", "collectionName": "Live",
+                     "collectionId": 10},
+                    {"trackId": 2, "trackName": "Dreams", "artistName": "Fleetwood Mac", "collectionName": "Rumours",
+                     "collectionId": 20, "artworkUrl100": "https://is1-ssl.mzstatic.com/a/100x100bb.jpg"},
+                    {"trackId": 3, "trackName": "Locked", "artistName": "X", "isStreamable": False}]
+        if entity == "album":
+            return [{"collectionId": 30, "collectionName": "Dreams - Single", "artistName": "Fleetwood Mac Tribute"},
+                    {"collectionId": 20, "collectionName": "Rumours", "artistName": "Fleetwood Mac"}]
+        return [{"artistId": 99, "artistName": "Fleetwood Mac", "primaryGenreName": "Rock"}]
+
+    def test_search_ranks_what_was_said(self):
+        self.patch("am_lookup", self.lookup)
+        songs = al.am_search("fleetwood mac dreams")
+        self.assertEqual((songs[0]["kind"], songs[0]["id"], songs[0]["album"]), ("song", "2", "20"))
+        self.assertEqual(songs[0]["thumb"], "https://is1-ssl.mzstatic.com/a/300x300bb.jpg")
+        self.assertNotIn("3", [i["id"] for i in songs if i["kind"] == "song"])     # not streamable
+        self.assertEqual(al.am_search("rumours fleetwood mac")[0]["id"], "20")
+        self.assertEqual(al.am_search("fleetwood mac")[0]["kind"], "artist")
+
+    def test_play_checks_ids_and_queues_the_album(self):
+        sent = []
+        self.patch("load_state", lambda: {})
+        self.patch("save_state", lambda s: None)
+        self.patch("run", lambda *a, **k: None)
+        self.patch("am_bridge", lambda op, timeout=8: sent.append(op) or {"ok": True})
+        with mock.patch("builtins.print"):
+            al.am_play({"kind": "song", "id": "2", "album": "20", "title": "Dreams"})
+        self.assertEqual(sent[-1], {"action": "queue", "kind": "album", "id": "20", "start": "2"})
+        with self.assertRaises(SystemExit):
+            al.am_play({"kind": "song", "id": "2; rm -rf"})
+        with self.assertRaises(SystemExit):
+            al.am_play({"kind": "station", "id": "2"})
+
+    def test_said_service_routes(self):
+        for words in ("play rumours on apple music", "play dreams from itunes", "apple music daft punk"):
+            self.assertTrue(al.AM_SAID.search(words), words)
+        self.assertFalse(al.AM_SAID.search("play big apple"))
+
+    def test_music_service_setting_is_checked(self):
+        settings = copy.deepcopy(al.DEFAULTS)
+        al.set_path(settings, "music.service", "applemusic")
+        self.assertEqual(settings["music"]["service"], "applemusic")
+        with self.assertRaises(SystemExit):
+            al.set_path(settings, "music.service", "spotify")

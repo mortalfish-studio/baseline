@@ -274,6 +274,8 @@
   "beatport.mine": "My playlists",
   "beatport.pin": "Pin copied link",
   "ytmusic.title": "YouTube Music",
+  "music.title": "Find music",
+  "applemusic.search": "Search Apple Music: songs, artists, albums",
   "ytmusic.search": "Search songs, artists, albums, playlists",
   "ytmusic.kind.song": "Song",
   "ytmusic.kind.video": "Video",
@@ -481,5 +483,9 @@
   "sonos.nothing": "Nothing playing",
   "sonos.playingIn": "Playing in %1",
   "sonos.pausedIn": "Paused in %1",
+  "hover.playingOn": "Playing on %1",
+  "hover.playingIn": "Playing in %1",
+  "sonos.send": "Continue %1 in %2",
+  "sonos.sending": "Sending to %1… (finding it on Apple Music)",
   "sonos.volume": "%1 volume"
 }

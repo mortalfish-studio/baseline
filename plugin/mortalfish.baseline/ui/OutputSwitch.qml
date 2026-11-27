@@ -51,7 +51,7 @@ Column {
     } else if (sonosOn && current && current.name === name) {
       switcher.command = [tool, "sonos", "off"]
     } else if (sonosOn) {
-      switcher.command = ["sh", "-c", '"$0" sonos off && "$0" audio use "$1"', tool, name]
+      switcher.command = ["sh", "-c", '"$0" sonos off --quiet && "$0" audio use "$1"', tool, name]
     } else {
       switcher.command = [tool, "audio", "use", name]
     }
@@ -318,6 +318,52 @@ Column {
             TapHandler { onTapped: root.act([root.tool, "sonos", transportButton.modelData.action]) }
           }
         }
+      }
+    }
+  }
+
+  // Send to Sonos: what the laptop is playing carries on in the room, found
+  // on Apple Music there, from the same song and second.
+  readonly property var laptopPlayer: host ? host.playingPlayer : null
+  property bool sending: false
+  Timer { id: sendingClear; interval: 45000; onTriggered: root.sending = false }
+  Rectangle {
+    id: sendButton
+    width: parent.width
+    visible: root.sonosOn && (!!root.laptopPlayer || root.sending)
+    height: sendRow.implicitHeight + Style.space(12)
+    radius: Style.cornerRadius > 0 ? Style.space(3) : 0
+    color: sendHover.hovered && !root.sending ? Qt.rgba(root.amber.r, root.amber.g, root.amber.b, 0.15) : Qt.rgba(1, 1, 1, 0.03)
+    border.width: 1
+    border.color: Qt.rgba(root.amber.r, root.amber.g, root.amber.b, sendHover.hovered ? 0.8 : 0.35)
+    Row {
+      id: sendRow
+      anchors.centerIn: parent
+      width: Math.min(implicitWidth, parent.width - Style.space(16))
+      spacing: Style.space(8)
+      Label {
+        text: root.sending ? "󰔟" : "󰜟"
+        font.family: "Iosevka Nerd Font Propo"
+        font.pixelSize: Style.font.body
+        color: root.amber
+      }
+      Label {
+        width: Math.min(implicitWidth, sendButton.width - Style.space(48))
+        textFormat: Text.PlainText
+        elide: Text.ElideRight
+        font.pixelSize: Style.font.caption
+        text: root.sending ? strings.t("sonos.sending").arg(root.sonosRoom ? root.sonosRoom.name : "")
+          : strings.t("sonos.send").arg(root.laptopPlayer ? root.laptopPlayer.trackTitle : "")
+                                   .arg(root.sonosRoom ? root.sonosRoom.name : "")
+      }
+    }
+    HoverHandler { id: sendHover; cursorShape: root.sending ? Qt.ArrowCursor : Qt.PointingHandCursor }
+    TapHandler {
+      enabled: !root.sending
+      onTapped: {
+        root.sending = true
+        sendingClear.restart()
+        Quickshell.execDetached([root.tool, "sonos", "send", root.sonosRoom.id])
       }
     }
   }

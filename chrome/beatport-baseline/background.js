@@ -46,6 +46,85 @@ async function ytmusicTab() {
   return scored.sort((a, b) => b[0] - a[0]).map(([, t]) => t)[0] || null;
 }
 
+const APPLEMUSIC = /^https:\/\/music\.apple\.com\//;
+async function appleMusicTab() {
+  const tabs = await chrome.tabs.query({ url: "https://music.apple.com/*" });
+  const scored = await Promise.all(tabs.map(async (t) => {
+    let app = false;
+    try { app = (await chrome.windows.get(t.windowId)).type === "app"; } catch (error) { /* gone */ }
+    return [(t.audible ? 2 : 0) + (app ? 1 : 0), t];
+  }));
+  return scored.sort((a, b) => b[0] - a[0]).map(([, t]) => t)[0] || null;
+}
+
+// Apple Music's web player is Apple's own MusicKit, which lives in the page's
+// world, out of reach of a content script. This one fixed function runs
+// there: it reads what's playing, queues a catalog album, playlist or songs
+// by id, and plays, pauses, skips or seeks. Only checked ids and actions go in.
+const AM_ID = /^(\d{1,15}|pl\.[A-Za-z0-9.-]{1,80})$/;
+async function appleMusic(op, tab) {
+  tab = tab || await appleMusicTab();
+  if (!tab) return { ok: false, error: "no Apple Music tab" };
+  const actions = ["now", "queue", "play", "pause", "toggle", "next", "previous", "seek"];
+  if (!op || !actions.includes(op.action)) return { ok: false };
+  const clean = { action: op.action };
+  if (op.action === "queue") {
+    if (!["song", "album", "playlist", "songs"].includes(op.kind)) return { ok: false };
+    clean.kind = op.kind;
+    if (op.kind === "songs") {
+      clean.ids = (Array.isArray(op.ids) ? op.ids : []).filter((i) => AM_ID.test(String(i))).slice(0, 50).map(String);
+      if (!clean.ids.length) return { ok: false };
+    } else {
+      if (!AM_ID.test(String(op.id))) return { ok: false };
+      clean.id = String(op.id);
+    }
+    if (op.start !== undefined) {
+      if (!AM_ID.test(String(op.start))) return { ok: false };
+      clean.start = String(op.start);
+    }
+  }
+  if (op.action === "seek") {
+    clean.seconds = Number(op.seconds);
+    if (!Number.isFinite(clean.seconds) || clean.seconds < 0 || clean.seconds > 86400) return { ok: false };
+  }
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: "MAIN",
+    args: [clean],
+    func: async (op) => {
+      const kit = window.MusicKit && window.MusicKit.getInstance && window.MusicKit.getInstance();
+      if (!kit) return { ok: false, error: "not ready" };
+      const now = () => {
+        const n = kit.nowPlayingItem;
+        if (!n) return null;
+        const a = n.attributes || {};
+        return { id: String(n.id || ""), title: a.name || n.title || "", artist: a.artistName || n.artistName || "",
+                 album: a.albumName || n.albumName || "",
+                 container: n.container ? { type: String(n.container.type || ""), id: String(n.container.id || "") } : null };
+      };
+      const state = () => ({ ok: true, signedIn: !!kit.isAuthorized, playing: !!kit.isPlaying,
+                             time: Math.floor(kit.currentPlaybackTime || 0), item: now() });
+      if (op.action === "now") return state();
+      if (op.action === "queue") {
+        if (!kit.isAuthorized) return { ok: false, error: "signed out" };
+        const what = op.kind === "songs" ? { songs: op.ids } : { [op.kind]: op.id };
+        await kit.setQueue({ ...what, startPlaying: false });
+        const items = (kit.queue && kit.queue.items) || [];
+        const at = op.start ? items.findIndex((i) => String(i.id) === op.start) : -1;
+        if (at > 0) await kit.changeToMediaAtIndex(at); else await kit.play();
+        return state();
+      }
+      if (op.action === "play" || (op.action === "toggle" && !kit.isPlaying)) await kit.play();
+      else if (op.action === "pause" || op.action === "toggle") await kit.pause();
+      else if (op.action === "next") await kit.skipToNextItem();
+      else if (op.action === "previous") await kit.skipToPreviousItem();
+      else if (op.action === "seek") await kit.seekToTime(op.seconds);
+      return state();
+    },
+  }).catch((error) => [{ result: { ok: false, error: String(error) } }]);
+  return (result && result.result) || { ok: false };
+}
+
 async function beatportTab() {
   return (await beatportTabs())[0] || null;
 }
@@ -99,8 +178,9 @@ async function scratchTab(url) {
 
 // ---- One thing playing at a time: when a Beatport or YouTube tab starts
 // making sound, pause the others.
-const MEDIA = /^https:\/\/(www\.beatport\.com|www\.youtube\.com|music\.youtube\.com)\//;
+const MEDIA = /^https:\/\/(www\.beatport\.com|www\.youtube\.com|music\.youtube\.com|music\.apple\.com)\//;
 function pauseIn(tab) {
+  if (APPLEMUSIC.test(tab.url)) return appleMusic({ action: "pause" }, tab);
   const beatport = /beatport\.com/.test(tab.url);
   return chrome.scripting.executeScript({
     target: { tabId: tab.id },
@@ -122,6 +202,10 @@ async function mediaAction(action) {
   const tabs = (await chrome.tabs.query({})).filter((t) => MEDIA.test(t.url || "") && t.id !== scratchId);
   const tab = tabs.find((t) => t.audible) || tabs.find((t) => t.id === lastAudible) || tabs[0];
   if (!tab || !["play", "pause", "toggle", "next", "previous"].includes(action)) return { ok: false };
+  if (APPLEMUSIC.test(tab.url)) {
+    const reply = await appleMusic({ action }, tab);
+    return { ok: !!reply.ok, site: reply.ok ? "applemusic" : "", title: tab.title };
+  }
   const [result] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     args: [action],
@@ -162,7 +246,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
   if (info.audible === true && MEDIA.test(tab.url || "")) {
     lastAudible = tabId;
     // Tell Baseline where the music is coming from.
-    const site = /beatport\.com/.test(tab.url) ? "beatport" : /music\.youtube\.com/.test(tab.url) ? "ytmusic" : "youtube";
+    const site = /beatport\.com/.test(tab.url) ? "beatport" : /music\.youtube\.com/.test(tab.url) ? "ytmusic"
+      : APPLEMUSIC.test(tab.url) ? "applemusic" : "youtube";
     if (tabId !== scratchId && port) port.postMessage({ type: "source", site });
   }
   if (info.audible !== true || !MEDIA.test(tab.url || "") || tabId === scratchId) return;
@@ -228,6 +313,10 @@ async function handle(message) {
     // Play, pause or skip in whichever Beatport / YouTube / YouTube Music tab
     // is playing (or was last), for when the system's media controls miss it.
     return await mediaAction(String(message.action || ""));
+  }
+  if (message.type === "applemusic") {
+    // Apple Music's own player: what's playing, or queue and play by id.
+    return await appleMusic(message.op || {});
   }
   if (message.type === "tabs") {
     return { tabs: (await beatportTabs()).map((t) => ({ id: t.id, url: t.url, audible: !!t.audible, title: t.title })) };

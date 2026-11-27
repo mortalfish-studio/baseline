@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Baseline for Beatport",
-  "version": "1.7.0",
-  "description": "Lets the Baseline panel drive Beatport and YouTube Music: switch charts, playlists and artists in place, start them playing, list your playlists, add tracks to <3, and keep one thing playing at a time.",
+  "version": "1.8.0",
+  "description": "Lets the Baseline panel drive Beatport, YouTube Music and Apple Music: switch charts, playlists and artists in place, start them playing, list your playlists, add tracks to <3, and keep one thing playing at a time.",
   "permissions": [
     "nativeMessaging",
     "tabs",
@@ -11,7 +11,8 @@
   "host_permissions": [
     "https://www.beatport.com/*",
     "https://www.youtube.com/*",
-    "https://music.youtube.com/*"
+    "https://music.youtube.com/*",
+    "https://music.apple.com/*"
   ],
   "background": {
     "service_worker": "background.js"

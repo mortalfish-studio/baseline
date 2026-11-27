@@ -59,7 +59,7 @@ These are symlinks back to your checkout, so the repo stays the single source. `
 | `~/.config/omarchy/afterlight/settings.json`, `sources.json` | Baseline's settings, and where each added picture came from |
 | `~/.config/omarchy/backgrounds/afterlight-*` | pictures you add, and darkened Night/Saver copies made from them |
 | `~/.config/systemd/user/afterlight-mode.timer` | the Day/Night schedule |
-| `~/.local/state/afterlight/` | state: health report, liked tracks, Beatport playlists, the Sonos speakers found (`sonos.json`) and, while Sonos has the volume keys, `sonos-target` |
+| `~/.local/state/afterlight/` | state: health report, liked tracks, Beatport playlists, the Sonos speakers and room names found (`sonos.json`, kept current: rewritten when they change and at least daily), the music popup's last message (`toast.json`) and, while Sonos has the volume keys, `sonos-target` |
 | `~/.local/share/baseline/looks/` | looks added from the [catalog](https://github.com/mortalfish-studio/baseline-looks) |
 | `~/.local/share/baseline/mine/` | looks you make in the Studio |
 | `~/.local/share/baseline-before/` | the snapshot taken before installing (moved aside by `afterlight uninstall`) |
@@ -79,7 +79,7 @@ Chrome's colour follows the look through Omarchy's own browser policy (`/etc/opt
 
 ## The desktop, day to day
 
-- **Home workspaces**: 1 terminal, 2 web (Chrome, Outlook), 3 code (T3 Code, or the coding app picked in Setup → Apps), 4 chat (Grok Bot, or your pick), 5 video (YouTube), 6 music (Beatport). Each app always opens on its own workspace, and all six start at login.
+- **Home workspaces**: 1 terminal, 2 web (Chrome, Outlook), 3 code (T3 Code, or the coding app picked in Setup → Apps), 4 chat (Grok Bot, or your pick), 5 video (YouTube), 6 music (Beatport, YouTube Music, Apple Music). Each app always opens on its own workspace, and all six start at login.
 - **Day / Night / Saver**: switched by the clock (07:00 and 20:00 by default). Saver lowers the screen brightness, warms the colours, picks the power-saver profile and a solid bar, and puts all four back afterwards. Night and Saver also change the colour temperature.
 - **Mouse** (Razer Basilisk V3 only; other mice need [adapting](adapting.md#a-different-mouse)): lights in the look's colours; slow-down button = hold to dictate, front side button = OmaRelay voice, rear side button = next track, wheel tilt = previous/next workspace. All changeable in Setup.
 - **Superwhisper**: Setup can change its recording indicator style.
@@ -99,6 +99,8 @@ Chrome's colour follows the look through Omarchy's own browser policy (`/etc/opt
 | adding a Wallhaven link | asks Wallhaven's API for the picture and its credit |
 | Share… | opens a public pull request on the catalog (only when you press it) |
 | Player tab, while it's open | asks your Sonos speakers on the **local network** (port 1400) for rooms, volume and what's playing, every few seconds; finds them through Avahi (mDNS). Nothing leaves your network |
-| saying "Sonos" to OmaRelay | the Grok agent (`grok -p`, Sonos tools only) talks to Sonos's cloud; only if you've added and signed in to the Sonos MCP yourself |
+| saying "Sonos" to OmaRelay | the Grok agent (`grok -p`, Sonos tools only) talks to Sonos's cloud; only if you've added and signed in to the Sonos MCP yourself. OmaRelay gives it the room names Baseline last read |
+| Send to Sonos (the Player tab's *Continue … in* button, or "send this to the kitchen") | the Grok agent, as above, starts the laptop's song (title, artist, album) on Apple Music in that room; then Baseline skips to the song and second over the local network and pauses the laptop |
+| searching Apple Music (Player tab, or "play … on Apple Music") | Apple's public catalogue search (`itunes.apple.com`), no account; the words searched and your region's storefront are sent |
 
 Nothing is sent anywhere else, and nothing personal goes into shared looks: commits use your GitHub no-reply address and an author handle you choose.

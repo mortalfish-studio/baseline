@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Services.Pipewire
 import Quickshell.Io
 import Quickshell.Services.Mpris
 import Quickshell.Wayland
@@ -607,12 +608,12 @@ BarWidget {
   }
 
   // Where the music is coming from (the browser add-on reports the tab that
-  // starts making sound): "beatport", "ytmusic" or "youtube".
+  // starts making sound): "beatport", "ytmusic", "applemusic" or "youtube".
   property string musicSource: "beatport"
   Commons.WatchedFile {
     path: Quickshell.env("HOME") + "/.local/state/afterlight/source.json"
     onTextChanged: {
-      try { const v = JSON.parse(text); if (["beatport", "ytmusic", "youtube"].indexOf(v.site) >= 0) root.musicSource = v.site }
+      try { const v = JSON.parse(text); if (["beatport", "ytmusic", "applemusic", "youtube"].indexOf(v.site) >= 0) root.musicSource = v.site }
       catch (error) {}
     }
   }
@@ -621,6 +622,8 @@ BarWidget {
                 launch: "gtk-launch chrome-jopilafkghibglefecikcmpaoolnpcjg-Default" },
     ytmusic: { name: "YouTube Music", icon: "󰗃", cls: "chrome-music.youtube.com__-Default",
                launch: "omarchy-launch-webapp https://music.youtube.com/" },
+    applemusic: { name: "Apple Music", icon: "󰀵", cls: "chrome-music.apple.com__-Default",
+                  launch: "omarchy-launch-webapp https://music.apple.com/" },
     youtube: { name: "YouTube", icon: "󰗃", cls: "chrome-youtube.com__-Default",
                launch: "omarchy-launch-webapp https://youtube.com/" }
   })
@@ -631,6 +634,28 @@ BarWidget {
     Quickshell.execDetached(["sh", "-c",
       "hyprctl dispatch 'hl.dsp.focus({ window = \"class:" + info.cls + "\" })' | grep -q ok || " + info.launch])
   }
+  // Where the laptop's sound goes (for the hover card): the default output's
+  // name, tidied like the Player tab's ("Speaker", "Headphones").
+  PwObjectTracker { objects: Pipewire.defaultAudioSink ? [Pipewire.defaultAudioSink] : [] }
+  readonly property string laptopOutput: {
+    const sink = Pipewire.defaultAudioSink
+    const name = sink ? (sink.description || sink.nickname || sink.name || "") : ""
+    return name.replace(/^Built-in Audio\s+/, "").replace(/\s+playback$/i, "")
+  }
+  // The Sonos room the Player tab controls, and what it's playing, read when
+  // the hover card opens (only while a room is picked).
+  property var sonosNow: null
+  Process {
+    id: sonosNowReader
+    command: [root.afterlightPath, "sonos", "state"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        try { const v = JSON.parse(text); root.sonosNow = v && v.on && v.room ? v.room : null }
+        catch (error) { root.sonosNow = null }
+      }
+    }
+  }
+  onHoverOpenChanged: if (hoverOpen && !sonosNowReader.running) sonosNowReader.running = true
   readonly property var playingPlayer: {
     const list = Mpris.players ? Mpris.players.values : []
     for (const p of list) if (p && p.isPlaying && p.trackTitle) return p
@@ -659,6 +684,23 @@ BarWidget {
     }
   }
   TrackToast { id: trackToast }
+  // Music messages from afterlight (Send to Sonos, the Grok agent's Sonos
+  // replies) in the same popup: afterlight writes toast.json.
+  property real toastSeen: Date.now() / 1000      // older ones (from before start-up) aren't shown
+  Commons.WatchedFile {
+    path: Quickshell.env("HOME") + "/.local/state/afterlight/toast.json"
+    onTextChanged: {
+      try {
+        const v = JSON.parse(text)
+        if (!v || typeof v.at !== "number") return
+        if (v.at <= root.toastSeen || Date.now() / 1000 - v.at > 30) return
+        root.toastSeen = v.at
+        Quickshell.execDetached(["omarchy-shell", "osd", "close"])
+        trackToast.show(String(v.title || ""), String(v.detail || ""),
+                        /^file:\/\//.test(v.art || "") ? v.art : "", String(v.glyph || ""))
+      } catch (error) {}
+    }
+  }
 
   // A short rest before it shows, so passing over the bar doesn't flash it.
   property bool hoverOpen: false

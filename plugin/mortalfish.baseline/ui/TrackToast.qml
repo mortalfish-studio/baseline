@@ -15,14 +15,16 @@ Item {
   property string title: ""
   property string artist: ""
   property string art: ""
+  property string glyph: "󰎆"
 
   readonly property int pad: Style.space(14)
   readonly property int cover: Style.space(64)
 
-  function show(t, a, cover) {
+  function show(t, a, cover, icon) {
     title = t
     artist = a
     art = cover
+    glyph = icon || "󰎆"
     opened = true
     hideTimer.restart()
   }
@@ -75,7 +77,7 @@ Item {
           Text {
             anchors.centerIn: parent
             visible: root.art === ""
-            text: "󰎆"
+            text: root.glyph
             textFormat: Text.PlainText
             font.family: "Iosevka Nerd Font Propo"
             font.pixelSize: Style.font.icon * 1.4

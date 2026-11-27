@@ -329,7 +329,20 @@ Column {
     TapHandler { onTapped: chip.clicked() }
   }
 
-  // ---- YouTube Music: search anything, play it in the YouTube Music window.
+  // ---- Find music: search YouTube Music or Apple Music, play it in that
+  // service's window. The service picked here is also where "play …" said
+  // to OmaRelay looks (settings music.service).
+  readonly property string savedService: host && host.afterState && host.afterState.settings.music
+    ? host.afterState.settings.music.service || "ytmusic" : "ytmusic"
+  property string pickedService: ""
+  readonly property string service: pickedService !== "" ? pickedService : savedService
+  function pickService(name) {
+    if (name === service) return
+    pickedService = name
+    ytResults = []
+    Quickshell.execDetached([tool, "set", "music.service", name])
+    if (ytQuery.text.trim() !== "") ytFind(ytQuery.text)
+  }
   property var ytResults: []
   property bool ytSearching: false
   property string ytPlaying: ""
@@ -357,13 +370,13 @@ Column {
     if (query.trim() === "") { ytResults = []; return }
     // A search typed while one is running goes next, not nowhere.
     if (ytSearch.running) { ytPending = query.trim(); return }
-    ytSearch.command = [tool, "ytmusic", "search", query.trim()]
+    ytSearch.command = [tool, service, "search", query.trim()]
     ytSearch.running = true
   }
   function ytPlay(item) {
     ytPlaying = item.kind + item.title
     ytPlayingClear.restart()
-    Quickshell.execDetached([tool, "ytmusic", "play", JSON.stringify(item)])
+    Quickshell.execDetached([tool, item.service || service, "play", JSON.stringify(item)])
   }
   Timer { id: ytPlayingClear; interval: 6000; onTriggered: root.ytPlaying = "" }
   readonly property var ytIcons: ({ song: "󰎈", video: "󰗃", album: "󰀥", artist: "󰠃", playlist: "󰲸" })
@@ -371,7 +384,20 @@ Column {
   Column {
     width: parent.width
     spacing: Style.space(8)
-    Section { width: parent.width; title: strings.t("ytmusic.title"); amber: root.amber; teal: root.teal }
+    Section { width: parent.width; title: strings.t("music.title"); amber: root.amber; teal: root.teal }
+    Row {
+      spacing: Style.space(6)
+      Repeater {
+        model: [{ id: "ytmusic", name: "YouTube Music", icon: "󰗃" }, { id: "applemusic", name: "Apple Music", icon: "󰀵" }]
+        delegate: Chip {
+          required property var modelData
+          text: modelData.icon + "  " + modelData.name
+          tone: root.service === modelData.id ? root.amber : root.teal
+          border.color: root.service === modelData.id ? root.amber : Qt.rgba(tone.r, tone.g, tone.b, 0.35)
+          onClicked: root.pickService(modelData.id)
+        }
+      }
+    }
     RowLayout {
       width: parent.width
       spacing: Style.space(6)
@@ -394,7 +420,7 @@ Column {
           onAccepted: root.ytFind(text)
           Text {
             visible: ytQuery.text === ""
-            text: strings.t("ytmusic.search")
+            text: strings.t(root.service === "applemusic" ? "applemusic.search" : "ytmusic.search")
             textFormat: Text.PlainText
             color: Commons.Color.popups.text
             opacity: 0.4
@@ -467,14 +493,14 @@ Column {
     Flow {
       width: parent.width
       spacing: Style.space(6)
-      visible: root.ytPlaylists.length > 0
+      visible: root.ytPlaylists.length > 0 && root.service === "ytmusic"
       Repeater {
         model: root.ytPlaylists
         delegate: Chip {
           required property var modelData
           text: modelData.name
           tone: root.teal
-          onClicked: root.ytPlay({ kind: "playlist", title: modelData.name, playlist: modelData.playlist, video: "", browse: "", subtitle: "" })
+          onClicked: root.ytPlay({ service: "ytmusic", kind: "playlist", title: modelData.name, playlist: modelData.playlist, video: "", browse: "", subtitle: "" })
         }
       }
     }

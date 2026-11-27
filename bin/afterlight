@@ -89,6 +89,9 @@ DEFAULTS = {
     "backup": {"command": ""},
     # Sonos: the room the Player tab controls, and whether it has the volume keys.
     "sonos": {"on": False, "room": ""},
+    # Where "play <something>" looks when it isn't a Beatport chart or playlist
+    # and no service is named: "ytmusic" or "applemusic".
+    "music": {"service": "ytmusic"},
     "battery": {"limit": False, "limitPercent": 80},
     # Beatport links pinned in the Player tab: [{"name": ..., "url": ...}]
     "beatport": {"pins": []},
@@ -1990,6 +1993,8 @@ def set_path(settings, dotted, value):
                 value = f"{int(hours) % 24:02d}:{int(mins) % 60:02d}"
             except ValueError:
                 sys.exit(f"{dotted} takes a time like 07:00")
+        if keys == ["music", "service"] and value not in {"ytmusic", "applemusic"}:
+            sys.exit("music.service is ytmusic or applemusic")
         if keys == ["look"]:
             sys.exit("Change the look with: afterlight look set <id>")
         if keys[0] == "ui" and value not in {"system", "player", "status", "wallpapers", "theme", "setup"}:
@@ -2105,6 +2110,19 @@ def audio_use(name):
         inputs = []
     for stream in inputs:
         subprocess.run(["pactl", "move-sink-input", str(stream["index"]), name], capture_output=True, timeout=4)
+    where_toast()
+
+
+def where_toast():
+    """After switching where sound goes: "Playing on Headphones", with the
+    laptop's song and cover, in the bar's music popup. Quiet when nothing plays."""
+    track = laptop_track()
+    if not track or not track["playing"]:
+        return
+    output = next((o for o in audio_outputs()["outputs"] if o["default"]), None)
+    if output:
+        toast(f"Playing on {output['label']}", f"{track['title']} · {track['artist']}", art=track["art"],
+              glyph="󰓃")
 
 
 # ---------------------------------------------------------------- Sonos, on the home network
@@ -2126,7 +2144,10 @@ _UPNP = {
     "RenderingControl": "/MediaRenderer/RenderingControl/Control",
     "GroupRenderingControl": "/MediaRenderer/GroupRenderingControl/Control",
     "ZoneGroupTopology": "/ZoneGroupTopology/Control",
+    "ContentDirectory": "/MediaServer/ContentDirectory/Control",
 }
+SONOS_SERVICE = "Apple Music"      # the service Grok's Sonos tools play laptop music from
+SONOS_GROK_TIMEOUT = 150
 
 
 def sonos_private(ip):
@@ -2214,9 +2235,13 @@ def sonos_rooms(refresh=False):
             reply = sonos_call(ip, "ZoneGroupTopology", "GetZoneGroupState")
             rooms = sonos_parse_groups(reply.get("ZoneGroupState", "")) if reply else []
             if rooms:
+                # Remember the speakers, and the room names for OmaRelay to hand
+                # Grok (kept up to date: rewritten when they change, or daily).
                 speakers = sorted({r["ip"] for r in rooms} | set(ips))[:32]
-                if speakers != known:
-                    write_atomic(SONOS_CACHE, json.dumps({"speakers": speakers}) + "\n")
+                names = sorted({m for r in rooms for m in r["members"]})[:40]
+                if speakers != known or names != cache.get("rooms") or time.time() - cache.get("updated", 0) > 86400:
+                    write_atomic(SONOS_CACHE, json.dumps({"speakers": speakers, "rooms": names,
+                                                          "updated": int(time.time())}) + "\n")
                 return rooms
     return []
 
@@ -2320,10 +2345,19 @@ def sonos_set_target(settings, on):
 
 def sonos_use(settings, room_id):
     rooms = sonos_rooms()
-    if not any(r["id"] == room_id for r in rooms):
+    room = next((r for r in rooms if r["id"] == room_id), None)
+    if room is None:
         sys.exit("That Sonos room isn't there.")
     settings.setdefault("sonos", {})["room"] = room_id
     sonos_set_target(settings, True)
+    # Say what the room is playing, with its cover.
+    now = sonos_now(room)
+    track = now["track"]
+    if now["playing"] and track["title"]:
+        toast(f"Playing in {room['name']}", " · ".join(x for x in (track["title"], track["artist"]) if x),
+              art=track["art"])
+    else:
+        toast(room["name"], "Nothing playing here: the volume keys now follow this room")
 
 
 def sonos_volume(settings, value, osd=False):
@@ -2376,6 +2410,191 @@ def sonos_transport(settings, action):
     name = {"play": "Play", "pause": "Pause", "next": "Next", "previous": "Previous"}[action]
     if sonos_call(ip, "AVTransport", name, args) is None:
         sys.exit("Sonos didn't take that (nothing to skip on TV or line-in).")
+
+
+# Music messages (Sonos sending, playing, or not) show in the bar's music
+# popup near the top of the screen, beside the track popups, rather than as
+# notifications: the bar watches this file.
+TOAST = STATE.parent / "toast.json"
+
+
+def toast(title, detail="", art="", glyph="󰜟"):
+    art = f"file://{art}" if art and Path(art).is_file() else ""
+    write_atomic(TOAST, json.dumps({"title": clean_text(title, 120), "detail": clean_text(detail, 160),
+                                    "art": art, "glyph": glyph[:2], "at": time.time()}) + "\n")
+
+
+# Send to Sonos: the laptop's song carries on in a room. Sonos can't play a
+# browser tab, so Grok's Sonos tools find the same album on Apple Music and
+# start it there; then Baseline, over the home network, jumps to the same
+# song and second and pauses the laptop. The laptop keeps playing until the
+# room has started, so there's no gap.
+
+def laptop_track():
+    """What the laptop plays (MPRIS): title, artist, album, position in
+    seconds, and the player's bus name. Playing players first."""
+    found = []
+    for line in quiet_out("busctl", "--user", "list", "--no-legend").splitlines():
+        name = line.split()[0] if line.strip() else ""
+        if not name.startswith("org.mpris.MediaPlayer2."):
+            continue
+        def prop(p):
+            try:
+                return json.loads(quiet_out("busctl", "--user", "get-property", "--json=short", name,
+                                            "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", p)).get("data")
+            except ValueError:
+                return None
+        meta = prop("Metadata") or {}
+        title = (meta.get("xesam:title") or {}).get("data", "")
+        if not title:
+            continue
+        artists = (meta.get("xesam:artist") or {}).get("data", [])
+        position = prop("Position")
+        art = str((meta.get("mpris:artUrl") or {}).get("data", ""))
+        found.append({"title": clean_text(title, 120), "art": art[7:] if art.startswith("file:///") else "",
+                      "artist": clean_text(", ".join(artists) if isinstance(artists, list) else str(artists), 120),
+                      "album": clean_text((meta.get("xesam:album") or {}).get("data", ""), 120),
+                      "position": int(position) // 1_000_000 if isinstance(position, int) else 0,
+                      "playing": prop("PlaybackStatus") == "Playing", "player": name})
+    found.sort(key=lambda t: not t["playing"])
+    return found[0] if found else None
+
+
+def song_key(title):
+    """A title made comparable across services: no "(feat. …)", "- Remastered",
+    brackets or punctuation."""
+    title = re.sub(r"\s*[(\[][^)\]]*[)\]]", "", title.lower())
+    title = re.sub(r"\s+-\s+.*$", "", title)
+    return re.sub(r"[^\w]+", " ", title).strip()
+
+
+def sonos_queue(ip, limit=200):
+    """Titles in the room's queue, in order."""
+    import xml.etree.ElementTree as ET
+    reply = sonos_call(ip, "ContentDirectory", "Browse", {
+        "ObjectID": "Q:0", "BrowseFlag": "BrowseDirectChildren", "Filter": "dc:title",
+        "StartingIndex": 0, "RequestedCount": limit, "SortCriteria": ""}, timeout=4) or {}
+    try:
+        root = ET.fromstring(reply.get("Result") or "<x/>")
+    except ET.ParseError:
+        return []
+    return [(next((c.text or "" for c in item if c.tag.endswith("}title")), ""))
+            for item in root if item.tag.endswith("}item")]
+
+
+def hms(seconds):
+    seconds = max(0, int(seconds))
+    return f"{seconds // 3600}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+
+
+def grok_has_sonos():
+    import tomllib
+    config = Path(os.environ.get("GROK_HOME") or HOME / ".grok") / "config.toml"
+    try:
+        entry = tomllib.loads(config.read_text()).get("mcp_servers", {}).get("sonos")
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    return isinstance(entry, dict) and entry.get("enabled", True) is not False
+
+
+def sonos_send_brief(track, room_name):
+    said = lambda s: s.replace("«", "").replace("»", "")[:120]
+    album = f' from the album «{said(track["album"])}»' if track["album"] else ""
+    return f"""You control the user's Sonos speakers with the sonos tools, and nothing else.
+
+Start the song «{said(track["title"])}» by «{said(track["artist"])}»{album} in the Sonos room «{said(room_name)}», using music_service "{SONOS_SERVICE}".
+
+- Look up the room's group first.
+- Best: play that album, so the songs after it follow (another program will skip to the right song). If the album can't be found, play the song itself.
+- Don't change the volume or grouping, and don't use any other music service.
+- Don't ask questions: nobody can answer.
+
+Reply with one short line, under 90 characters, saying what you started, or why it couldn't be done."""
+
+
+def sonos_find_room(rooms, said):
+    """A room by id, or by name said loosely ("the kitchen", "lounge sonos"):
+    the whole name first, then a room whose name holds every word said."""
+    match = next((r for r in rooms if r["id"] == said), None)
+    if match:
+        return match
+    plain = lambda text: re.sub(r"[^\w]+", " ", text.lower()).split()
+    words = [w for w in plain(said) if w not in {"the", "my", "room", "sonos", "speaker", "speakers"}]
+    if not words:
+        return None
+    for room in rooms:
+        if [w for w in plain(room["name"]) if w != "room"] == words:
+            return room
+    hits = [r for r in rooms if set(words) <= set(plain(r["name"]))]
+    return min(hits, key=lambda r: len(r["name"])) if hits else None
+
+
+def sonos_send(settings, room_id=""):
+    """Carry the laptop's song on in a room (the picked one by default).
+    Takes as long as Grok does (15-45 s); says how it went in a notification."""
+    def done(headline, detail="", failed=False, art=""):
+        toast(headline, detail, art=art, glyph="󰀦" if failed else "󰜟")
+        if failed:
+            sys.exit(f"{headline}: {detail}")
+    rooms = sonos_rooms()
+    room = sonos_find_room(rooms, room_id) if room_id else sonos_room(settings, rooms)
+    if room is None:
+        done("Send to Sonos", f"No Sonos room called {room_id[:40]}" if room_id else "Pick a Sonos room first", failed=True)
+    track = laptop_track()
+    if track is None:
+        done("Send to Sonos", "Nothing is playing on the laptop", failed=True)
+    if not shutil.which("grok") or not grok_has_sonos():
+        done("Send to Sonos", "Needs the Grok agent with Sonos set up (see the README's Sonos section)", failed=True)
+    toast(f"Sending to {room['name']}…", f"{track['title']} · {track['artist']}, finding it on {SONOS_SERVICE}",
+          art=track["art"])
+    started = time.time()
+    workdir = STATE.parent / "sonos-grok"
+    workdir.mkdir(parents=True, exist_ok=True)
+    try:
+        result = subprocess.run(["grok", "-p", sonos_send_brief(track, room["name"]), "--allow", "MCPTool(sonos__*)",
+                                 "--deny", "Bash", "--deny", "Edit", "--deny", "Write", "--deny", "WebFetch",
+                                 "--deny", "WebSearch", "--max-turns", "24", "--no-auto-update"],
+                                cwd=workdir, capture_output=True, text=True, timeout=SONOS_GROK_TIMEOUT,
+                                stdin=subprocess.DEVNULL)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        answer = re.sub(r"[`*_#>]", "", lines[-1])[:120] if lines else ""
+    except subprocess.TimeoutExpired:
+        done("Send to Sonos", "Sonos took too long to answer", failed=True)
+    except OSError:
+        done("Send to Sonos", "Couldn't start the Grok agent", failed=True)
+    ip = room["ip"]
+    # Wait for the room to start, then find the laptop's song in its queue.
+    for _ in range(20):
+        if (sonos_call(ip, "AVTransport", "GetTransportInfo", {"InstanceID": 0}) or {}).get(
+                "CurrentTransportState") == "PLAYING":
+            break
+        time.sleep(0.5)
+    else:
+        done("Sonos didn't play", answer or "Grok couldn't start it", failed=True)
+    wanted = song_key(track["title"])
+    queue = sonos_queue(ip)
+    number = next((i + 1 for i, title in enumerate(queue) if song_key(title) == wanted), None)
+    if number is None:
+        now = sonos_now(room)["track"]
+        if song_key(now["title"]) != wanted:
+            done(f"Playing in {room['name']}", f"{answer or now['title']} (not the same song: "
+                 f"{track['title']} wasn't on {SONOS_SERVICE})")
+            return
+    elif int((sonos_call(ip, "AVTransport", "GetPositionInfo", {"InstanceID": 0}) or {}).get("Track") or 0) != number:
+        sonos_call(ip, "AVTransport", "Seek", {"InstanceID": 0, "Unit": "TRACK_NR", "Target": number})
+    # The laptop has kept playing meanwhile: take its second now, then pause it.
+    latest = laptop_track()
+    if latest and latest["player"] == track["player"] and song_key(latest["title"]) == wanted:
+        second = latest["position"]
+    else:
+        second = track["position"] + (int(time.time() - started) if track["playing"] else 0)
+    if media_command("pause") != "tab":
+        quiet_out("busctl", "--user", "call", track["player"], "/org/mpris/MediaPlayer2",
+                  "org.mpris.MediaPlayer2.Player", "Pause")
+    if second > 2:
+        sonos_call(ip, "AVTransport", "Seek", {"InstanceID": 0, "Unit": "REL_TIME", "Target": hms(second + 1)})
+    done(f"Playing in {room['name']}", f"{track['title']} · {track['artist']}, from {hms(second)[2:] if second < 3600 else hms(second)}"
+         f" ({SONOS_SERVICE})", art=sonos_now(room)["track"].get("art", "") or track["art"])
 
 
 def quiet_out(*argv, timeout=4):
@@ -2880,10 +3099,15 @@ def beatport_say(settings, words):
             best = likeness(names) if target else (1 if wants_chart and g["path"] == "top-100" else 0)
             choices.append((best, g["name"] + " Top 100", "https://www.beatport.com/" + g["path"]))
     choices.sort(reverse=True)
+    if AM_SAID.search(words):
+        return am_say(words)
     if re.search(r"\b(?:youtube music|yt music|you tube music|on youtube)\b", words, re.I):
         return ytm_say(words)
     if not choices or choices[0][0] < 0.6:
-        # Not a Beatport chart or playlist: an artist, song or album, so look on YouTube Music.
+        # Not a Beatport chart or playlist: an artist, song or album, so look
+        # on your music service (YouTube Music unless set to Apple Music).
+        if (settings.get("music") or {}).get("service") == "applemusic":
+            return am_say(words)
         return ytm_say(words)
     _, label, url = choices[0]
     beatport_open(url, play=True)
@@ -3184,6 +3408,161 @@ def ytm_playlists(refresh=False):
             unique.append(p)
     write_atomic(YTM_STATE, json.dumps({"playlists": unique[:30], "updated": int(time.time())}, indent=2) + "\n")
     return unique[:30]
+
+
+# ---------------------------------------------------------------- apple music
+
+# Searched with Apple's public catalogue search (no account), played in the
+# Apple Music web app through Apple's own player there (the add-on's
+# "applemusic" request), so a whole album or the artist's top songs queue up.
+AM = "https://music.apple.com"
+AM_CLASS = "chrome-music.apple.com__-Default"
+AM_SAID = re.compile(r"\b(?:on|from|in|with|using)\s+(?:apple music|apple|i ?tunes)\b|\bapple music\b", re.I)
+
+
+def am_country():
+    """The catalogue to search: the storefront of your region (en_GB: gb)."""
+    for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        m = re.match(r"^[a-z]{2,3}_([A-Z]{2})", os.environ.get(var, ""))
+        if m:
+            return m.group(1).lower()
+    return "us"
+
+
+def am_lookup(params):
+    import urllib.parse
+    import urllib.request
+    query = urllib.parse.urlencode({**params, "country": am_country()})
+    endpoint = "lookup" if "id" in params else "search"
+    request = urllib.request.Request(f"https://itunes.apple.com/{endpoint}?{query}", headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read(2_000_000)).get("results", [])
+
+
+def am_art(url):
+    return re.sub(r"/\d+x\d+bb\.", "/300x300bb.", url) if str(url).startswith("https://") else ""
+
+
+def am_search(query):
+    """Songs, albums and artists for a query, best first, as items like
+    YouTube Music's: {kind, title, subtitle, id, album, thumb}."""
+    query = query[:200]
+    items = []
+    try:
+        songs = am_lookup({"term": query, "media": "music", "entity": "song", "limit": 12})
+        albums = am_lookup({"term": query, "media": "music", "entity": "album", "limit": 6})
+        artists = am_lookup({"term": query, "media": "music", "entity": "musicArtist", "limit": 3})
+    except (OSError, ValueError):
+        return items
+    for a in artists:
+        if a.get("artistId"):
+            items.append({"kind": "artist", "title": clean_text(a.get("artistName", ""), 100),
+                          "subtitle": clean_text(a.get("primaryGenreName", ""), 60), "id": str(a["artistId"]), "thumb": ""})
+    for a in albums:
+        if a.get("collectionId"):
+            items.append({"kind": "album", "title": clean_text(a.get("collectionName", ""), 100),
+                          "subtitle": clean_text(a.get("artistName", ""), 100), "id": str(a["collectionId"]),
+                          "thumb": am_art(a.get("artworkUrl100", ""))})
+    for t in songs:
+        if t.get("trackId") and t.get("isStreamable", True):
+            items.append({"kind": "song", "title": clean_text(t.get("trackName", ""), 100),
+                          "subtitle": clean_text(f"{t.get('artistName', '')} • {t.get('collectionName', '')}", 120),
+                          "id": str(t["trackId"]), "album": str(t.get("collectionId", "")),
+                          "thumb": am_art(t.get("artworkUrl100", ""))})
+    # Apple's own order within each kind; an artist first when the words are
+    # just their name; live, remixed and karaoke takes last unless asked for.
+    said = song_key(query)
+    extra = re.compile(r"\b(?:live|remix|karaoke|cover|instrumental|acoustic|sped up|slowed)\b", re.I)
+    def rank(item):
+        if item["kind"] == "artist":
+            return 0 if song_key(item["title"]) == said else 3
+        unwanted = bool(extra.search(item["title"])) and not extra.search(query)
+        words = set(said.split())
+        by = set(song_key(item["subtitle"].split(" • ")[0]).split())
+        named = set(song_key(item["title"]).split()) <= words and (song_key(item["title"]) == said or bool(by & words))
+        if item["kind"] == "album":     # a single is a song: the song comes first
+            single = bool(re.search(r" - (?:Single|EP)$", item["title"]))
+            return (0.5 if named and not single else 2) + unwanted * 2
+        return (1 if named else 1.5) + unwanted * 2
+    items.sort(key=rank)
+    return items[:30]
+
+
+def am_bridge(op, timeout=8):
+    return beatport_bridge({"type": "applemusic", "op": op}, timeout=timeout)
+
+
+def am_now():
+    """What the Apple Music app is playing, from its player: item, time,
+    signed in. None when the app or add-on isn't there."""
+    reply = am_bridge({"action": "now"}, timeout=3)
+    return reply if reply and reply.get("ok") else None
+
+
+def am_play(item):
+    """Play a search result in the Apple Music app without moving you there:
+    a song plays within its album, so the album carries on after it."""
+    kind = item.get("kind")
+    ident = str(item.get("id", ""))
+    if not re.fullmatch(r"\d{1,15}", ident) or kind not in {"song", "album", "artist"}:
+        sys.exit("Bad Apple Music item.")
+    if kind == "artist":
+        tops = [t for t in am_lookup({"id": ident, "entity": "song", "limit": 25, "sort": "popular"})
+                if t.get("wrapperType") == "track" and t.get("trackId")]
+        op = {"action": "queue", "kind": "songs", "ids": [str(t["trackId"]) for t in tops]}
+        if not op["ids"]:
+            sys.exit("No songs for that artist.")
+    elif kind == "song" and re.fullmatch(r"\d{1,15}", str(item.get("album", ""))):
+        op = {"action": "queue", "kind": "album", "id": item["album"], "start": ident}
+    else:
+        op = {"action": "queue", "kind": kind, "id": ident}
+    state = load_state()
+    state["musicLast"] = {"service": "applemusic", "item": item}
+    save_state(state)
+    reply = None
+    for attempt in range(40):
+        reply = am_bridge(op, timeout=12)
+        if reply is None and attempt == 0 and not Path(BEATPORT_SOCK).exists():
+            run("omarchy-osd", "-i", "󰀦", "-d", "4000",
+                "-m", "Baseline's browser add-on isn't running: reload it in chrome://extensions")
+            sys.exit("The add-on isn't answering.")
+        if reply and reply.get("ok"):
+            break
+        if reply and reply.get("error") == "signed out":
+            run("omarchy-osd", "-i", "󰀦", "-d", "4000", "-m", "Sign in to Apple Music first")
+            sys.exit("Apple Music is signed out.")
+        if attempt == 0 and (not reply or reply.get("error") == "no Apple Music tab"):
+            # No Apple Music window yet: open the app (it lands on workspace 6).
+            subprocess.Popen(["omarchy-launch-webapp", AM + "/"], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+        time.sleep(0.5)
+    else:
+        sys.exit("Apple Music didn't play it.")
+    label = item.get("title", "") + (f" ({kind})" if kind in {"artist", "album"} else "")
+    run("omarchy-osd", "-i", "media-play", "-m", f"Playing {label[:60]}")
+    print(f"Playing {label}")
+
+
+def am_say(words):
+    """Play the best Apple Music match for something said or typed."""
+    said = AM_SAID.sub(" ", words)
+    said = re.sub(r"^\s*(?:please\s+)?(?:play|put on|start playing|listen to)\s+", "", said, flags=re.I)
+    kind = None
+    m = re.search(r"\b(?:the\s+)?(album|artist|song|track)\b\s*$", said, re.I) or \
+        re.match(r"^\s*(?:the\s+)?(album|artist|song|track)\s+", said, re.I)
+    if m:
+        kind = {"track": "song"}.get(m.group(1).lower(), m.group(1).lower())
+        said = said[:m.start()] + " " + said[m.end():]
+    query = " ".join(re.sub(r"^(?:some|the|my)\s+", "", said.strip(), flags=re.I).split())
+    if not query:
+        sys.exit("Say what to play.")
+    items = am_search(query)
+    if kind:
+        items = [i for i in items if i["kind"] == kind] or items
+    if not items:
+        run("omarchy-osd", "-i", "󰀦", "-m", "Nothing on Apple Music by that name")
+        sys.exit("Nothing found.")
+    am_play(items[0])
 
 
 # ---------------------------------------------------------------- plugin copies
@@ -4469,13 +4848,17 @@ def main(argv):
                 sonos_use(settings, args[1])
             elif action == "off":
                 sonos_set_target(settings, False)
+                if "--quiet" not in args:
+                    where_toast()
             elif action == "volume" and len(args) >= 2:
                 sonos_volume(settings, args[1], osd="--osd" in args)
             elif action in {"play", "pause", "toggle", "next", "previous"}:
                 sonos_transport(settings, action)
+            elif action == "send" and len(args) <= 2:
+                sonos_send(settings, args[1] if len(args) == 2 else "")
             else:
                 sys.exit("Usage: afterlight sonos [state|rooms|use <room id>|off|volume <n|+n|-n|raise|lower|mute-toggle>"
-                         " [--osd]|play|pause|toggle|next|previous]")
+                         " [--osd]|play|pause|toggle|next|previous|send [room id]]")
         elif command == "wifi":
             wifi_command(args)
         elif command == "bt":
@@ -4539,6 +4922,21 @@ def main(argv):
                 print(json.dumps(ytm_playlists(refresh=len(args) > 1 and args[1] == "refresh")))
             else:
                 sys.exit("Usage: afterlight ytmusic [search <words>|play <item json>|say <words>|playlists [refresh]]")
+        elif command == "toast" and 1 <= len(args) <= 3:
+            # A music message in the bar's popup: afterlight toast <title> [detail] [glyph]
+            toast(args[0], args[1] if len(args) > 1 else "", glyph=args[2] if len(args) > 2 else "󰜟")
+        elif command == "applemusic":
+            action = args[0] if args else ""
+            if action == "search" and len(args) >= 2:
+                print(json.dumps(am_search(" ".join(args[1:]))))
+            elif action == "play" and len(args) == 2:
+                am_play(json.loads(args[1]))
+            elif action == "say" and len(args) >= 2:
+                am_say(" ".join(args[1:]))
+            elif action == "now":
+                print(json.dumps(am_now()))
+            else:
+                sys.exit("Usage: afterlight applemusic [search <words>|play <item json>|say <words>|now]")
         elif command == "like":
             action = args[0] if args else "now"
             if action == "now":

@@ -16,7 +16,7 @@ SOCK = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "afterlight-beatport.
 out_lock = threading.Lock()
 pending = {}          # request id -> (event, holder) waiting for the extension's reply
 pending_lock = threading.Lock()
-KINDS = {"open", "check", "page", "tabs", "fetch", "scratch", "scratch-close", "media"}
+KINDS = {"open", "check", "page", "tabs", "fetch", "scratch", "scratch-close", "media", "applemusic"}
 
 
 def send(message):
@@ -54,7 +54,7 @@ def read_chrome():
             continue
         if message.get("type") == "playlists" and isinstance(message.get("items"), list):
             save_playlists(message["items"])
-        elif message.get("type") == "source" and message.get("site") in {"beatport", "ytmusic", "youtube"}:
+        elif message.get("type") == "source" and message.get("site") in {"beatport", "ytmusic", "applemusic", "youtube"}:
             # Which app the music is coming from, for Baseline's Player tab.
             path = STATE.parent / "source.json"
             tmp = path.with_suffix(".tmp")
