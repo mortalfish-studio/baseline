@@ -28,7 +28,16 @@ for arg in "$@"; do
     --no-omarelay) use_omarelay=0 ;;
     --no-apps) use_apps=0 ;;
     --look=*) LOOK=${arg#*=} ;;
-    -h | --help) sed -n '2,12p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help)
+      cat <<'HELP'
+Baseline installer. Options:
+  --no-apps                don't install T3 Code, Grok Bot, Superwhisper or Chrome
+  --no-omarelay            skip OmaRelay (voice control)
+  --look=<id>              start on this look
+  --dotfiles=<owner/repo>  restore your settings from your own dotfiles repo
+It takes a snapshot first: `afterlight uninstall` puts everything back.
+HELP
+      exit 0 ;;
     *) echo "Unknown option: $arg (see --help)"; exit 1 ;;
   esac
 done
