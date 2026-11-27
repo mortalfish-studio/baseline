@@ -2458,7 +2458,7 @@ Item {
                     HoverHandler { id: rowHover; cursorShape: root.dragging ? Qt.ClosedHandCursor : Qt.OpenHandCursor }
                     TapHandler {
                       id: rowTap
-                      longPressThreshold: 0.35
+                      longPressThreshold: 0.5
                       readonly property var song: ({ uid: slot.uid, title: slot.title, artist: slot.artist, thumb: slot.thumb })
                       onTapped: function(point) {
                         stage.forceActiveFocus()
@@ -2471,15 +2471,16 @@ Item {
                     DragHandler {
                       target: null
                       grabPermissions: PointerHandler.CanTakeOverFromAnything
+                      // In the set, moving always drags the song: if a hold has
+                      // just opened its petals, they close and the drag goes on.
                       onActiveChanged: {
-                        if (active) { if (root.bloomOpen) root.bloomFlick = true; else root.beginDrag("set", slot.uid, null, slot.title, slot.thumb) }
-                        else if (root.bloomFlick) root.releaseFlick()
+                        if (active) {
+                          if (root.bloomOpen) root.closeBloom()
+                          root.beginDrag("set", slot.uid, null, slot.title, slot.thumb)
+                        }
                         else if (root.dragging) root.endDrag()
                       }
-                      onCentroidChanged: if (active) {
-                        const at = row.mapToItem(root.stageItem, centroid.position.x, centroid.position.y)
-                        if (root.bloomFlick) root.aimBloom(at); else root.moveGhost(at)
-                      }
+                      onCentroidChanged: if (active) root.moveGhost(row.mapToItem(root.stageItem, centroid.position.x, centroid.position.y))
                     }
                     DropArea {
                       id: rowDrop
