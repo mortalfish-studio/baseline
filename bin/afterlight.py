@@ -4664,7 +4664,8 @@ def deck_details_wanted(deck, details=None):
     """Songs still missing a detail, not looked for in the last hour."""
     details = deck_details_read() if details is None else details
     songs, seen = [], set()
-    for song in ([deck["now"]] if deck.get("now") else []) + deck["set"] + deck["played"][-10:]:
+    asked = [r for r in deck.get("requests") or [] if r.get("service")]     # guests' requests: ready to mix in
+    for song in ([deck["now"]] if deck.get("now") else []) + asked + deck["set"] + deck["played"][-10:]:
         key = deck_song_key(song)
         d = details.get(key, {})
         unknown = not all(f in d for f in ("length", "bpm", "energy")) \
@@ -5122,6 +5123,45 @@ DECK_GUESTS_QR = STATE.parent / "deck-guests.png"
 DECK_GUESTS_PEOPLE = STATE.parent / "deck-guests.json"     # who's asked before: a name, maybe a photo
 DECK_GUESTS_PHOTOS = STATE.parent / "deck-guests"
 DECK_GUESTS_PICKS = 5          # songs a guest can send at once
+DECK_GUESTS_ASKS = STATE.parent / "deck-guests-asks.json"  # what each guest asked for (their phone shows it)
+
+
+def deck_guest_asks(gid):
+    asks = read_json(DECK_GUESTS_ASKS, {})
+    mine = asks.get(gid) if isinstance(asks, dict) else None
+    return mine if isinstance(mine, list) else []
+
+
+def deck_guest_status(deck, ask, starts):
+    """Where a guest's request is now: waiting, in the set (and about when),
+    playing, played, or not this time."""
+    rid = ask.get("rid")
+    if any(r.get("rid") == rid for r in deck.get("requests") or []):
+        return {"state": "waiting"}
+    if (deck.get("now") or {}).get("rid") == rid:
+        return {"state": "playing"}
+    for song, at in zip(deck["set"], starts):
+        if song.get("rid") == rid:
+            return {"state": "set", "at": int(time.time() + at)}
+    if any(x.get("rid") == rid for x in deck["played"]):
+        return {"state": "played"}
+    return {"state": "declined"}
+
+
+def deck_starts(deck):
+    """Seconds from now until each song in the set starts."""
+    details = deck_details_read()
+    length = lambda s: details.get(deck_song_key(s), {}).get("length") or 210
+    mark = read_json(DECK_NOW, {})
+    t = 0
+    if deck.get("now"):
+        t = max(0, (mark.get("length") or length(deck["now"])) - (mark.get("time") or 0)) \
+            if mark.get("uid") == deck["now"]["uid"] else length(deck["now"]) / 2
+    out = []
+    for song in deck["set"]:
+        out.append(t)
+        t += length(song)
+    return out
 DECK_GUESTS_PORT = 8765
 DECK_GUESTS_HOURS = 8           # the page closes itself after a night
 
@@ -5138,12 +5178,17 @@ def lan_address():
 def deck_guests_on():
     """Open the requests page: a server on the home network, at a link with a
     secret in it, and a QR code of that link for the Deck to show."""
+    was = deck_read().get("guests") or {}
     deck_guests_off()
     ip = lan_address()
     if not ip:
         sys.exit("Not on a network.")
     import secrets
-    token = secrets.token_urlsafe(9)
+    # Open again within the night (or after an update): the same link, so the
+    # QR codes guests already scanned keep working.
+    old = str(was.get("url", "")).rsplit("/", 1)[-1]
+    fresh = time.time() - (was.get("since") or 0) < DECK_GUESTS_HOURS * 3600
+    token = old if fresh and re.fullmatch(r"[A-Za-z0-9_-]{8,40}", old) else secrets.token_urlsafe(9)
     url = f"http://{ip}:{DECK_GUESTS_PORT}/{token}"
     proc = subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "guests", "serve", token], stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -5151,7 +5196,8 @@ def deck_guests_on():
         subprocess.run(["qrencode", "-o", str(DECK_GUESTS_QR), "-s", "10", "-m", "2", url], timeout=5, check=True)
     except (OSError, subprocess.SubprocessError):
         DECK_GUESTS_QR.unlink(missing_ok=True)
-    deck_update(lambda d: d.update(guests={"url": url, "pid": proc.pid, "since": int(time.time()),
+    since = int(was.get("since") or time.time()) if token == old else int(time.time())
+    deck_update(lambda d: d.update(guests={"url": url, "pid": proc.pid, "since": since,
                                            "qr": str(DECK_GUESTS_QR) if DECK_GUESTS_QR.is_file() else ""}))
     return url
 
@@ -5240,6 +5286,13 @@ def deck_guests_serve(token):
                 return self.send(404, b"", "text/plain")
             if where == "":
                 return self.send(200, page(), "text/html")
+            if where == "mine":
+                gid = str((query.get("gid") or [""])[0])
+                deck = deck_read()
+                starts = deck_starts(deck)
+                mine = [{"title": a["title"], "artist": a["artist"], "thumb": a.get("thumb", ""), "id": a["id"],
+                         **deck_guest_status(deck, a, starts)} for a in reversed(deck_guest_asks(gid))][:20]
+                return self.send(200, {"asks": mine})
             if where == "me":
                 person = deck_guest_person(str((query.get("gid") or [""])[0]))
                 return self.send(200, {"known": bool(person), "name": person.get("name", ""), "photo": bool(person.get("photo"))})
@@ -5256,7 +5309,12 @@ def deck_guests_serve(token):
                 with lock:
                     for item in songs:
                         served[item["id"]] = item
-                return self.send(200, {"songs": songs})
+                deck = deck_read()
+                mine = {a["id"] for a in deck_guest_asks(str((query.get("gid") or [""])[0]))}
+                queued = {x.get("id") for x in deck["set"] + [deck.get("now") or {}]} | {r["id"] for r in deck.get("requests") or []}
+                for item in songs:
+                    item["state"] = "asked" if item["id"] in mine else "set" if item["id"] in queued else ""
+                return self.send(200, {"songs": [{k: v for k, v in x.items()} for x in songs]})
             return self.send(404, b"", "text/plain")
 
         def body(self, most):
@@ -5287,7 +5345,17 @@ def deck_guests_serve(token):
                 if time.time() - asked.get(phone, 0) < 20:
                     return self.send(200, {"ok": False, "error": "Hang on a few seconds, then send again."})
                 asked[phone] = time.time()
-            person = deck_guest_person(str(body.get("gid", "")))
+            gid = str(body.get("gid", ""))
+            person = deck_guest_person(gid)
+            before = {a["id"]: a for a in deck_guest_asks(gid)} if person else {}
+            again = [x for x in songs if x["id"] in before]
+            songs = [x for x in songs if x["id"] not in before]
+            if not songs:
+                deck = deck_read()
+                state = deck_guest_status(deck, before[again[0]["id"]], deck_starts(deck))["state"]
+                words = {"waiting": "it's waiting for the DJ", "set": "it's in the set", "playing": "it's playing now",
+                         "played": "it's been played", "declined": "the DJ passed on it this time"}[state]
+                return self.send(200, {"ok": False, "error": f"You've asked for {again[0]['title']} already: {words}."})
             by = person.get("name") or clean_text(str(body.get("by", "")), 30)
             photo = str(DECK_GUESTS_PHOTOS / f"{body.get('gid')}.jpg") if person.get("photo") else ""
             def ask(d):
@@ -5299,20 +5367,32 @@ def deck_guests_serve(token):
                         continue
                     if mine + len(fresh) >= 8:
                         break
-                    fresh.append({**song, "rid": os.urandom(4).hex(), "by": by, "photo": photo, "phone": phone,
-                                  "at": int(time.time())})
+                    fresh.append({**song, "service": "applemusic", "rid": os.urandom(4).hex(), "by": by, "photo": photo, "phone": phone,
+                                  "gid": gid if person else "", "at": int(time.time())})
                 d["requests"] = (waiting + fresh)[-40:]
                 return [r["rid"] for r in fresh], bool(d.get("requestsAuto"))
             taken, auto = deck_update(ask)
-            if auto and taken:
-                if any([deck_request_take(rid, "mix") for rid in taken]):
-                    deck_after_edit()
+            if person and taken:
+                with lock:
+                    asks = read_json(DECK_GUESTS_ASKS, {})
+                    asks = asks if isinstance(asks, dict) else {}
+                    waiting = {r["rid"]: r for r in deck_read().get("requests") or []}
+                    mine = asks.pop(gid, []) + [{k: waiting[rid][k] for k in ("rid", "id", "title", "artist", "thumb")}
+                                                 | {"at": int(time.time())} for rid in taken if rid in waiting]
+                    asks[gid] = mine[-40:]
+                    write_atomic(DECK_GUESTS_ASKS, json.dumps(dict(list(asks.items())[-300:])))
+            if taken:
+                # Its tempo, key and length now, so it's ready to mix in; with
+                # Mix in by itself, it goes in once they're known.
+                subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "request", "settle", *(taken if auto else [])],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
             if not taken:
-                return self.send(200, {"ok": False, "error": "Already asked for, or you've got 8 waiting."})
+                return self.send(200, {"ok": False, "error": "Someone's asked for that already (or you've 8 waiting)."})
             first = songs[0]
             toast(f"Request: {first['title']}" + (f" +{len(taken) - 1}" if len(taken) > 1 else ""),
                   first["artist"] + (f" · from {by}" if by else ""), art=photo, glyph="󰎈")
-            return self.send(200, {"ok": True, "sent": len(taken)})
+            return self.send(200, {"ok": True, "sent": len(taken), "again": [x["title"] for x in again]})
 
         def hello(self):
             """A guest says who they are (a name, maybe a selfie); they're
@@ -5376,6 +5456,7 @@ def deck_request_take(rid, where="end"):
         song = deck_item("applemusic", {"id": found["id"], "title": found["title"], "artist": found["artist"],
                                         "thumb": found.get("thumb", ""),
                                         "from": f"Request · {found['by']}" if found.get("by") else "Request"})
+        song.update({k: found[k] for k in ("rid", "gid", "by", "photo") if found.get(k)})
         if where == "next":
             d["set"].insert(0, song)
         elif where == "mix":
@@ -5545,10 +5626,27 @@ def deck_command(settings, args):
             deck_guests_off()
     elif action == "guests" and args[1:] == ["forget"]:
         DECK_GUESTS_PEOPLE.unlink(missing_ok=True)
+        DECK_GUESTS_ASKS.unlink(missing_ok=True)
         shutil.rmtree(DECK_GUESTS_PHOTOS, ignore_errors=True)
         print("forgot every guest and their photos")
     elif action == "guests" and len(args) == 3 and args[1] == "serve" and re.fullmatch(r"[A-Za-z0-9_-]{8,40}", args[2]):
         deck_guests_serve(args[2])
+    elif action == "request" and len(args) >= 2 and args[1] == "settle":
+        # A guest's request just came in: look up its details, then (Mix in by
+        # itself) put it where it fits.
+        with open(STATE.parent / "deck-settle.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            rids = set(args[2:])
+            for _ in range(20):                      # another lookup may be running: wait for it (2 minutes at most)
+                deck_details_fill()
+                details = deck_details_read()
+                waiting = [r for r in deck_read().get("requests") or [] if r.get("rid") in rids]
+                if not any(not details.get(deck_song_key(r), {}).get("bpm") and not details.get(deck_song_key(r), {}).get("web")
+                           for r in waiting):
+                    break
+                time.sleep(6)
+        if any([deck_request_take(rid, "mix") for rid in args[2:] if re.fullmatch(r"[0-9a-f]{8}", rid)]):
+            deck_after_edit()
     elif action == "request" and len(args) >= 3 and args[1] in {"take", "drop"}:
         if args[1] == "take":
             if deck_request_take(args[2], "next" if "--next" in args else "mix" if "--mix" in args else "end"):

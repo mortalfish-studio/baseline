@@ -54,6 +54,17 @@
   .hello .pic { display: flex; flex-direction: column; align-items: center; gap: 12px; margin: 0 0 22px; }
   .hello input[type=text] { width: 100%; text-align: center; font-size: 18px; margin-bottom: 14px; }
   .hello .go { width: 100%; padding: 14px; }
+  .mine { margin: 18px 0 0; }
+  .mine h3 { font-size: 11px; letter-spacing: .3em; color: var(--teal); margin: 0 0 6px; font-weight: 400; }
+  .mine .row img { width: 40px; height: 40px; }
+  .chip { flex: none; font-size: 11px; letter-spacing: .08em; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--line); opacity: .85; white-space: nowrap; }
+  .chip.playing { border-color: var(--pink); color: var(--pink); opacity: 1; }
+  .chip.set { border-color: var(--teal); color: var(--teal); }
+  .chip.played, .chip.declined { opacity: .5; }
+  .row button.done { color: var(--ink); border-color: var(--line); opacity: .6; }
+  .party { margin: 0 0 16px; padding: 14px; border-radius: 10px; text-align: center; font-weight: 700; color: var(--bg);
+           background: linear-gradient(90deg, var(--pink), var(--teal)); animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { filter: brightness(1.15); } }
   .link { background: none; border: 0; color: var(--teal); text-transform: none; letter-spacing: 0; padding: 6px; font-size: 13px; text-decoration: underline; }
 </style>
 </head>
@@ -81,6 +92,7 @@
       </div>
       <button class="me" id="me" title="Change your name or photo"><span id="meName"></span><span class="avatar" id="meFace"></span></button>
     </div>
+    <div class="party" id="party" hidden></div>
     <div class="now" id="now" hidden>
       <img id="nowArt" alt="">
       <div style="min-width:0">
@@ -90,6 +102,10 @@
       </div>
     </div>
     <ul class="next" id="next"></ul>
+    <section class="mine" id="mine" hidden>
+      <h3>YOUR REQUESTS</h3>
+      <div id="mineList"></div>
+    </section>
     <form class="find" id="find">
       <input id="q" type="search" placeholder="Search Apple Music" autocomplete="off" maxlength="100" enterkeyhint="search">
       <button type="button" class="clear" id="clear" aria-label="Clear" hidden>✕</button>
@@ -127,7 +143,7 @@
   function showMain() {
     $("hello").hidden = true; $("main").hidden = false;
     $("meName").textContent = me.name; face($("meFace"), me.photo, me.name);
-    tray();
+    tray(); mine();
   }
   function showHello(again) {
     $("main").hidden = true; $("tray").hidden = true; $("hello").hidden = false;
@@ -187,7 +203,34 @@
       for (const s of (r.next || [])) list.append(el("li", { textContent: s.title + " · " + s.artist }));
     } catch (e) {}
   }
+  // ---- what you've asked for, and what became of it
+  let asked = {};
+  const CHIP = { waiting: "Waiting for the DJ", playing: "Playing now!", played: "Played", declined: "Not this time" };
+  async function mine() {
+    if (!me.gid) return;
+    let r = {};
+    try { r = await (await fetch(base + "/mine?gid=" + encodeURIComponent(me.gid))).json(); } catch (e) { return; }
+    const list = $("mineList"); list.replaceChildren();
+    asked = {};
+    let playing = null;
+    for (const a of (r.asks || [])) {
+      asked[a.id] = a.state;
+      if (a.state === "playing") playing = a;
+      const row = el("div", { className: "row" });
+      const img = el("img", { alt: "" }); art(img, a.thumb);
+      const text = el("div", { className: "text" });
+      text.append(el("div", { className: "title", textContent: a.title }), el("div", { className: "sub", textContent: a.artist }));
+      const when = a.state === "set" ? "In the set · about " + new Date(a.at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : CHIP[a.state];
+      row.append(img, text, el("span", { className: "chip " + a.state, textContent: when }));
+      list.append(row);
+    }
+    $("mine").hidden = !(r.asks || []).length;
+    $("party").hidden = !playing;
+    if (playing) $("party").textContent = "Your song is playing: " + playing.title + "!";
+    tray();
+  }
   now(); setInterval(now, 15000);
+  setInterval(mine, 10000);
 
   // ---- picks: add a few, keep searching, send them together
   let picks = [];
@@ -196,7 +239,9 @@
     const covers = $("trayCovers"); covers.replaceChildren();
     for (const p of picks) { const i = el("img", { alt: "" }); art(i, p.thumb); covers.append(i); }
     $("send").textContent = picks.length > 1 ? "Send " + picks.length : "Send";
-    for (const b of document.querySelectorAll(".row button")) {
+    for (const b of document.querySelectorAll("#results .row button")) {
+      const state = asked[b.dataset.id] || b.dataset.state;
+      if (state) { b.disabled = true; b.classList.add("done"); b.textContent = state === "set" && !asked[b.dataset.id] ? "In the set" : "Asked"; continue; }
       const on = picks.some((p) => p.id === b.dataset.id);
       b.classList.toggle("on", on); b.textContent = on ? "Added" : "Add";
     }
@@ -218,8 +263,9 @@
     } catch (e) {}
     $("send").disabled = false;
     if (!a.ok) return say(a.error || "Couldn't send. Try again in a moment.");
-    say(a.sent > 1 ? "Sent " + a.sent + "! The DJ will see them." : "Sent! The DJ will see it.");
-    picks = []; clearSearch(); tray();
+    say((a.sent > 1 ? "Sent " + a.sent + "! The DJ will see them." : "Sent! The DJ will see it.")
+        + ((a.again || []).length ? " (You'd already asked for " + a.again.join(", ") + ".)" : ""));
+    picks = []; clearSearch(); tray(); mine();
   });
 
   // ---- search
@@ -237,7 +283,7 @@
     const box = $("results");
     box.replaceChildren(el("p", { className: "hint", textContent: "Looking…" }));
     let r = {};
-    try { r = await (await fetch(base + "/search?q=" + encodeURIComponent(q))).json(); } catch (err) {}
+    try { r = await (await fetch(base + "/search?q=" + encodeURIComponent(q) + "&gid=" + encodeURIComponent(me.gid || ""))).json(); } catch (err) {}
     box.replaceChildren();
     if (!(r.songs || []).length) { box.append(el("p", { className: "hint", textContent: r.error || "Nothing found. Try the artist and title." })); return; }
     for (const s of r.songs) {
@@ -245,7 +291,7 @@
       const img = el("img", { alt: "" }); art(img, s.thumb);
       const text = el("div", { className: "text" });
       text.append(el("div", { className: "title", textContent: s.title }), el("div", { className: "sub", textContent: s.artist }));
-      const b = el("button", { textContent: "Add" }); b.dataset.id = s.id;
+      const b = el("button", { textContent: "Add" }); b.dataset.id = s.id; b.dataset.state = s.state || "";
       b.addEventListener("click", () => toggle(s));
       row.append(img, text, b); box.append(row);
     }

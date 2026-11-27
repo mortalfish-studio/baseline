@@ -935,18 +935,28 @@ Item {
                   }
                   HeadLink { glyph: "󰆴"; tip: strings.t("deck.requestsClear"); onTapped: root.run(["deck", "requests", "clear"]) }
                 }
-                Repeater {
-                  model: root.requests.slice(-5).reverse()
+                // Newest first; after four it scrolls, so the crate keeps its room.
+                ListView {
+                  id: askList
+                  Layout.fillWidth: true
+                  Layout.preferredHeight: Math.min(count, 4) * 64 + Math.max(0, Math.min(count, 4) - 1) * 4
+                  clip: true
+                  spacing: 4
+                  boundsBehavior: Flickable.StopAtBounds
+                  model: root.requests.slice().reverse()
                   delegate: RequestRow {
                     required property var modelData
-                    Layout.fillWidth: true
+                    width: askList.width
+                    height: 64
+                    coverSize: 52
                     req: modelData
                   }
+                  add: Transition { NumberAnimation { properties: "opacity"; from: 0; to: 1; duration: Style.duration(200) } }
                 }
                 Label {
-                  visible: root.requests.length > 5
-                  text: strings.t("deck.requestsMore").arg(root.requests.length - 5)
-                  font.pixelSize: Style.font.caption; opacity: 0.5
+                  visible: root.requests.length > 4
+                  text: strings.t("deck.requestsScroll")
+                  font.pixelSize: Style.font.caption; opacity: 0.45
                 }
               }
             }
@@ -2540,7 +2550,7 @@ Item {
               delegate: RequestRow {
                 required property var modelData
                 Layout.fillWidth: true
-                coverSize: 44
+                coverSize: 56
                 req: modelData
               }
             }
@@ -2585,6 +2595,28 @@ Item {
               }
             }
             Label { text: (root.deck.playing ? strings.t("deck.nowPlaying") : strings.t("deck.paused")).toUpperCase(); font.pixelSize: Style.font.subtitle; font.letterSpacing: 6; color: root.teal }
+            // A guest's request playing: a shout-out, with their face.
+            RowLayout {
+              visible: !!root.now && (root.now.by || "") !== ""
+              spacing: 14
+              Rectangle {
+                width: 64; height: 64; radius: 32
+                color: root.ground
+                border.width: 3; border.color: root.teal
+                Image {
+                  id: shoutFace
+                  anchors.fill: parent; anchors.margins: 3
+                  source: root.now && (root.now.photo || "") !== "" ? "file://" + root.now.photo : ""
+                  fillMode: Image.PreserveAspectCrop
+                  asynchronous: true
+                  layer.enabled: true
+                  layer.effect: MultiEffect { maskEnabled: true; maskSource: shoutMask }
+                }
+                Rectangle { id: shoutMask; anchors.fill: shoutFace; radius: width / 2; visible: false; layer.enabled: true }
+                Label { anchors.centerIn: parent; visible: shoutFace.status !== Image.Ready; text: root.now ? (root.now.by || "?").charAt(0).toUpperCase() : ""; font.pixelSize: 26; font.bold: true; color: root.teal }
+              }
+              Label { text: root.now ? strings.t("deck.requestedBy").arg(root.now.by || "") : ""; font.pixelSize: Math.max(18, Math.min(28, stageView.width / 50)); color: root.teal }
+            }
             Label {
               Layout.fillWidth: true
               text: root.now ? root.titleParts(root.now.title).main : ""
@@ -3009,12 +3041,12 @@ Item {
     property int coverSize: 36
     spacing: 10
     Item {
-      implicitWidth: rr.coverSize + 6; implicitHeight: rr.coverSize + 6
+      implicitWidth: rr.coverSize + 10; implicitHeight: rr.coverSize + 10
       Cover { url: rr.req.thumb || ""; size: rr.coverSize }
       Rectangle {
         visible: (rr.req.photo || "") !== "" || (rr.req.by || "") !== ""
         anchors.right: parent.right; anchors.bottom: parent.bottom
-        width: rr.coverSize * 0.55; height: width; radius: width / 2
+        width: rr.coverSize * 0.66; height: width; radius: width / 2
         color: root.ground
         border.width: 2; border.color: root.teal
         clip: true
