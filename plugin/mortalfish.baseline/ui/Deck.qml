@@ -630,6 +630,7 @@ Item {
   property bool wall: false
   property bool filterOpen: false
   property bool shapeOpen: false
+  property bool autodjOpen: false
   readonly property var shapes: [
     { key: "bumps", glyph: "◆", label: strings.t("deck.shapeBumps") },
     { key: "shuffle", glyph: "󰒝", label: strings.t("deck.shuffle") },
@@ -674,6 +675,7 @@ Item {
   function view(name) {
     stageOn = name === "stage"
     guestsOpen = name === "requests"
+    autodjOpen = name === "autodj"
     qrBig = false
   }
   property bool qrBig: false
@@ -1615,14 +1617,14 @@ Item {
                     text: strings.t("deck.shape")
                     tone: root.shapeOpen ? root.amber : root.teal
                     enabled: (root.deck.set || []).length > 1 && !root.locked
-                    onClicked: { root.shapeOpen = !root.shapeOpen; root.saving = false; root.filterOpen = false }
+                    onClicked: { root.shapeOpen = !root.shapeOpen; root.autodjOpen = false; root.saving = false; root.filterOpen = false }
                   }
                   // Auto-DJ: with three songs left, Grok adds more that carry the night on.
                   ActionButton {
                     icon: "∞"
                     text: strings.t("deck.autodj")
                     tone: root.deck.autodj ? root.amber : root.teal
-                    onClicked: root.run(["deck", "autodj", root.deck.autodj ? "off" : "on"])
+                    onClicked: { root.autodjOpen = !root.autodjOpen; root.shapeOpen = false; root.saving = false; root.filterOpen = false }
                   }
                   // Sleep: off, 15, 30, 60 minutes, the end of this song.
                   ActionButton {
@@ -1762,72 +1764,115 @@ Item {
                 }
               }
             }
-            // Auto-DJ, somewhere new: a transition from where the night is now
-            // to a sound you name (or a preset), a step at a time.
-            Flow {
+            // Auto-DJ, all in one place: on or off, the way it takes the night,
+            // somewhere new to head for, and whether it tidies its songs.
+            Rectangle {
               Layout.fillWidth: true
-              visible: root.shapeOpen && !root.locked
-              spacing: 8
-              Label { text: "∞  " + strings.t("deck.towardLabel"); font.pixelSize: Style.font.caption; color: root.teal; height: 30; verticalAlignment: Text.AlignVCenter }
-              Repeater {
-                model: [
-                  { label: strings.t("deck.towardWindDown"), brief: "a gentle wind-down to end the night: slower, warmer, softer" },
-                  { label: strings.t("deck.towardPeak"), brief: "peak time: the biggest, highest-energy floor-fillers" },
-                  { label: strings.t("deck.towardThrowbacks"), brief: "throwbacks: 80s and 90s dance and pop classics everyone knows" },
-                  { label: strings.t("deck.towardHouse"), brief: "deep house: warm, groovy, around 120 BPM" },
-                  { label: strings.t("deck.towardLatin"), brief: "Latin heat: reggaeton, salsa and Latin pop" },
-                  { label: strings.t("deck.towardChill"), brief: "chill-out: downtempo, mellow and easy" }
-                ]
-                delegate: Rectangle {
-                  required property var modelData
-                  implicitWidth: towardChip.implicitWidth + 18
-                  implicitHeight: 30
-                  radius: 15
-                  color: towardHover.hovered ? Util.alpha(root.teal, 0.18) : Util.alpha(root.teal, 0.06)
-                  border.width: 1
-                  border.color: Util.alpha(root.teal, towardHover.hovered ? 0.9 : 0.45)
-                  Label { id: towardChip; anchors.centerIn: parent; text: modelData.label; font.pixelSize: Style.font.caption; color: root.ink }
-                  HoverHandler { id: towardHover; cursorShape: Qt.PointingHandCursor }
-                  TapHandler { onTapped: { root.runLong(["deck", "autodj", "toward", modelData.brief]); root.shapeOpen = false } }
+              visible: root.autodjOpen
+              implicitHeight: djCol.implicitHeight + 24
+              radius: Style.cornerRadius > 0 ? 8 : 0
+              color: Util.alpha(root.amber, 0.04)
+              border.width: 1; border.color: Util.alpha(root.amber, 0.45)
+              ColumnLayout {
+                id: djCol
+                x: 14; y: 12
+                width: parent.width - 28
+                spacing: 10
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: 8
+                  Label { text: "∞  " + strings.t("deck.autodj").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.amber }
+                  DjChip { text: strings.t("deck.autodjOn"); on: !!root.deck.autodj; onTapped: root.run(["deck", "autodj", "on"]) }
+                  DjChip { text: strings.t("deck.autodjOff"); on: !root.deck.autodj; onTapped: root.run(["deck", "autodj", "off"]) }
+                  Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: strings.t("deck.autodjAbout"); font.pixelSize: Style.font.caption; opacity: 0.55 }
+                  RoundButton { glyph: "󰅖"; onClicked: root.autodjOpen = false }
                 }
-              }
-              Rectangle {
-                width: 260; height: 30
-                radius: 15
-                color: Util.alpha(root.ink, 0.04)
-                border.width: 1; border.color: towardInput.activeFocus ? root.teal : Util.alpha(root.teal, 0.45)
-                TextInput {
-                  id: towardInput
-                  anchors.left: parent.left; anchors.right: towardGo.left
-                  anchors.leftMargin: 12; anchors.rightMargin: 6
-                  anchors.verticalCenter: parent.verticalCenter
-                  color: root.ink; clip: true
-                  font.family: Style.font.family; font.pixelSize: Style.font.caption
-                  maximumLength: 120
-                  onAccepted: if (text.trim() !== "") { root.runLong(["deck", "autodj", "toward", text.trim()]); text = ""; root.shapeOpen = false }
-                  Label { visible: towardInput.text === ""; text: strings.t("deck.towardHint"); font.pixelSize: Style.font.caption; opacity: 0.4 }
+                Flow {
+                  Layout.fillWidth: true
+                  spacing: 8
+                  Label { text: strings.t("deck.autodjDirection"); font.pixelSize: Style.font.caption; color: root.teal; height: 30; verticalAlignment: Text.AlignVCenter; width: 120 }
+                  Repeater {
+                    model: [
+                      { key: "none", label: strings.t("deck.autodjFollow"), glyph: "∞" },
+                      { key: "arc", label: strings.t("deck.autodjDirArc"), glyph: "󱗿" },
+                      { key: "energy", label: strings.t("deck.autodjDirEnergy"), glyph: "󱐋" },
+                      { key: "tempo", label: strings.t("deck.autodjDirTempo"), glyph: "󰓅" },
+                      { key: "harmonic", label: strings.t("deck.autodjDirHarmonic"), glyph: "󰽰" },
+                      { key: "smooth", label: strings.t("deck.autodjDirSmooth"), glyph: "󰾆" }
+                    ]
+                    delegate: DjChip {
+                      required property var modelData
+                      glyph: modelData.glyph; text: modelData.label
+                      on: (root.deck.direction || "none") === modelData.key
+                      onTapped: root.run(["deck", "autodj", "direction", modelData.key])
+                    }
+                  }
                 }
+                Flow {
+                  Layout.fillWidth: true
+                  visible: !root.locked
+                  spacing: 8
+                  Label { text: strings.t("deck.towardLabel"); font.pixelSize: Style.font.caption; color: root.teal; height: 30; verticalAlignment: Text.AlignVCenter; width: 120 }
+                  Repeater {
+                    model: [
+                      { label: strings.t("deck.towardWindDown"), brief: "a gentle wind-down to end the night: slower, warmer, softer" },
+                      { label: strings.t("deck.towardPeak"), brief: "peak time: the biggest, highest-energy floor-fillers" },
+                      { label: strings.t("deck.towardThrowbacks"), brief: "throwbacks: 80s and 90s dance and pop classics everyone knows" },
+                      { label: strings.t("deck.towardHouse"), brief: "deep house: warm, groovy, around 120 BPM" },
+                      { label: strings.t("deck.towardLatin"), brief: "Latin heat: reggaeton, salsa and Latin pop" },
+                      { label: strings.t("deck.towardChill"), brief: "chill-out: downtempo, mellow and easy" }
+                    ]
+                    delegate: Rectangle {
+                      required property var modelData
+                      implicitWidth: towardChip.implicitWidth + 18
+                      implicitHeight: 30
+                      radius: 15
+                      color: towardHover.hovered ? Util.alpha(root.teal, 0.18) : Util.alpha(root.teal, 0.06)
+                      border.width: 1
+                      border.color: Util.alpha(root.teal, towardHover.hovered ? 0.9 : 0.45)
+                      Label { id: towardChip; anchors.centerIn: parent; text: modelData.label; font.pixelSize: Style.font.caption; color: root.ink }
+                      HoverHandler { id: towardHover; cursorShape: Qt.PointingHandCursor }
+                      TapHandler { onTapped: { root.runLong(["deck", "autodj", "toward", modelData.brief]); root.autodjOpen = false } }
+                    }
+                  }
+                  Rectangle {
+                    width: 260; height: 30
+                    radius: 15
+                    color: Util.alpha(root.ink, 0.04)
+                    border.width: 1; border.color: towardInput.activeFocus ? root.teal : Util.alpha(root.teal, 0.45)
+                    TextInput {
+                      id: towardInput
+                      anchors.left: parent.left; anchors.right: towardGo.left
+                      anchors.leftMargin: 12; anchors.rightMargin: 6
+                      anchors.verticalCenter: parent.verticalCenter
+                      color: root.ink; clip: true
+                      font.family: Style.font.family; font.pixelSize: Style.font.caption
+                      maximumLength: 120
+                      onAccepted: if (text.trim() !== "") { root.runLong(["deck", "autodj", "toward", text.trim()]); text = ""; root.autodjOpen = false }
+                      Label { visible: towardInput.text === ""; text: strings.t("deck.towardHint"); font.pixelSize: Style.font.caption; opacity: 0.4 }
+                    }
+                    HeadLink {
+                      id: towardGo
+                      anchors.right: parent.right; anchors.rightMargin: 8
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: strings.t("deck.towardGo")
+                      onTapped: towardInput.accepted()
+                    }
+                  }
+                  HeadLink {
+                    visible: !!root.deck.toward
+                    height: 30
+                    glyph: "󰅖"; text: strings.t("deck.towardOff")
+                    onTapped: root.run(["deck", "autodj", "toward", "off"])
+                  }
+                }
+                // Auto-DJ tidies its own songs once their real tempos are in (on unless you turn it off).
                 HeadLink {
-                  id: towardGo
-                  anchors.right: parent.right; anchors.rightMargin: 8
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: strings.t("deck.towardGo")
-                  onTapped: towardInput.accepted()
+                  glyph: root.deck.autoTidy !== false ? "󰄲" : "󰄱"
+                  text: strings.t("deck.autoTidy")
+                  tip: strings.t("deck.autoTidyTip")
+                  onTapped: root.run(["deck", "autodj", "tidy", root.deck.autoTidy !== false ? "off" : "on"])
                 }
-              }
-              HeadLink {
-                visible: !!root.deck.toward
-                height: 30
-                glyph: "󰅖"; text: strings.t("deck.towardOff")
-                onTapped: root.run(["deck", "autodj", "toward", "off"])
-              }
-              // Auto-DJ tidies its own songs once their real tempos are in (on unless you turn it off).
-              HeadLink {
-                height: 30
-                glyph: root.deck.autoTidy !== false ? "󰄲" : "󰄱"
-                text: strings.t("deck.autoTidy")
-                tip: strings.t("deck.autoTidyTip")
-                onTapped: root.run(["deck", "autodj", "tidy", root.deck.autoTidy !== false ? "off" : "on"])
               }
             }
             // Naming a set to save (what, and where), or finding a song in this one.
@@ -4206,6 +4251,30 @@ Item {
 
   // A cover that changes by dissolving: the new one loads out of sight, then
   // fades in over the old (settling from a touch larger), never a blank.
+  // A choice in the Auto-DJ panel: lit when it's the one in use.
+  component DjChip: Rectangle {
+    id: chip
+    property string text: ""
+    property string glyph: ""
+    property bool on: false
+    signal tapped()
+    implicitWidth: chipLine.implicitWidth + 20
+    implicitHeight: 30
+    radius: 15
+    color: on ? Util.alpha(root.amber, 0.22) : chipMouse.hovered ? Util.alpha(root.teal, 0.14) : Util.alpha(root.teal, 0.05)
+    border.width: 1
+    border.color: on ? root.amber : Util.alpha(root.teal, chipMouse.hovered ? 0.9 : 0.4)
+    Row {
+      id: chipLine
+      anchors.centerIn: parent
+      spacing: 6
+      Label { visible: chip.glyph !== ""; text: chip.glyph; font.family: "Iosevka Nerd Font Propo"; color: chip.on ? root.amber : root.teal }
+      Label { text: chip.text; font.pixelSize: Style.font.caption; color: root.ink; font.bold: chip.on }
+    }
+    HoverHandler { id: chipMouse; cursorShape: Qt.PointingHandCursor }
+    TapHandler { onTapped: chip.tapped() }
+  }
+
   component CrossCover: Item {
     id: cross
     property string url: ""

@@ -578,7 +578,7 @@
   "deck.yourSets": "Your sets",
   "deck.yourPlaylists": "Your playlists",
   "deck.shape": "Shape",
-  "deck.shapeHint": "Shape the set (pinned songs stay; Auto-DJ carries on that way):",
+  "deck.shapeHint": "Shape the set (pinned songs stay):",
   "deck.shapeArc": "Party arc",
   "deck.shapeHarmonic": "Harmonic mix",
   "deck.shapeSmooth": "Smooth tempo",
@@ -702,5 +702,16 @@
   "deck.towardLatin": "Latin heat",
   "deck.towardChill": "Chill out",
   "deck.autoTidy": "Auto-DJ tidies its songs once their tempos are in",
-  "deck.autoTidyTip": "When Auto-DJ adds songs, it waits for their real tempo and key, then fixes the bumps among them (yours stay put)"
+  "deck.autoTidyTip": "When Auto-DJ adds songs, it waits for their real tempo and key, then fixes the bumps among them (yours stay put)",
+  "deck.autodjOn": "On",
+  "deck.autodjOff": "Off",
+  "deck.autodjDirection": "Direction",
+  "deck.autodjFollow": "Follow the night",
+  "deck.autodjDirArc": "Arc",
+  "deck.autodjDirEnergy": "Build energy",
+  "deck.autodjDirTempo": "Raise tempo",
+  "deck.autodjDirHarmonic": "In key",
+  "deck.autodjDirSmooth": "Steady tempo",
+  "deck.autodjAbout": "With three songs left, Auto-DJ adds more that carry on from the last ones (requests, 👍 and skips count).",
+  "deck.autodjTip": "Auto-DJ: switch it on, pick a direction, or take the night somewhere new"
 }

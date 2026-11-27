@@ -6440,6 +6440,9 @@ def deck_command(settings, args):
         deck_update(lambda d: d.update(autodj=args[1] == "on", autodjAt=0, **({} if args[1] == "on" else {"direction": "", "toward": None})))
         if args[1] == "on":
             deck_watch()
+    elif action == "autodj" and len(args) == 3 and args[1] == "direction" and (args[2] in DIRECTIONS or args[2] == "none"):
+        # Which way Auto-DJ takes the night, without reordering the set (Shape does both).
+        deck_update(lambda d: d.update(direction="" if args[2] == "none" else args[2]))
     elif action == "autodj" and len(args) == 3 and args[1] == "tidy" and args[2] in {"on", "off"}:
         deck_update(lambda d: d.update(autoTidy=args[2] == "on", **({} if args[2] == "on" else {"autodjSettle": None})))
     elif action == "autodj" and len(args) >= 3 and args[1] == "toward":
