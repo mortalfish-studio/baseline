@@ -3896,7 +3896,7 @@ DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kin
               "paused": False, "sleep": None, "crossfade": False, "autodj": False, "autodjAt": 0, "handoff": "",
               "pushed": [], "pushedFrom": 1, "expect": None, "was": None, "updated": 0,
               "lock": False, "requests": [], "guests": None, "requestsAuto": False, "votes": {}, "lastCall": 0,
-              "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0}
+              "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": ""}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -4366,6 +4366,14 @@ def deck_tick(last):
         rid = deck["now"]["rid"]
         deck_update(lambda d: d.update(spoken=((d.get("spoken") or []) + [rid])[-200:]))
         subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "say", deck["now"]["uid"]], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    # The next song has a dedication: have its clip ready (in the voice picked,
+    # and as an mp3 for a room) long before it's needed.
+    coming = deck["set"][0] if deck["set"] else None
+    if coming and deck_voice_due({**deck, "now": coming}) and not deck_voice_made(coming, deck) \
+            and time.time() - (deck.get("voicePrep") or {}).get(coming["rid"], 0) > 45:
+        deck_update(lambda d: d.update(voicePrep={coming["rid"]: time.time()}))
+        subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "voice", "make", coming["rid"]], stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     if (deck.get("voiceUntil") or 0) > time.time():
         return last         # a Sonos room is saying a dedication: don't follow its queue meanwhile
@@ -5809,6 +5817,12 @@ def deck_voice_clip(song, mp3=False, voice=None):
     if not wav.is_file() and not voice_speak(deck_voice_text(song), voice, wav):
         return None
     return voice_mp3(wav) if mp3 else wav
+
+
+def deck_voice_made(song, deck):
+    """Its dedication is ready to say where the Deck plays (no waiting)."""
+    wav = VOICE_DIR / f"{song.get('rid', '')}-{deck_voice_name(deck)}.wav"
+    return wav.is_file() and (not deck.get("where", {}).get("kind") == "sonos" or wav.with_suffix(".mp3").is_file())
 
 
 def clip_seconds(wav):

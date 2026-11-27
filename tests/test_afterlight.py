@@ -885,6 +885,8 @@ class DeckTests(TempCase):
         self.assertEqual(al.deck_voice_name({}), "am_michael")                      # Michael unless you pick
         self.assertEqual(al.deck_voice_name({"voiceName": "bf_emma"}), "bf_emma")
         self.assertEqual(al.deck_voice_name({"voiceName": "piper"}), "am_michael")  # not installed: the default
+        al.deck_update(lambda d: d.update(voiceName="bf_emma"))
+        self.assertEqual(al.deck_voice_name(al.deck_read()), "bf_emma")             # the pick is kept
 
     def test_a_sonos_room_says_the_next_dedication_as_the_song_ends(self):
         self.patch("voice_ready", lambda: True)
@@ -897,10 +899,14 @@ class DeckTests(TempCase):
         now = {"uid": "u1", "service": "applemusic", "id": "1", "title": "One", "artist": "A"}
         asked = {"uid": "u2", "service": "applemusic", "id": "2", "title": "Two", "artist": "B", "rid": "0a1b2c3d",
                  "by": "Sam", "note": "Hi"}
-        al.deck_update(lambda d: d.update(now=now, set=[asked], playing=True, pushed=["u1", "u2"], pushedFrom=1))
+        al.deck_update(lambda d: d.update(now=now, set=[asked], playing=True, pushed=["u1", "u2"], pushedFrom=1,
+                                          where={"kind": "sonos", "room": "RINCON_X"}))
         self.patch("deck_status", lambda deck: {"time": 100, "length": 250, "playing": True, "track": 1})
         al.deck_tick({"time": 99})
-        self.assertEqual(spawned, [])                                   # not yet: plenty left
+        self.assertEqual(spawned, [["deck", "voice", "make", "0a1b2c3d"]])   # made early, ready in time
+        al.deck_tick({"time": 100})
+        self.assertEqual(len(spawned), 1)                               # once, not every look
+        spawned.clear()
         self.patch("deck_status", lambda deck: {"time": 248, "length": 250, "playing": True, "track": 1})
         al.deck_tick({"time": 247})
         self.assertEqual(spawned, [["deck", "say", "u2", "--before"]])

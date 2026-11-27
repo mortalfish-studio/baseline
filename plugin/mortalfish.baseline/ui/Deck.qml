@@ -646,6 +646,7 @@ Item {
   property bool guestsOpen: false
   property bool guestsAll: false
   property bool forgetArmed: false
+  property bool clearArmed: false
   property string dropArmed: ""
   onGuestsOpenChanged: if (!guestsOpen) { guestsAll = false; forgetArmed = false; dropArmed = "" }
   function view(name) {
@@ -957,7 +958,18 @@ Item {
                     text: "󰄜  " + strings.tn("deck.requestsCount", root.requests.length).arg(root.requests.length).toUpperCase()
                     font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal
                   }
-                  HeadLink { glyph: "󰆴"; tip: strings.t("deck.requestsClear"); onTapped: root.run(["deck", "requests", "clear"]) }
+                  // Turn them all down: tap twice (and not while locked).
+                  HeadLink {
+                    visible: !root.locked
+                    glyph: root.clearArmed ? "󰀦" : "󰆴"
+                    text: root.clearArmed ? strings.t("deck.requestsClearSure") : ""
+                    tip: strings.t("deck.requestsClear")
+                    onTapped: {
+                      if (root.clearArmed) { root.clearArmed = false; root.run(["deck", "requests", "clear"]) }
+                      else { root.clearArmed = true; clearDisarm.restart() }
+                    }
+                  }
+                  Timer { id: clearDisarm; interval: 4000; onTriggered: root.clearArmed = false }
                 }
                 // Newest first; after four it scrolls, so the crate keeps its room.
                 ListView {
@@ -2951,6 +2963,7 @@ Item {
           }
           ActionButton {
             Layout.alignment: Qt.AlignHCenter
+            visible: !root.locked || !root.guests
             icon: root.guests ? "󰅖" : "󰐲"
             text: root.guests ? strings.t("deck.guestsStop") : strings.t("deck.guestsStart")
             tone: root.guests ? root.teal : root.amber
@@ -2965,7 +2978,7 @@ Item {
             title: strings.t("deck.requestsAuto")
             detail: root.deck.requestsAuto ? strings.t("deck.requestsAutoOn") : strings.t("deck.requestsAutoOff")
             checked: !!root.deck.requestsAuto
-            onToggled: root.run(["deck", "requests", "auto", root.deck.requestsAuto ? "off" : "on"])
+            onToggled: if (!root.locked) root.run(["deck", "requests", "auto", root.deck.requestsAuto ? "off" : "on"])
           }
           OptionTile {
             visible: !!root.deck.voiceReady
@@ -2976,45 +2989,35 @@ Item {
             title: strings.t("deck.voice")
             detail: root.deck.voice !== false ? strings.t("deck.voiceOn") : strings.t("deck.voiceOff")
             checked: root.deck.voice !== false
-            onToggled: root.run(["deck", "voice", root.deck.voice !== false ? "off" : "on"])
+            onToggled: if (!root.locked) root.run(["deck", "voice", root.deck.voice !== false ? "off" : "on"])
           }
-          // Which voice reads them: pick one and it says hello.
-          Flow {
+          // Which voice reads them: step through with ‹ ›, each says hello.
+          RowLayout {
+            id: voiceRow
             visible: !!root.deck.voiceReady && root.deck.voice !== false && (root.deck.voices || []).length > 1
             Layout.fillWidth: true
-            spacing: 6
-            Repeater {
-              model: root.deck.voices || []
-              delegate: Rectangle {
-                id: vchip
-                required property var modelData
-                required property int index
-                readonly property bool picked: root.deck.voiceName === modelData.key
-                width: vrow.implicitWidth + 16; height: 26
-                radius: 13
-                color: picked ? Util.alpha(root.amber, 0.18) : (vHover.hovered ? Util.alpha(root.teal, 0.1) : "transparent")
-                border.width: 1
-                border.color: picked ? root.amber : Util.alpha(root.teal, 0.45)
-                Row {
-                  id: vrow
-                  anchors.centerIn: parent
-                  spacing: 4
-                  Label { visible: vchip.index === 0; text: "★"; font.pixelSize: Style.font.caption - 1; color: root.amber; anchors.verticalCenter: parent.verticalCenter }
-                  Label { text: vchip.modelData.name; font.pixelSize: Style.font.caption; color: vchip.picked ? root.amber : root.ink; anchors.verticalCenter: parent.verticalCenter }
-                }
-                HoverHandler { id: vHover; cursorShape: Qt.PointingHandCursor }
-                TapHandler { onTapped: root.run(["deck", "voice", "use", vchip.modelData.key]) }
-              }
+            Layout.leftMargin: 4; Layout.rightMargin: 4
+            spacing: 8
+            readonly property var list: root.deck.voices || []
+            readonly property int at: Math.max(0, list.findIndex(x => x.key === root.deck.voiceName))
+            readonly property var v: list[at] || null
+            function step(by) {
+              if (!list.length || root.locked) return
+              root.run(["deck", "voice", "use", list[(at + by + list.length) % list.length].key])
             }
+            Label { text: strings.t("deck.voiceLabel").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal }
+            HeadLink { visible: !root.locked; glyph: "󰅁"; onTapped: voiceRow.step(-1) }
+            Label {
+              Layout.fillWidth: true
+              horizontalAlignment: Text.AlignHCenter
+              elide: Text.ElideRight
+              text: voiceRow.v ? (voiceRow.at === 0 ? "★ " : "") + voiceRow.v.name + "  ·  " + voiceRow.v.about : ""
+              font.pixelSize: Style.font.caption
+              color: root.amber
+            }
+            HeadLink { visible: !root.locked; glyph: "󰅂"; onTapped: voiceRow.step(1) }
           }
-          Label {
-            visible: !!root.deck.voiceReady && root.deck.voice !== false && (root.deck.voices || []).length > 1
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            readonly property var v: (root.deck.voices || []).find(x => x.key === root.deck.voiceName) || null
-            text: v ? strings.t("deck.voiceAbout").arg(v.name).arg(v.about) + (v.key === (root.deck.voices[0] || {}).key ? "  ·  " + strings.t("deck.voiceRecommended") : "") : ""
-            font.pixelSize: Style.font.caption - 1; opacity: 0.55
-          }
+          Rectangle { Layout.fillWidth: true; Layout.topMargin: 2; height: 1; color: Util.alpha(root.teal, 0.18) }
           // Last call: requests close in a while (the phones say when), or now.
           RowLayout {
             visible: !!root.guests
@@ -3027,16 +3030,16 @@ Item {
                     : strings.t("deck.closesAt").arg(new Date(root.deck.lastCall * 1000).toLocaleTimeString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat))
               font.pixelSize: Style.font.caption; color: root.deck.lastCall ? root.amber : root.ink; opacity: root.deck.lastCall ? 1 : 0.7
             }
-            HeadLink { visible: !root.deck.lastCall; text: "15m"; onTapped: root.run(["deck", "requests", "lastcall", "15"]) }
-            HeadLink { visible: !root.deck.lastCall; text: "30m"; onTapped: root.run(["deck", "requests", "lastcall", "30"]) }
-            HeadLink { visible: !root.deck.lastCall; text: strings.t("deck.closeNow"); onTapped: root.run(["deck", "requests", "lastcall", "0"]) }
-            HeadLink { visible: !!root.deck.lastCall; glyph: "󰑐"; text: strings.t("deck.reopen"); onTapped: root.run(["deck", "requests", "lastcall", "off"]) }
+            HeadLink { visible: !root.locked && (!root.deck.lastCall); text: "15m"; onTapped: root.run(["deck", "requests", "lastcall", "15"]) }
+            HeadLink { visible: !root.locked && (!root.deck.lastCall); text: "30m"; onTapped: root.run(["deck", "requests", "lastcall", "30"]) }
+            HeadLink { visible: !root.locked && (!root.deck.lastCall); text: strings.t("deck.closeNow"); onTapped: root.run(["deck", "requests", "lastcall", "0"]) }
+            HeadLink { visible: !root.locked && (!!root.deck.lastCall); glyph: "󰑐"; text: strings.t("deck.reopen"); onTapped: root.run(["deck", "requests", "lastcall", "off"]) }
           }
           // Who's asked tonight: faces, names, how many asked and played (most played first).
+          Rectangle { visible: root.people.length > 0; Layout.fillWidth: true; Layout.topMargin: 2; height: 1; color: Util.alpha(root.teal, 0.18) }
           RowLayout {
             visible: root.people.length > 0
             Layout.fillWidth: true
-            Layout.topMargin: 4
             Label {
               Layout.fillWidth: true
               text: strings.t("deck.peopleTonight").arg(root.people.length).toUpperCase()
@@ -3044,6 +3047,7 @@ Item {
             }
             // Start fresh: every guest, their selfies and requests go. Tap twice.
             HeadLink {
+              visible: !root.locked
               glyph: root.forgetArmed ? "󰀦" : "󰃢"
               text: root.forgetArmed ? strings.t("deck.guestsForgetSure") : strings.t("deck.guestsForget")
               onTapped: {
@@ -3054,7 +3058,7 @@ Item {
             Timer { id: forgetDisarm; interval: 4000; onTriggered: root.forgetArmed = false }
           }
           Label {
-            visible: root.people.length > 0
+            visible: root.people.length > 0 && !root.locked
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             text: strings.t("deck.guestsDropHint")
@@ -3092,10 +3096,10 @@ Item {
                   Rectangle { id: guestMask; anchors.fill: guestFace; radius: width / 2; visible: false; layer.enabled: true }
                   Label { anchors.centerIn: parent; visible: guestFace.status !== Image.Ready; text: (guest.modelData.name || "?").charAt(0).toUpperCase(); font.bold: true; color: root.teal }
                   HoverHandler { id: guestHover }
-                  TapHandler { onLongPressed: root.dropArmed = guest.modelData.gid }
+                  TapHandler { enabled: !root.locked; onLongPressed: root.dropArmed = guest.modelData.gid }
                   // Drop this guest: hover (or press and hold) for the ✕.
                   Rectangle {
-                    visible: guestHover.hovered || root.dropArmed === guest.modelData.gid
+                    visible: !root.locked && (guestHover.hovered || root.dropArmed === guest.modelData.gid)
                     anchors.right: parent.right; anchors.top: parent.top; anchors.margins: -5
                     width: 20; height: 20; radius: 10
                     color: dropHover.hovered ? Commons.Color.warning : root.ground
@@ -3427,7 +3431,7 @@ Item {
     RoundButton { glyph: "◆"; tip: strings.t("deck.requestMix"); onClicked: root.run(["deck", "request", "take", rr.req.rid, "--mix"]) }
     RoundButton { glyph: "󰒭"; tip: strings.t("deck.bloomNext"); onClicked: root.run(["deck", "request", "take", rr.req.rid, "--next"]) }
     RoundButton { glyph: "󰐒"; tip: strings.t("deck.bloomLater"); onClicked: root.run(["deck", "request", "take", rr.req.rid]) }
-    RoundButton { glyph: "󰅖"; tip: strings.t("deck.requestDrop"); onClicked: root.run(["deck", "request", "drop", rr.req.rid]) }
+    RoundButton { visible: !root.locked; glyph: "󰅖"; tip: strings.t("deck.requestDrop"); onClicked: root.run(["deck", "request", "drop", rr.req.rid]) }
   }
 
   // The requests page's QR code on white; tap it for it big.
