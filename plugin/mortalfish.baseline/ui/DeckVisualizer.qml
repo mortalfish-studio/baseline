@@ -28,6 +28,34 @@ Item {
   property bool haveCava: false
   readonly property bool listening: active && playing && live && haveCava
   readonly property bool hearing: active && playing && !live && mic && haveCava
+  // The real sound can go missing (too quiet to read, or cava stopped): then
+  // the made-up pulse takes over, so the bars always show the music's shape.
+  property real lastFrame: 0
+  property real lastSound: 0
+  property bool quiet: false
+  property bool restarting: false
+  function heard(next) {
+    const now = Date.now()
+    lastFrame = now
+    if (Math.max.apply(null, next) > 0.06) lastSound = now
+    if (!quiet) take(next)
+  }
+  onListeningChanged: { lastFrame = lastSound = Date.now(); quiet = false }
+  onHearingChanged: { lastFrame = lastSound = Date.now(); quiet = false }
+  Timer {
+    interval: 500; repeat: true
+    running: viz.listening || viz.hearing
+    onTriggered: {
+      const now = Date.now()
+      viz.quiet = now - viz.lastSound > 2000
+      if (now - viz.lastFrame > 3000 && !viz.restarting) {       // cava's stopped: start it again
+        viz.restarting = true
+        viz.lastFrame = now
+        restartDone.start()
+      }
+    }
+  }
+  Timer { id: restartDone; interval: 400; onTriggered: viz.restarting = false }
 
   function blank() { const a = []; for (let i = 0; i < count; i++) a.push(0); return a }
   Component.onCompleted: { levels = blank(); peaks = blank(); holds = blank(); probe.running = true }
@@ -40,7 +68,7 @@ Item {
   }
   Process {
     id: cava
-    running: viz.listening
+    running: viz.listening && !viz.restarting
     command: ["cava", "-p", String(Qt.resolvedUrl("cava.conf")).replace(/^file:\/\//, "")]
     stdout: SplitParser {
       onRead: function(line) {
@@ -48,14 +76,14 @@ Item {
         if (parts.length < viz.count) return
         const next = []
         for (let i = 0; i < viz.count; i++) next.push(Math.max(0, Math.min(1, (parseInt(parts[i]) || 0) / 100)))
-        viz.take(next)
+        viz.heard(next)
       }
     }
   }
 
   Process {
     id: cavaMic
-    running: viz.hearing
+    running: viz.hearing && !viz.restarting
     // The default microphone's PipeWire name goes into the config as it starts.
     command: ["sh", "-c", "src=$(pactl get-default-source) || exit 1; conf=${XDG_RUNTIME_DIR:-/tmp}/baseline-cava-mic.conf; "
               + "sed \"s|@DEFAULT_SOURCE@|$src|\" \"$1\" > \"$conf\" && exec cava -p \"$conf\"", "sh",
@@ -66,7 +94,7 @@ Item {
         if (parts.length < viz.count) return
         const next = []
         for (let i = 0; i < viz.count; i++) next.push(Math.max(0, Math.min(1, (parseInt(parts[i]) || 0) / 100)))
-        viz.take(next)
+        viz.heard(next)
       }
     }
   }
@@ -89,7 +117,7 @@ Item {
   Timer {
     interval: 33
     repeat: true
-    running: viz.active && !viz.listening && !viz.hearing
+    running: viz.active && ((!viz.listening && !viz.hearing) || viz.quiet)
     onTriggered: {
       viz.phase += 0.033
       const t = viz.phase
@@ -104,7 +132,8 @@ Item {
           const shape = 0.78 - 0.5 * x + 0.12 * Math.sin(x * 9 + t * 1.7)
           next.push(Math.max(0.04, Math.min(1, shape * (0.45 + 0.35 * w[i]) + beat * (0.4 - 0.3 * x))))
         } else {
-          next.push(0.05 + 0.04 * (1 + Math.sin(t * 1.3 + x * 6.3)) / 2)
+          // Resting: a slow, clearly visible swell, higher in the bass.
+          next.push(0.1 + 0.08 * (1 - x) + 0.07 * (1 + Math.sin(t * 1.1 + x * 5.5)) / 2)
         }
       }
       viz.wander = w
