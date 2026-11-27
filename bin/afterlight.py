@@ -5301,9 +5301,21 @@ def deck_people(deck):
         if not tonight or not isinstance(person, dict):
             continue
         photo = DECK_GUESTS_PHOTOS / f"{gid}.jpg"
-        out.append({"name": person.get("name", ""), "photo": str(photo) if person.get("photo") and photo.is_file() else "",
+        out.append({"gid": gid, "name": person.get("name", ""), "photo": str(photo) if person.get("photo") and photo.is_file() else "",
                     "asked": len(tonight), "played": sum(1 for a in tonight if a.get("rid") in played)})
     return sorted(out, key=lambda p: (-p["played"], -p["asked"], p["name"].lower()))[:40]
+
+
+def deck_guest_drop(gid):
+    """Forget one guest: their name, selfie and what they asked for. Their
+    phone asks who they are next time; songs already in the set stay."""
+    for path in (DECK_GUESTS_PEOPLE, DECK_GUESTS_ASKS):
+        data = read_json(path, {})
+        if isinstance(data, dict) and gid in data:
+            data.pop(gid)
+            write_atomic(path, json.dumps(data))
+    (DECK_GUESTS_PHOTOS / f"{gid}.jpg").unlink(missing_ok=True)
+    deck_update(lambda d: d.update(requests=[r for r in d.get("requests") or [] if r.get("gid") != gid]))
 
 
 def deck_guest_person(gid):
@@ -5919,12 +5931,15 @@ def deck_command(settings, args):
             print(deck_guests_on())
         else:
             deck_guests_off()
+    elif action == "guests" and len(args) == 3 and args[1] == "drop" and re.fullmatch(r"[A-Za-z0-9_-]{12}", args[2]):
+        deck_guest_drop(args[2])
     elif action == "guests" and args[1:] == ["forget"]:
         DECK_GUESTS_PEOPLE.unlink(missing_ok=True)
         DECK_GUESTS_ASKS.unlink(missing_ok=True)
         shutil.rmtree(DECK_GUESTS_PHOTOS, ignore_errors=True)
         shutil.rmtree(VOICE_DIR, ignore_errors=True)
-        print("forgot every guest, their photos and spoken dedications")
+        deck_update(lambda d: d.update(requests=[]))
+        print("forgot every guest, their photos, waiting requests and spoken dedications")
     elif action == "guests" and len(args) == 3 and args[1] == "serve" and re.fullmatch(r"[A-Za-z0-9_-]{8,40}", args[2]):
         deck_guests_serve(args[2])
     elif action == "request" and len(args) >= 2 and args[1] == "settle":

@@ -645,7 +645,9 @@ Item {
   property bool stageOn: false
   property bool guestsOpen: false
   property bool guestsAll: false
-  onGuestsOpenChanged: if (!guestsOpen) guestsAll = false
+  property bool forgetArmed: false
+  property string dropArmed: ""
+  onGuestsOpenChanged: if (!guestsOpen) { guestsAll = false; forgetArmed = false; dropArmed = "" }
   function view(name) {
     stageOn = name === "stage"
     guestsOpen = name === "requests"
@@ -2994,11 +2996,32 @@ Item {
             HeadLink { visible: !!root.deck.lastCall; glyph: "󰑐"; text: strings.t("deck.reopen"); onTapped: root.run(["deck", "requests", "lastcall", "off"]) }
           }
           // Who's asked tonight: faces, names, how many asked and played (most played first).
+          RowLayout {
+            visible: root.people.length > 0
+            Layout.fillWidth: true
+            Layout.topMargin: 4
+            Label {
+              Layout.fillWidth: true
+              text: strings.t("deck.peopleTonight").arg(root.people.length).toUpperCase()
+              font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal
+            }
+            // Start fresh: every guest, their selfies and requests go. Tap twice.
+            HeadLink {
+              glyph: root.forgetArmed ? "󰀦" : "󰃢"
+              text: root.forgetArmed ? strings.t("deck.guestsForgetSure") : strings.t("deck.guestsForget")
+              onTapped: {
+                if (root.forgetArmed) { root.forgetArmed = false; root.run(["deck", "guests", "forget"]) }
+                else { root.forgetArmed = true; forgetDisarm.restart() }
+              }
+            }
+            Timer { id: forgetDisarm; interval: 4000; onTriggered: root.forgetArmed = false }
+          }
           Label {
             visible: root.people.length > 0
-            text: strings.t("deck.peopleTonight").arg(root.people.length).toUpperCase()
-            font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal
-            Layout.topMargin: 4
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            text: strings.t("deck.guestsDropHint")
+            font.pixelSize: Style.font.caption - 1; opacity: 0.45
           }
           Flow {
             visible: root.people.length > 0
@@ -3031,6 +3054,19 @@ Item {
                   }
                   Rectangle { id: guestMask; anchors.fill: guestFace; radius: width / 2; visible: false; layer.enabled: true }
                   Label { anchors.centerIn: parent; visible: guestFace.status !== Image.Ready; text: (guest.modelData.name || "?").charAt(0).toUpperCase(); font.bold: true; color: root.teal }
+                  HoverHandler { id: guestHover }
+                  TapHandler { onLongPressed: root.dropArmed = guest.modelData.gid }
+                  // Drop this guest: hover (or press and hold) for the ✕.
+                  Rectangle {
+                    visible: guestHover.hovered || root.dropArmed === guest.modelData.gid
+                    anchors.right: parent.right; anchors.top: parent.top; anchors.margins: -5
+                    width: 20; height: 20; radius: 10
+                    color: dropHover.hovered ? Commons.Color.warning : root.ground
+                    border.width: 1; border.color: Commons.Color.warning
+                    Label { anchors.centerIn: parent; text: "󰅖"; font.family: "Iosevka Nerd Font Propo"; font.pixelSize: 11; color: dropHover.hovered ? root.ground : Commons.Color.warning }
+                    HoverHandler { id: dropHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: { root.dropArmed = ""; root.run(["deck", "guests", "drop", guest.modelData.gid]) } }
+                  }
                 }
                 Label { width: parent.width; horizontalAlignment: Text.AlignHCenter; text: guest.modelData.name; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
                 Label {
