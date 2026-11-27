@@ -654,11 +654,30 @@ Item {
     const k = deck.direction || ""
     return k === "" ? "" : strings.t("deck.direction" + k.charAt(0).toUpperCase() + k.slice(1))
   }
+  // Somewhere for Auto-DJ to head: a name for the chip, and what Grok is told.
+  readonly property var towardPresets: [
+    { label: strings.t("deck.towardWindDown"), brief: "a gentle wind-down to end the night: slower, warmer, softer" },
+    { label: strings.t("deck.towardPeak"), brief: "peak time: the biggest, highest-energy floor-fillers" },
+    { label: strings.t("deck.towardThrowbacks"), brief: "throwbacks: 80s and 90s dance and pop classics everyone knows" },
+    { label: strings.t("deck.towardHouse"), brief: "deep house: warm, groovy, around 120 BPM" },
+    { label: strings.t("deck.towardLatin"), brief: "Latin heat: reggaeton, salsa and Latin pop" },
+    { label: strings.t("deck.towardChill"), brief: "chill-out: downtempo, mellow and easy" }
+  ]
+  function towardName(brief) {
+    const preset = towardPresets.find(p => p.brief === brief)
+    return preset ? preset.label.toLowerCase() : String(brief || "").split(":")[0]
+  }
+  // Auto-DJ at work (asking Grok, finding the songs): shown until it's done.
+  readonly property var djBusy: deck.autodjBusy && Date.now() / 1000 - (deck.autodjBusy.at || 0) < 300 ? deck.autodjBusy : null
+  readonly property string djBusyText: !djBusy ? ""
+    : (djBusy.toward || "") !== "" ? strings.t("deck.autodjFindingToward").arg(towardName(djBusy.toward))
+    : (djBusy.seed || "") !== "" ? strings.t("deck.autodjFindingSeed").arg(djBusy.seed)
+    : strings.t("deck.autodjFindingNext")
   // Where Auto-DJ is heading (a sound you named), and how far it's got.
   readonly property string towardLabel: {
     const t = deck.toward
     if (!t || !t.brief) return ""
-    const name = t.brief.split(":")[0]
+    const name = towardName(t.brief)
     return (t.done || 0) < (t.steps || 6) ? strings.t("deck.towardNow").arg(name).arg(t.done || 0).arg(t.steps || 6)
                                           : strings.t("deck.towardThere").arg(name)
   }
@@ -1623,7 +1642,7 @@ Item {
                   // Auto-DJ: with three songs left, Grok adds more that carry the night on.
                   ActionButton {
                     icon: "∞"
-                    text: strings.t("deck.autodj")
+                    text: root.djBusy ? strings.t("deck.autodjWorking") : strings.t("deck.autodj")
                     tone: root.deck.autodj ? root.amber : root.teal
                     onClicked: { root.autodjOpen = !root.autodjOpen; root.shapeOpen = false; root.saving = false; root.filterOpen = false }
                   }
@@ -1686,7 +1705,7 @@ Item {
                 text: (root.deck.set || []).length > 0
                   ? strings.tn("deck.count", (root.deck.set || []).length).arg((root.deck.set || []).length)
                     + "  ·  " + root.span(root.setSeconds) + "  ·  " + strings.t("deck.endsAt").arg(root.clockAt(root.setSeconds))
-                    + (!root.deck.autodj ? "" : "  ·  ∞ " + ((root.deck.set || []).length > 3
+                    + (root.djBusy ? "  ·  ∞ " + strings.t("deck.autodjFinding") + "…" : !root.deck.autodj ? "" : "  ·  ∞ " + ((root.deck.set || []).length > 3
                         ? strings.t("deck.autodjAt").arg(root.clockAt(root.startsAt[(root.deck.set || []).length - 3] || 0))
                         : strings.t("deck.autodjSoon"))
                       + (root.directionLabel !== "" ? ", " + root.directionLabel : "")
@@ -1815,25 +1834,12 @@ Item {
                   spacing: 8
                   Label { text: strings.t("deck.towardLabel"); font.pixelSize: Style.font.caption; color: root.teal; height: 30; verticalAlignment: Text.AlignVCenter; width: 120 }
                   Repeater {
-                    model: [
-                      { label: strings.t("deck.towardWindDown"), brief: "a gentle wind-down to end the night: slower, warmer, softer" },
-                      { label: strings.t("deck.towardPeak"), brief: "peak time: the biggest, highest-energy floor-fillers" },
-                      { label: strings.t("deck.towardThrowbacks"), brief: "throwbacks: 80s and 90s dance and pop classics everyone knows" },
-                      { label: strings.t("deck.towardHouse"), brief: "deep house: warm, groovy, around 120 BPM" },
-                      { label: strings.t("deck.towardLatin"), brief: "Latin heat: reggaeton, salsa and Latin pop" },
-                      { label: strings.t("deck.towardChill"), brief: "chill-out: downtempo, mellow and easy" }
-                    ]
-                    delegate: Rectangle {
+                    model: root.towardPresets
+                    delegate: DjChip {
                       required property var modelData
-                      implicitWidth: towardChip.implicitWidth + 18
-                      implicitHeight: 30
-                      radius: 15
-                      color: towardHover.hovered ? Util.alpha(root.teal, 0.18) : Util.alpha(root.teal, 0.06)
-                      border.width: 1
-                      border.color: Util.alpha(root.teal, towardHover.hovered ? 0.9 : 0.45)
-                      Label { id: towardChip; anchors.centerIn: parent; text: modelData.label; font.pixelSize: Style.font.caption; color: root.ink }
-                      HoverHandler { id: towardHover; cursorShape: Qt.PointingHandCursor }
-                      TapHandler { onTapped: { root.runLong(["deck", "autodj", "toward", modelData.brief]); root.autodjOpen = false } }
+                      text: modelData.label
+                      on: (root.deck.toward || {}).brief === modelData.brief
+                      onTapped: if (!root.djBusy) root.runLong(["deck", "autodj", "toward", modelData.brief])
                     }
                   }
                   Rectangle {
@@ -1849,7 +1855,7 @@ Item {
                       color: root.ink; clip: true
                       font.family: Style.font.family; font.pixelSize: Style.font.caption
                       maximumLength: 120
-                      onAccepted: if (text.trim() !== "") { root.runLong(["deck", "autodj", "toward", text.trim()]); text = ""; root.autodjOpen = false }
+                      onAccepted: if (text.trim() !== "" && !root.djBusy) { root.runLong(["deck", "autodj", "toward", text.trim()]); text = "" }
                       Label { visible: towardInput.text === ""; text: strings.t("deck.towardHint"); font.pixelSize: Style.font.caption; opacity: 0.4 }
                     }
                     HeadLink {
@@ -1860,9 +1866,29 @@ Item {
                       onTapped: towardInput.accepted()
                     }
                   }
+                }
+                // What it's doing right now: finding songs (a pulsing ∞), or where it's heading.
+                RowLayout {
+                  visible: !!root.djBusy || root.towardLabel !== ""
+                  Layout.fillWidth: true
+                  spacing: 10
+                  Label {
+                    text: "∞"; color: root.amber; font.pixelSize: Style.font.body + 2
+                    SequentialAnimation on opacity {
+                      running: !!root.djBusy && !Style.reduceMotion
+                      loops: Animation.Infinite
+                      NumberAnimation { from: 1; to: 0.25; duration: 700; easing.type: Easing.InOutSine }
+                      NumberAnimation { from: 0.25; to: 1; duration: 700; easing.type: Easing.InOutSine }
+                    }
+                  }
+                  Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    text: root.djBusy ? root.djBusyText : root.towardLabel.charAt(0).toUpperCase() + root.towardLabel.slice(1)
+                    font.pixelSize: Style.font.caption; color: root.djBusy ? root.amber : root.ink
+                  }
                   HeadLink {
-                    visible: !!root.deck.toward
-                    height: 30
+                    visible: !root.djBusy && !!root.deck.toward && !root.locked
                     glyph: "󰅖"; text: strings.t("deck.towardOff")
                     onTapped: root.run(["deck", "autodj", "toward", "off"])
                   }

@@ -3904,7 +3904,7 @@ DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kin
               "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": "",
               "micViz": False, "speaking": None, "asks": [], "awoke": False, "phoneSeen": 0, "ready": None,
               "recapAt": 0, "closedAt": 0, "skipped": [], "direction": "", "toward": None,
-              "autoTidy": True, "autodjSettle": None}
+              "autoTidy": True, "autodjSettle": None, "autodjBusy": None}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -6663,6 +6663,18 @@ def deck_seed(service, text):
 
 
 def deck_fill(settings, count=5, auto=False, seed=None):
+    """Auto-DJ at work shows on the Deck (what it's doing) until it's done."""
+    if not (auto or seed):
+        return deck_fill_now(settings, count, auto, seed)
+    toward = (deck_read().get("toward") or {}).get("brief", "")
+    deck_update(lambda d: d.update(autodjBusy={"at": time.time(), "toward": toward, "seed": (seed or {}).get("title", "")}))
+    try:
+        return deck_fill_now(settings, count, auto, seed)
+    finally:
+        deck_update(lambda d: d.update(autodjBusy=None))
+
+
+def deck_fill_now(settings, count=5, auto=False, seed=None):
     """Grok's fast model picks songs that fit the set; each is found on your
     music service and added to the end. Auto-DJ (auto) looks at the whole
     night so far: what's been played, what's playing and what's left. With a
