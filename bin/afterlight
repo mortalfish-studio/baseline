@@ -35,6 +35,7 @@ screen brightness, power profile and bar back as they were.
 """
 
 import colorsys
+import contextlib
 import copy
 import datetime
 import time
@@ -2455,6 +2456,7 @@ def laptop_track():
                       "artist": clean_text(", ".join(artists) if isinstance(artists, list) else str(artists), 120),
                       "album": clean_text((meta.get("xesam:album") or {}).get("data", ""), 120),
                       "position": int(position) // 1_000_000 if isinstance(position, int) else 0,
+                      "length": int((meta.get("mpris:length") or {}).get("data", 0) or 0) // 1_000_000,
                       "playing": prop("PlaybackStatus") == "Playing", "player": name})
     found.sort(key=lambda t: not t["playing"])
     return found[0] if found else None
@@ -3436,14 +3438,47 @@ def am_country():
     return "us"
 
 
+AM_CACHE = CACHE / "afterlight/applemusic"
+
+
 def am_lookup(params):
+    """Apple's catalogue search or lookup. Answers are kept for a day (Apple
+    allows only about 20 searches a minute), and a refusal waits and retries."""
+    import urllib.error
     import urllib.parse
     import urllib.request
     query = urllib.parse.urlencode({**params, "country": am_country()})
     endpoint = "lookup" if "id" in params else "search"
+    cached = AM_CACHE / (hashlib.sha256(f"{endpoint}?{query}".encode()).hexdigest()[:24] + ".json")
+    try:
+        if time.time() - cached.stat().st_mtime < 86400:
+            return json.loads(cached.read_text())
+    except (OSError, ValueError):
+        pass
     request = urllib.request.Request(f"https://itunes.apple.com/{endpoint}?{query}", headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(request, timeout=10) as response:
-        return json.loads(response.read(2_000_000)).get("results", [])
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                results = json.loads(response.read(2_000_000)).get("results", [])
+            break
+        except urllib.error.HTTPError as error:
+            if error.code not in {403, 429} or attempt == 2:
+                raise
+            time.sleep(2 + attempt * 3)
+    AM_CACHE.mkdir(parents=True, exist_ok=True)
+    write_atomic(cached, json.dumps(results))
+    for stale in sorted(AM_CACHE.glob("*.json"), key=lambda f: f.stat().st_mtime)[:-400]:
+        stale.unlink(missing_ok=True)
+    return results
+
+
+def am_songs(query, limit=10):
+    """Songs only, in one call: for looking up songs Grok named."""
+    return [{"kind": "song", "title": clean_text(t.get("trackName", ""), 100),
+             "subtitle": clean_text(f"{t.get('artistName', '')} • {t.get('collectionName', '')}", 120),
+             "id": str(t["trackId"]), "album": str(t.get("collectionId", "")), "thumb": am_art(t.get("artworkUrl100", ""))}
+            for t in am_lookup({"term": query[:200], "media": "music", "entity": "song", "limit": limit})
+            if t.get("trackId") and t.get("isStreamable", True)]
 
 
 def am_art(url):
@@ -3628,41 +3663,54 @@ def suggest(service, query, items, open_tab=True):
     print(f"No exact match for {query}: suggestions are in the Player tab")
 
 
-def grok_ideas(query):
+def grok_ideas(query, ask=None, count=6, timeout=45):
     """Songs that fit what was asked, and searches to try, from Grok's fast
     model with every tool off: {"songs": [{"t", "a", "w"}], "q": [...]}."""
-    prompt = (f"Music search helper. Someone asked to play: «{query.replace('»', '')[:200]}». "
-              "There was no exact match. Reply with ONLY compact JSON, no prose: "
+    ask = ask or (f"Someone asked to play: «{query.replace('»', '')[:200]}». There was no exact match.")
+    prompt = (f"Answer from your own knowledge; use no tools. Music helper. {ask} Reply with ONLY compact JSON, no prose: "
               '{"songs":[{"t":"title","a":"artist","w":"why it fits, max 30 chars"}],"q":["search phrase"]} '
-              "with 6 real, findable songs that fit (or the song they most likely meant first) and 3 short searches.")
+              f"with {count} real, findable songs that fit (or the song they most likely meant first) and 3 short searches.")
     workdir = STATE.parent / "grok-music"
     workdir.mkdir(parents=True, exist_ok=True)
     try:
-        result = subprocess.run(["grok", "-m", GROK_FAST, "--effort", "low", "--tools", "", "-p", prompt,
+        # Every tool off, the Sonos MCP's too: it answers from what it knows.
+        result = subprocess.run(["grok", "-m", GROK_FAST, "--effort", "low", "--tools", "", "--deny", "MCPTool(*)", "-p", prompt,
                                  "--max-turns", "1", "--no-auto-update"], cwd=workdir, capture_output=True,
-                                text=True, timeout=45, stdin=subprocess.DEVNULL)
+                                text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         text = result.stdout
         value = json.loads(text[text.index("{"):text.rindex("}") + 1])
     except (OSError, subprocess.SubprocessError, ValueError):
         return {"songs": [], "q": []}
     songs = [{"t": clean_text(str(x.get("t", "")), 100), "a": clean_text(str(x.get("a", "")), 100),
               "w": clean_text(str(x.get("w", "")), 40)}
-             for x in value.get("songs", []) if isinstance(x, dict) and x.get("t")][:8]
+             for x in value.get("songs", []) if isinstance(x, dict) and x.get("t")][:max(8, count + 4)]
     searches = [clean_text(str(q), 60) for q in value.get("q", []) if isinstance(q, str) and q.strip()][:4]
     return {"songs": songs, "q": searches}
+
+
+def find_songs(service, ideas):
+    """Each of Grok's ideas looked up on the service at once: [(idea, best song or None)]."""
+    from concurrent.futures import ThreadPoolExecutor
+    search = am_songs if service == "applemusic" else ytm_search
+    def look(idea):
+        try:
+            results = [i for i in search(f"{idea['t']} {idea['a']}") if i["kind"] == "song"]
+        except (OSError, ValueError):
+            return idea, None
+        same = [i for i in results if song_key(i["title"]) == song_key(idea["t"])]
+        artist = set(song_key(idea["a"]).split())
+        by = lambda i: set(song_key(str(i.get("subtitle", "")).split(" • ")[0]).split())
+        # The artist Grok named, not a cover or a tribute act.
+        return idea, next((i for i in same if artist & by(i)), None) or (same[0] if same and not artist else None)
+    with ThreadPoolExecutor(max_workers=3 if service == "applemusic" else 6) as pool:
+        return list(pool.map(look, ideas))
 
 
 def grok_suggest(service, query):
     """Fill in Grok's ideas, each found on the service so it plays."""
     ideas = grok_ideas(query)
     found = []
-    search = am_search if service == "applemusic" else ytm_search
-    for idea in ideas["songs"]:
-        try:
-            results = [i for i in search(f"{idea['t']} {idea['a']}") if i["kind"] == "song"]
-        except (OSError, ValueError):
-            continue
-        match = next((i for i in results if song_key(i["title"]) == song_key(idea["t"])), results[0] if results else None)
+    for idea, match in find_songs(service, ideas["songs"]):
         if match and not any(f.get("id", f.get("video")) == match.get("id", match.get("video")) for f in found):
             found.append({**match, "why": idea["w"]})
     current = read_json(SUGGEST, {})
@@ -3670,6 +3718,558 @@ def grok_suggest(service, query):
         return      # a newer search has taken over
     current.update(grok=found, pending=False, **{"try": ideas["q"]})
     suggest_write(current)
+
+
+# ---------------------------------------------------------------- the deck
+# The Deck: a set of songs from YouTube Music and Apple Music you arrange by
+# hand (the Deck window), played on the laptop or in a Sonos room.
+#   deck.json      the set: now, up next, played, pinned, where it plays
+#   deck-now.json  where the song is (time, length, playing), for the window
+# On the laptop, songs play one at a time in their own app and a watcher
+# (`afterlight deck run`, started on play) starts the next when one ends; if
+# you start something else yourself, the Deck steps back. In a Sonos room the
+# set becomes the room's queue (Apple Music songs, added by their catalogue
+# number), so the speaker plays it gaplessly and the watcher follows along.
+DECK = STATE.parent / "deck.json"
+DECK_NOW = STATE.parent / "deck-now.json"
+DECK_LOCK = STATE.parent / "deck.lock"
+DECK_RUN_LOCK = STATE.parent / "deck-run.lock"
+DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kind": "laptop"}, "playing": False,
+              "pushed": [], "updated": 0}
+APPLE_SID = 204                 # Apple Music's service number on Sonos
+DECK_SERVICES = {"applemusic", "ytmusic"}
+
+
+def deck_read():
+    value = read_json(DECK, {})
+    deck = copy.deepcopy(DECK_EMPTY)
+    if isinstance(value, dict):
+        deck.update({k: v for k, v in value.items() if k in DECK_EMPTY})
+    deck["set"] = [i for i in deck["set"] if isinstance(i, dict) and i.get("uid")][:300]
+    deck["played"] = [i for i in deck["played"] if isinstance(i, dict) and i.get("uid")][-40:]
+    return deck
+
+
+def deck_update(change):
+    """Read, change and write deck.json under a lock (the window and the
+    watcher both write it). Returns what change returned."""
+    DECK.parent.mkdir(parents=True, exist_ok=True)
+    with open(DECK_LOCK, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        deck = deck_read()
+        result = change(deck)
+        deck["updated"] = time.time()
+        write_atomic(DECK, json.dumps(deck) + "\n")
+    return result
+
+
+def deck_item(service, item):
+    """A search result as a Deck song: checked ids, plain text."""
+    if service not in DECK_SERVICES or not isinstance(item, dict):
+        sys.exit("Only YouTube Music and Apple Music songs go in the Deck for now.")
+    subtitle = str(item.get("subtitle", "")).split(" • ")
+    song = {"uid": os.urandom(4).hex(), "service": service, "title": clean_text(str(item.get("title", "")), 120),
+            "artist": clean_text(str(item.get("artist") or subtitle[0]), 120),
+            "album": clean_text(str(item.get("album_name") or (subtitle[1] if len(subtitle) > 1 else "")), 120),
+            "thumb": str(item.get("thumb", "")) if str(item.get("thumb", "")).startswith("https://") else ""}
+    if service == "applemusic":
+        if not re.fullmatch(r"\d{1,15}", str(item.get("id", ""))):
+            sys.exit("Bad Apple Music song.")
+        song["id"] = str(item["id"])
+    else:
+        if not YTM_ID.match(str(item.get("video", ""))):
+            sys.exit("Bad YouTube Music song.")
+        song["video"] = str(item["video"])
+    return song
+
+
+def deck_expand(service, item):
+    """A song is one song; an Apple Music album is its songs, in order."""
+    if service == "applemusic" and item.get("kind") == "album" and re.fullmatch(r"\d{1,15}", str(item.get("id", ""))):
+        tracks = [t for t in am_lookup({"id": item["id"], "entity": "song", "limit": 60})
+                  if t.get("wrapperType") == "track" and t.get("trackId")]
+        tracks.sort(key=lambda t: (t.get("discNumber", 1), t.get("trackNumber", 0)))
+        return [deck_item(service, {"id": t["trackId"], "title": t.get("trackName", ""), "artist": t.get("artistName", ""),
+                                    "album_name": t.get("collectionName", ""), "thumb": am_art(t.get("artworkUrl100", ""))})
+                for t in tracks]
+    if item.get("kind") not in {"song", "video"}:
+        sys.exit("Add songs (or an Apple Music album) to the Deck.")
+    return [deck_item(service, item)]
+
+
+# ---- Sonos: Apple Music songs straight into a room's queue
+
+def sonos_apple_sn(refresh=False):
+    """Your Apple Music account's number on Sonos, read from any room's queue
+    or favourites that holds an Apple Music song (it's in every one of them)."""
+    cache = read_json(SONOS_CACHE, {})
+    if cache.get("appleSn") and not refresh:
+        return str(cache["appleSn"])
+    for room in sonos_rooms():
+        for folder in ("Q:0", "FV:2"):
+            reply = sonos_call(room["ip"], "ContentDirectory", "Browse", {
+                "ObjectID": folder, "BrowseFlag": "BrowseDirectChildren", "Filter": "*", "StartingIndex": 0,
+                "RequestedCount": 100, "SortCriteria": ""}, timeout=4) or {}
+            m = re.search(rf"sid={APPLE_SID}&(?:amp;)?flags=\d+&(?:amp;)?sn=(\d+)", reply.get("Result") or "")
+            if m:
+                cache["appleSn"] = m.group(1)
+                write_atomic(SONOS_CACHE, json.dumps(cache) + "\n")
+                return m.group(1)
+    return ""
+
+
+def sonos_apple_uri(song_id, sn):
+    uri = f"x-sonos-http:song%3a{song_id}.mp4?sid={APPLE_SID}&flags=8232&sn={sn}"
+    service = APPLE_SID * 256 + 7
+    meta = ('<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" '
+            'xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">'
+            f'<item id="10032020song%3a{song_id}" parentID="" restricted="true"><dc:title></dc:title>'
+            '<upnp:class>object.item.audioItem.musicTrack</upnp:class>'
+            f'<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON{service}_X_#Svc{service}-0-Token</desc>'
+            '</item></DIDL-Lite>')
+    return uri, meta
+
+
+def deck_apple_id(song):
+    """The Apple Music song for a Deck song: its own, or a YouTube Music song
+    found on Apple Music by title and artist (remembered on the song)."""
+    if song.get("service") == "applemusic":
+        return song.get("id", "")
+    if song.get("am") is not None:
+        return song["am"]
+    try:
+        found = am_songs(f"{song['title']} {song['artist']}")
+    except (OSError, ValueError):
+        return ""
+    match = next((i for i in found if song_key(i["title"]) == song_key(song["title"])), None)
+    song["am"] = match["id"] if match else ""
+    return song["am"]
+
+
+def deck_sonos_push(room, songs, sn, start_at=0):
+    """Make songs the room's queue and play from start_at seconds. Returns the
+    uids queued, in order (songs not on Apple Music are left out)."""
+    ip = room["ip"]
+    sonos_call(ip, "AVTransport", "RemoveAllTracksFromQueue", {"InstanceID": 0}, timeout=5)
+    pushed = []
+    for song in songs:
+        apple = deck_apple_id(song)
+        if not apple:
+            continue
+        uri, meta = sonos_apple_uri(apple, sn)
+        if sonos_call(ip, "AVTransport", "AddURIToQueue", {"InstanceID": 0, "EnqueuedURI": uri, "EnqueuedURIMetaData": meta,
+                                                           "DesiredFirstTrackNumberEnqueued": 0, "EnqueueAsNext": 0}, timeout=6):
+            pushed.append(song["uid"])
+    if not pushed:
+        return []
+    sonos_call(ip, "AVTransport", "SetAVTransportURI", {"InstanceID": 0, "CurrentURI": f"x-rincon-queue:{room['id']}#0",
+                                                       "CurrentURIMetaData": ""})
+    sonos_call(ip, "AVTransport", "Seek", {"InstanceID": 0, "Unit": "TRACK_NR", "Target": 1})
+    if start_at > 2:
+        sonos_call(ip, "AVTransport", "Seek", {"InstanceID": 0, "Unit": "REL_TIME", "Target": hms(start_at)})
+    sonos_call(ip, "AVTransport", "Play", {"InstanceID": 0, "Speed": 1})
+    return pushed
+
+
+def deck_sonos_resync(deck, room):
+    """After the set changes while a room plays it: keep the song playing,
+    replace what follows it with the set as it is now."""
+    ip = room["ip"]
+    sn = sonos_apple_sn()
+    position = sonos_call(ip, "AVTransport", "GetPositionInfo", {"InstanceID": 0}) or {}
+    total = int((sonos_call(ip, "AVTransport", "GetMediaInfo", {"InstanceID": 0}) or {}).get("NrTracks") or 0)
+    current = int(position.get("Track") or 1)
+    if total > current:
+        sonos_call(ip, "AVTransport", "RemoveTrackRangeFromQueue", {"InstanceID": 0, "UpdateID": 0,
+                                                                   "StartingIndex": current + 1,
+                                                                   "NumberOfTracks": total - current}, timeout=5)
+    pushed = [deck["now"]["uid"]] if deck.get("now") else []
+    for song in deck["set"]:
+        apple = deck_apple_id(song)
+        if not apple or not sn:
+            continue
+        uri, meta = sonos_apple_uri(apple, sn)
+        if sonos_call(ip, "AVTransport", "AddURIToQueue", {"InstanceID": 0, "EnqueuedURI": uri, "EnqueuedURIMetaData": meta,
+                                                           "DesiredFirstTrackNumberEnqueued": 0, "EnqueueAsNext": 0}, timeout=6):
+            pushed.append(song["uid"])
+    deck["pushed"] = pushed
+    deck["pushedFrom"] = current
+
+
+# ---- playing
+
+def deck_where_room(deck):
+    where = deck.get("where") or {}
+    if where.get("kind") != "sonos":
+        return None
+    return next((r for r in sonos_rooms() if r["id"] == where.get("room")), None)
+
+
+def deck_play_laptop(song, start_at=0):
+    """Start one song in its app on the laptop."""
+    if song["service"] == "applemusic":
+        reply = None
+        for attempt in range(30):
+            reply = am_bridge({"action": "queue", "kind": "song", "id": song["id"]}, timeout=12)
+            if reply and reply.get("ok"):
+                break
+            if attempt == 0 and (not reply or reply.get("error") == "no Apple Music tab"):
+                subprocess.Popen(["omarchy-launch-webapp", AM + "/"], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+            time.sleep(0.5)
+        if start_at > 2:
+            am_bridge({"action": "seek", "seconds": start_at}, timeout=4)
+    else:
+        with open(os.devnull, "w") as quiet, contextlib.redirect_stdout(quiet):
+            ytm_play({"kind": "song", "video": song["video"], "title": song["title"], "playlist": "", "browse": "",
+                      "subtitle": ""})
+
+
+def deck_status(deck):
+    """Where the playing song is: {time, length, playing}, from its player."""
+    room = deck_where_room(deck)
+    if room:
+        position = sonos_call(room["ip"], "AVTransport", "GetPositionInfo", {"InstanceID": 0}) or {}
+        state = (sonos_call(room["ip"], "AVTransport", "GetTransportInfo", {"InstanceID": 0}) or {}).get("CurrentTransportState", "")
+        def secs(text):
+            try:
+                h, m, s = (int(x) for x in text.split(":"))
+                return h * 3600 + m * 60 + s
+            except ValueError:
+                return 0
+        return {"time": secs(position.get("RelTime", "")), "length": secs(position.get("TrackDuration", "")),
+                "playing": state in {"PLAYING", "TRANSITIONING"}, "track": int(position.get("Track") or 0)}
+    song = deck.get("now") or {}
+    if song.get("service") == "applemusic":
+        now = am_now() or {}
+        item = now.get("item") or {}
+        return {"time": now.get("time", 0), "length": now.get("duration", 0), "playing": bool(now.get("playing")),
+                "id": str(item.get("id", ""))}
+    track = laptop_track() or {}
+    return {"time": track.get("position", 0), "length": track.get("length", 0), "playing": bool(track.get("playing")),
+            "title": track.get("title", "")}
+
+
+def deck_start(deck, song=None, start_at=0):
+    """Play song (or the next in the set) wherever the Deck plays."""
+    if song is None:
+        if not deck["set"]:
+            deck["playing"] = False
+            return False
+        song = deck["set"].pop(0)
+    if deck.get("now") and deck["now"]["uid"] != song["uid"]:
+        deck["played"] = (deck["played"] + [deck["now"]])[-40:]
+    deck["now"] = song
+    deck["set"] = [s for s in deck["set"] if s["uid"] != song["uid"]]
+    deck["playing"] = True
+    room = deck_where_room(deck)
+    if room:
+        sn = sonos_apple_sn()
+        if not sn:
+            toast("Sonos needs one Apple Music song first", "Play any Apple Music song in a room once (Send to Sonos does it)",
+                  glyph="󰀦")
+            deck["playing"] = False
+            return False
+        deck["pushed"] = deck_sonos_push(room, [song] + deck["set"], sn, start_at)
+        deck["pushedFrom"] = 1
+        if song["uid"] not in deck["pushed"]:
+            toast(f"{song['title']} isn't on Apple Music", "Sonos plays the Deck from Apple Music; skipped it", glyph="󰀦")
+        laptop = laptop_track()
+        if laptop and laptop["playing"] and media_command("pause") != "tab":
+            quiet_out("busctl", "--user", "call", laptop["player"], "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", "Pause")
+        toast(f"Playing in {room['name']}", f"{song['title']} · {song['artist']}", art=sonos_now(room)["track"].get("art", ""))
+    else:
+        deck_play_laptop(song, start_at)
+    deck["expect"] = {"uid": song["uid"], "since": time.time()}
+    deck_watch()
+    return True
+
+
+def deck_watch():
+    """Start the watcher if it isn't running."""
+    try:
+        with open(DECK_RUN_LOCK, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return
+    except OSError:
+        return
+    subprocess.Popen([str(Path(__file__).resolve()), "deck", "run"], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def deck_tick(last):
+    """One look at the player: move the set along when a song ends, follow a
+    Sonos room through its queue, step back if you've taken over. Returns the
+    status for next time."""
+    deck = deck_read()
+    if not deck["playing"] or not deck.get("now"):
+        return None
+    status = deck_status(deck)
+    write_atomic(DECK_NOW, json.dumps({**status, "uid": deck["now"]["uid"], "at": time.time()}) + "\n")
+    room = deck_where_room(deck)
+    if room:
+        # The room plays the queue itself: follow which song it's on.
+        index = status.get("track", 0) - deck.get("pushedFrom", 1)
+        pushed = deck.get("pushed") or []
+        if 0 < index < len(pushed) and pushed[index] != deck["now"]["uid"]:
+            uid = pushed[index]
+            def advance(d):
+                ordered = [d["now"]] + d["set"] if d.get("now") else d["set"]
+                at = next((i for i, s in enumerate(ordered) if s["uid"] == uid), None)
+                if at is None:
+                    return
+                d["played"] = (d["played"] + ordered[:at])[-40:]
+                d["now"], d["set"] = ordered[at], ordered[at + 1:]
+            deck_update(advance)
+        return status
+    if last is None or time.time() - (deck.get("expect") or {}).get("since", 0) < 6:
+        return status       # give a song a moment to start
+    song = deck["now"]
+    ran_out = last.get("length", 0) and last.get("time", 0) >= last["length"] - 12
+    if song["service"] == "applemusic":
+        changed = status.get("id") and status["id"] != song["id"]
+        stopped = not status["playing"] and status.get("time", 0) == 0 and last.get("time", 0) > 5
+    else:
+        changed = status.get("title") and song_key(status["title"]) != song_key(song["title"])
+        stopped = False
+    if not (changed or stopped):
+        return status
+    if ran_out or stopped or not last.get("length"):
+        deck_update(lambda d: deck_start(d))        # the song finished: next
+    else:
+        deck_update(lambda d: d.update(playing=False))   # you played something else: step back
+    return None
+
+
+def deck_run():
+    """The watcher: one at a time, until the Deck stops playing."""
+    with open(DECK_RUN_LOCK, "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        last, idle = None, 0
+        while idle < 3:
+            try:
+                status = deck_tick(last)
+            except Exception:       # a flaky player never kills the watcher
+                status = last
+            idle = idle + 1 if status is None else 0
+            last = status
+            time.sleep(1.5 if deck_where_room(deck_read()) is None else 2.5)
+
+
+def deck_command(settings, args):
+    action = args[0] if args else "state"
+    if action == "state":
+        deck = deck_read()
+        deck["rooms"] = [{"id": r["id"], "name": r["name"]} for r in sonos_rooms()]
+        print(json.dumps(deck))
+    elif action == "add" and len(args) >= 3 and args[1] in DECK_SERVICES:
+        try:
+            item = json.loads(args[2])
+        except ValueError:
+            sys.exit("Bad song.")
+        songs = deck_expand(args[1], item)
+        at = -1      # the end
+        if "--next" in args or "--play" in args:
+            at = 0
+        if "--at" in args and args.index("--at") + 1 < len(args) and args[args.index("--at") + 1].isdigit():
+            at = int(args[args.index("--at") + 1])
+        def add(d):
+            known = {(s["service"], s.get("id"), s.get("video")) for s in d["set"]}
+            fresh = [s for s in songs if (s["service"], s.get("id"), s.get("video")) not in known]
+            where = len(d["set"]) if at < 0 else min(at, len(d["set"]))
+            d["set"][where:where] = fresh
+            if "--play" in args and fresh:
+                deck_start(d, fresh[0])
+            return fresh
+        fresh = deck_update(add)
+        if fresh and "--play" not in args:
+            toast("Added to the Deck", fresh[0]["title"] + (f" and {len(fresh) - 1} more" if len(fresh) > 1 else ""),
+                  glyph="󰐒")
+        if "--play" not in args:
+            deck_after_edit()
+    elif action == "move" and len(args) == 3 and args[2].lstrip("-").isdigit():
+        def move(d):
+            song = next((s for s in d["set"] if s["uid"] == args[1]), None)
+            if song is None:
+                song = next((s for s in d["played"] if s["uid"] == args[1]), None)
+                if song is None:
+                    return
+                d["played"] = [s for s in d["played"] if s["uid"] != args[1]]
+            d["set"] = [s for s in d["set"] if s["uid"] != args[1]]
+            d["set"].insert(max(0, min(len(d["set"]), int(args[2]))), song)
+        deck_update(move)
+        deck_after_edit()
+    elif action == "remove" and len(args) == 2:
+        deck_update(lambda d: d.update(set=[s for s in d["set"] if s["uid"] != args[1]],
+                                       pinned=[u for u in d["pinned"] if u != args[1]]))
+        deck_after_edit()
+    elif action == "pin" and len(args) == 2:
+        deck_update(lambda d: d.update(pinned=[u for u in d["pinned"] if u != args[1]] if args[1] in d["pinned"]
+                                       else d["pinned"] + [args[1]]))
+    elif action == "shuffle":
+        def shuffle(d):
+            slots = [i for i, s in enumerate(d["set"]) if s["uid"] not in d["pinned"]]
+            songs = [d["set"][i] for i in slots]
+            random.shuffle(songs)
+            for i, song in zip(slots, songs):
+                d["set"][i] = song
+        deck_update(shuffle)
+        deck_after_edit()
+    elif action == "clear":
+        deck_update(lambda d: d.update(set=[], pinned=[]))
+        deck_after_edit()
+    elif action == "play":
+        uid = args[1] if len(args) > 1 else ""
+        def play(d):
+            if not uid and d.get("now") and not d["playing"]:
+                d["playing"] = True        # carry on with what was playing
+                deck_resume(d)
+                return True
+            song = next((s for s in d["set"] + d["played"] if s["uid"] == uid), None) if uid else None
+            if song is not None:
+                d["played"] = [s for s in d["played"] if s["uid"] != uid]
+            return deck_start(d, song)
+        deck_update(play)
+    elif action == "pause":
+        def pause(d):
+            d["playing"] = False
+            room = deck_where_room(d)
+            if room:
+                sonos_call(room["ip"], "AVTransport", "Pause", {"InstanceID": 0})
+            elif d.get("now", {}) and d["now"].get("service") == "applemusic":
+                am_bridge({"action": "pause"}, timeout=4)
+            else:
+                media_command("pause")
+        deck_update(pause)
+    elif action == "next":
+        deck_update(lambda d: deck_start(d))
+    elif action == "where" and len(args) == 2:
+        deck_where(args[1])
+    elif action == "fill":
+        deck_fill(settings)
+    elif action == "build" and len(args) >= 3 and args[1].isdigit():
+        start = args[args.index("--start") + 1] if "--start" in args and args.index("--start") + 1 < len(args) else ""
+        words = [a for i, a in enumerate(args[2:], 2)
+                 if a not in {"--start", "--replace"} and not (i > 0 and args[i - 1] == "--start")]
+        deck_build(settings, int(args[1]), " ".join(words), start, replace="--replace" in args)
+    elif action == "run":
+        deck_run()
+    else:
+        sys.exit("Usage: afterlight deck [state|add <ytmusic|applemusic> <item json> [--next]|move <uid> <index>|"
+                 "remove <uid>|pin <uid>|shuffle|clear|play [uid]|pause|next|where <laptop|room id>|fill|"
+                 "build <minutes> <what it's for> [--start <song>] [--replace]|run]")
+
+
+def deck_fill(settings, count=5):
+    """Grok's fast model picks songs that fit the set; each is found on your
+    music service and added to the end."""
+    deck = deck_read()
+    recent = ([deck["now"]] if deck.get("now") else []) + deck["set"]
+    if not recent:
+        toast("Add a few songs first", "Grok fills the Deck with songs that fit what's in it", glyph="󰀦")
+        return
+    if not shutil.which("grok"):
+        sys.exit("Filling the Deck needs the Grok agent (grok).")
+    toast("Grok is picking songs…", "That fit " + ", ".join(s["title"] for s in recent[-3:]), glyph="✦")
+    listing = "; ".join(f"{s['title']} by {s['artist']}" for s in recent[-8:])
+    ideas = grok_ideas("", ask="Suggest songs to follow this DJ set, in the same mood and flow, none already in it: "
+                           + listing.replace("»", "")[:900] + ".")
+    service = (settings.get("music") or {}).get("service", "ytmusic")
+    have = {song_key(s["title"]) for s in recent + deck["played"]}
+    found = []
+    for idea, match in find_songs(service, [i for i in ideas["songs"] if song_key(i["t"]) not in have]):
+        if match and len(found) < count and song_key(match["title"]) not in have:
+            found.append(deck_item(service, match))
+            have.add(song_key(match["title"]))
+    deck_update(lambda d: d["set"].extend(found))
+    deck_after_edit()
+    toast(f"Grok added {len(found)} songs" if found else "Grok couldn't find songs that fit",
+          ", ".join(s["title"] for s in found[:3]) + ("…" if len(found) > 3 else ""), glyph="✦")
+
+
+def deck_build(settings, minutes, brief, start="", replace=False):
+    """Build a set from a brief: what it's for, how long, maybe a first song.
+    Grok's fast model curates it in play order (a build, a peak, a wind-down);
+    each song is found on your music service and the set lands in the Deck."""
+    if not shutil.which("grok"):
+        sys.exit("Building a set needs the Grok agent (grok).")
+    minutes = max(10, min(240, minutes))
+    count = max(5, min(45, round(minutes / 3.7)))
+    brief = brief.replace("»", "").strip()[:600]
+    start = start.replace("»", "").strip()[:120]
+    toast("Grok is building your set…", f"About {minutes} minutes, {count} songs: {brief[:60]}", glyph="✦")
+    ask = (f"Curate a DJ set of about {minutes} minutes ({count} songs), in play order, for: «{brief}». "
+           + (f"Start with «{start}». " if start else "")
+           + "Shape it like a good DJ: ease in, build the energy, peak around two thirds of the way, then wind down. "
+             "Keep neighbouring songs compatible in tempo and mood; no song twice; well-known enough to be on streaming "
+             "services. In each 'w', say its job in the set in a few words (opener, builds, peak, cool-down…).")
+    ideas = grok_ideas("", ask=ask, count=count + 3, timeout=150)
+    service = (settings.get("music") or {}).get("service", "ytmusic")
+    found, seen = [], set()
+    for idea, match in find_songs(service, ideas["songs"]):
+        if match and song_key(match["title"]) not in seen and len(found) < count:
+            seen.add(song_key(match["title"]))
+            song = deck_item(service, match)
+            song["why"] = idea["w"]
+            found.append(song)
+    if not found:
+        toast("Grok couldn't build that set", "Try saying more about the mood or the music", glyph="󰀦")
+        return
+    def place(d):
+        d["set"] = found + ([] if replace else d["set"])
+        if replace:
+            d["pinned"] = []
+    deck_update(place)
+    deck_after_edit()
+    total = sum(1 for _ in found)
+    toast(f"Your set is ready: {total} songs", f"{found[0]['title']} → {found[-1]['title']}", glyph="✦")
+
+
+def deck_resume(deck):
+    room = deck_where_room(deck)
+    if room:
+        sonos_call(room["ip"], "AVTransport", "Play", {"InstanceID": 0, "Speed": 1})
+    elif deck["now"].get("service") == "applemusic":
+        am_bridge({"action": "play"}, timeout=4)
+    else:
+        media_command("play")
+    deck["expect"] = {"uid": deck["now"]["uid"], "since": time.time()}
+    deck_watch()
+
+
+def deck_after_edit():
+    """The set changed: a Sonos room playing it gets the new order after the
+    song it's on."""
+    def resync(d):
+        room = deck_where_room(d)
+        if room and d["playing"]:
+            deck_sonos_resync(d, room)
+    deck_update(resync)
+
+
+def deck_where(target):
+    """Move the Deck between the laptop and a Sonos room, from the same second."""
+    def move(d):
+        rooms = sonos_rooms()
+        room = None if target == "laptop" else sonos_find_room(rooms, target)
+        if target != "laptop" and room is None:
+            sys.exit("That Sonos room isn't there.")
+        before = deck_where_room(d)
+        if (room and before and room["id"] == before["id"]) or (room is None and before is None):
+            return
+        status = deck_status(d) if d.get("now") and d["playing"] else {"time": 0}
+        if before:
+            sonos_call(before["ip"], "AVTransport", "Pause", {"InstanceID": 0})
+        d["where"] = {"kind": "sonos", "room": room["id"]} if room else {"kind": "laptop"}
+        if d.get("now") and d["playing"]:
+            deck_start(d, d["now"], start_at=status.get("time", 0))
+            if room is None:
+                where_toast()
+    deck_update(move)
 
 
 # ---------------------------------------------------------------- plugin copies
@@ -4856,7 +5456,8 @@ def main(argv):
     with lock_path.open("a") as lock:
         # Read-only and network-bound commands don't hold the lock (a slow
         # GitHub shouldn't freeze the panel); `share` saves only the author.
-        if command not in {"state", "agents", "audio", "quick", "wifi", "bt", "media", "updates", "share", "check", "sonos"} \
+        if command not in {"state", "agents", "audio", "quick", "wifi", "bt", "media", "updates", "share", "check", "sonos",
+                           "deck", "music", "applemusic", "toast"} \
                 and not (command == "mouse" and args[:1] in (["daemon"], ["status"])) \
                 and not (command == "catalog" and args[:1] in ([], ["list"])):
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -5032,6 +5633,8 @@ def main(argv):
         elif command == "toast" and 1 <= len(args) <= 3:
             # A music message in the bar's popup: afterlight toast <title> [detail] [glyph]
             toast(args[0], args[1] if len(args) > 1 else "", glyph=args[2] if len(args) > 2 else "󰜟")
+        elif command == "deck":
+            deck_command(settings, args)
         elif command == "music":
             action = args[0] if args else ""
             if action == "suggest" and len(args) >= 3 and args[1] in {"ytmusic", "applemusic"}:

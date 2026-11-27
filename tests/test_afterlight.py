@@ -532,6 +532,99 @@ class HealthTests(TempCase):
         self.assertTrue(any(c[0] == "omarchy-notification-send" for c in self.calls))
 
 
+class DeckTests(TempCase):
+    """The Deck's set: songs in, moved, shuffled around pins, built from a brief."""
+
+    def setUp(self):
+        super().setUp()
+        for name, value in {"DECK": self.tmp / "deck.json", "DECK_LOCK": self.tmp / "deck.lock",
+                            "DECK_NOW": self.tmp / "deck-now.json"}.items():
+            self.patch(name, value)
+        self.patch("toast", lambda *a, **k: None)
+        self.patch("deck_after_edit", lambda: None)
+        self.patch("sonos_rooms", lambda: [])
+
+    def apple(self, n, title=None, by="Someone"):
+        return {"kind": "song", "id": str(1000 + n), "title": title or f"Song {n}", "subtitle": f"{by} • An Album",
+                "thumb": "https://example.com/a.jpg"}
+
+    def deck(self, *args):
+        al.deck_command({}, list(args))
+        return al.deck_read()
+
+    def test_add_checks_and_places_songs(self):
+        for n in range(3):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        d = self.deck("add", "applemusic", json.dumps(self.apple(9)), "--at", "1")
+        self.assertEqual([s["title"] for s in d["set"]], ["Song 0", "Song 9", "Song 1", "Song 2"])
+        self.assertEqual(d["set"][0]["artist"], "Someone")
+        # The same song twice is one song; a bad id or a web page link never gets in.
+        self.assertEqual(len(self.deck("add", "applemusic", json.dumps(self.apple(0)))["set"]), 4)
+        with self.assertRaises(SystemExit):
+            self.deck("add", "applemusic", json.dumps({**self.apple(5), "id": "1; rm -rf ~"}))
+        with self.assertRaises(SystemExit):
+            self.deck("add", "beatport", json.dumps(self.apple(5)))
+        bad_art = self.deck("add", "applemusic", json.dumps({**self.apple(6), "thumb": "file:///etc/passwd"}))
+        self.assertEqual(bad_art["set"][-1]["thumb"], "")
+
+    def test_move_remove_and_back_from_played(self):
+        for n in range(4):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        uids = [s["uid"] for s in al.deck_read()["set"]]
+        d = self.deck("move", uids[3], "0")
+        self.assertEqual([s["title"] for s in d["set"]], ["Song 3", "Song 0", "Song 1", "Song 2"])
+        d = self.deck("remove", uids[0])
+        self.assertNotIn("Song 0", [s["title"] for s in d["set"]])
+        al.deck_update(lambda d: d.update(played=[{"uid": "old1", "title": "Earlier", "service": "applemusic", "id": "7"}]))
+        d = self.deck("move", "old1", "1")
+        self.assertEqual(d["set"][1]["title"], "Earlier")
+        self.assertEqual(d["played"], [])
+
+    def test_shuffle_leaves_pinned_songs_in_place(self):
+        for n in range(8):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        uids = [s["uid"] for s in al.deck_read()["set"]]
+        self.deck("pin", uids[0])
+        self.deck("pin", uids[5])
+        for _ in range(5):
+            d = self.deck("shuffle")
+            self.assertEqual((d["set"][0]["uid"], d["set"][5]["uid"]), (uids[0], uids[5]))
+            self.assertEqual(sorted(s["uid"] for s in d["set"]), sorted(uids))
+        self.assertEqual(self.deck("pin", uids[0])["pinned"], [uids[5]])
+
+    def test_build_asks_for_the_right_length_and_keeps_reasons(self):
+        asked = {}
+        def ideas(query, ask=None, count=6, timeout=45):
+            asked.update(ask=ask, count=count)
+            return {"songs": [{"t": "Lady", "a": "Modjo", "w": "opener"}, {"t": "Finally", "a": "CeCe Peniston", "w": "builds"},
+                              {"t": "Lady", "a": "Modjo", "w": "again"}], "q": []}
+        self.patch("grok_ideas", ideas)
+        self.patch("find_songs", lambda service, wanted: [(i, self.apple(n, i["t"], i["a"])) for n, i in enumerate(wanted)])
+        with mock.patch("shutil.which", return_value="/usr/bin/grok"):
+            al.deck_command({"music": {"service": "applemusic"}},
+                            ["build", "60", "rooftop", "at", "sunset", "--start", "Lady by Modjo", "--replace"])
+        d = al.deck_read()
+        self.assertEqual(asked["count"], 16 + 3)                     # an hour is about 16 songs
+        self.assertIn("«rooftop at sunset»", asked["ask"])
+        self.assertIn("Start with «Lady by Modjo»", asked["ask"])
+        self.assertEqual([(s["title"], s["why"]) for s in d["set"]], [("Lady", "opener"), ("Finally", "builds")])
+
+    def test_sonos_queue_entry_for_an_apple_song(self):
+        uri, meta = al.sonos_apple_uri("1440833098", "13")
+        self.assertEqual(uri, "x-sonos-http:song%3a1440833098.mp4?sid=204&flags=8232&sn=13")
+        self.assertIn('id="10032020song%3a1440833098"', meta)
+        self.assertIn("SA_RINCON52231_X_#Svc52231-0-Token", meta)
+
+    def test_find_songs_prefers_the_named_artist_over_covers(self):
+        results = [{"kind": "song", "title": "Music Sounds Better With You", "subtitle": "Dance Fruits Music • Covers", "id": "1"},
+                   {"kind": "song", "title": "Music Sounds Better With You", "subtitle": "Stardust • Single", "id": "2"}]
+        self.patch("am_songs", lambda query, limit=10: results)
+        [(idea, match)] = al.find_songs("applemusic", [{"t": "Music Sounds Better With You", "a": "Stardust", "w": ""}])
+        self.assertEqual(match["id"], "2")
+        [(idea, match)] = al.find_songs("applemusic", [{"t": "Music Sounds Better With You", "a": "Nobody Here", "w": ""}])
+        self.assertIsNone(match)
+
+
 if __name__ == "__main__":
     unittest.main()
 

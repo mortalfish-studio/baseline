@@ -103,7 +103,8 @@ async function appleMusic(op, tab) {
                  container: n.container ? { type: String(n.container.type || ""), id: String(n.container.id || "") } : null };
       };
       const state = () => ({ ok: true, signedIn: !!kit.isAuthorized, playing: !!kit.isPlaying,
-                             time: Math.floor(kit.currentPlaybackTime || 0), item: now() });
+                             time: Math.floor(kit.currentPlaybackTime || 0),
+                             duration: Math.floor(kit.currentPlaybackDuration || 0), item: now() });
       if (op.action === "now") return state();
       if (op.action === "queue") {
         if (!kit.isAuthorized) return { ok: false, error: "signed out" };

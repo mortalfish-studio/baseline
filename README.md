@@ -107,6 +107,17 @@ The Player tab drives three services in Chrome, through the [Chrome add-on](docs
 
 **Nothing plays on a guess.** "Play …" starts something only when the best match is clearly what you asked for: the title you said, and the artist when you said one. A mood or anything vaguer ("a sunset playlist for the kitchen") plays nothing and opens the Player tab on suggestions: the closest matches straight away, then about ten seconds later ideas from Grok's fast model (`grok-4.7-build-fast`, all tools off), each found on the same service so a tap plays it, plus searches to try. *Ask Grok for ideas* under the search box does the same for anything you type.
 
+### The Deck
+
+`omarchy-shell mortalfish.baseline deck`, or *Open the Deck* in the Player tab: a window for a set of songs you arrange by hand, from YouTube Music and Apple Music together.
+
+- **Find songs** on the left (the same YouTube Music / Apple Music switch) and drag one into the set, onto the cover to play it now, or onto a room to play it there. ▶ and + do the same without dragging; an Apple Music album adds all its songs.
+- **Arrange the set**: drag songs up and down, pin one (📌) to keep it in place when you shuffle, remove one, or drag a song from *Played* back in.
+- **Build a set** from a brief: say what the party is (a theme, a mood, who's coming, artists to lean on), pick 30 minutes to 3 hours, and Grok's fast model curates it in play order: it eases in, builds, peaks about two thirds of the way and winds down, starting from the song that's playing. Each song carries a few words on its job in the set. **Fill** adds five more that fit what's already there. Both take about half a minute; a message says when the songs land.
+- **Play in** a room: tap the laptop or a Sonos room along the bottom, and the set moves there at the same second. On the laptop, songs play one at a time in their own app and Baseline starts the next when one ends (start something else yourself and the Deck steps back). In a Sonos room the set becomes the room's queue as Apple Music songs (YouTube Music songs are looked up on Apple Music first), so the speaker plays it gaplessly, and skipping on the speaker or in the Sonos app moves the Deck along too.
+
+The same from a terminal: `afterlight deck state|add|move|remove|pin|shuffle|clear|play|pause|next|where <laptop|room id>|fill|build <minutes> <brief> [--start <song>] [--replace]`.
+
 ## Sonos
 
 When Sonos speakers answer on your network, the Player tab's output row gets a **Sonos** tile. Pick it, then a room (groups show as "Kitchen + Lounge"): the card shows what that room is playing, with its cover, play/pause and skip, and the volume slider, mute and the keyboard's volume keys now drive that room (`system/bin/baseline-volume`). Pick Speaker or Headphones to hand them back. The laptop's own sound isn't moved. It all talks to the speakers directly on the local network (`afterlight sonos …`), so it's instant and needs no account; keep UPnP on in the Sonos app. Playing something by name goes through OmaRelay and the Grok agent: "play Bonobo on Sonos in the kitchen".

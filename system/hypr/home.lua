@@ -38,3 +38,5 @@ o.rebind("ALT + XF86AudioLowerVolume", "Volume down precise", volume .. " -1", {
 
 -- Baseline Studio (the picture library and look maker): a centred float.
 o.window({ title = "^Baseline Studio$" }, { float = true, center = true, size = { 1240, 840 } })
+-- The Deck (the set of songs to arrange and play): a centred float too.
+o.window({ title = "^Baseline Deck$" }, { float = true, center = true, size = { 1240, 820 } })

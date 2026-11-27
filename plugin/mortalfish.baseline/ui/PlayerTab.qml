@@ -488,6 +488,11 @@ Column {
           onClicked: root.pickService(modelData.id)
         }
       }
+      Chip {
+        text: "󰲸  " + strings.t("deck.open")
+        tone: root.amber
+        onClicked: if (root.host) root.host.openDeck()
+      }
     }
     RowLayout {
       width: parent.width

@@ -398,6 +398,8 @@ BarWidget {
     }
     // Baseline Studio: the picture library or the look maker.
     function studio(page: string): void { root.openStudio(page === "looks" || page === "browse" ? page : "library") }
+    // The Deck: the set of songs to arrange, play and send to a room.
+    function deck(): void { root.openDeck() }
     // Scroll the open tab to a fraction (0-1) of its height: for screenshots.
     function scroll(fraction: real): void { root.scrollRequest = fraction; root.scrollRequestChanged() }
   }
@@ -783,6 +785,23 @@ BarWidget {
     onLoaded: {
       item.host = root
       item.show(root.studioPage)
+    }
+  }
+
+  // The Deck: made on first use, kept while open.
+  property bool deckWanted: false
+  function openDeck() {
+    close()
+    if (deckWanted && deckLoader.item) deckLoader.item.show()
+    else deckWanted = true
+  }
+  Loader {
+    id: deckLoader
+    active: root.deckWanted
+    source: "Deck.qml"
+    onLoaded: {
+      item.host = root
+      item.show()
     }
   }
 

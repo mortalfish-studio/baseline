@@ -10,7 +10,7 @@ A small add-on, **Baseline for Beatport**, lets Baseline work those pages. It ca
 - start them playing
 - list your Beatport playlists in the panel
 - add tracks to your likes (♥)
-- play Apple Music search results through Apple's own player in the page (MusicKit): a song within its album, an album, or an artist's top songs; and read what it's playing
+- play Apple Music search results through Apple's own player in the page (MusicKit): a song within its album, an album, or an artist's top songs; and read what it's playing, where it is and how long it is (so the [Deck](../README.md#the-deck) knows when a song ends)
 - keep only one thing playing at a time
 
 None of this is required. Without the add-on, Baseline still opens these pages and the media keys still work. You just lose playing them in place and the playlist list.
