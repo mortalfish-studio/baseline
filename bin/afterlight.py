@@ -3897,7 +3897,7 @@ DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kin
               "pushed": [], "pushedFrom": 1, "expect": None, "was": None, "updated": 0,
               "lock": False, "requests": [], "guests": None, "requestsAuto": False, "votes": {}, "lastCall": 0,
               "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": "",
-              "micViz": False}
+              "micViz": False, "speaking": None, "asks": []}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -5511,6 +5511,8 @@ def deck_guests_serve(token):
                     fresh.append({**song, "service": "applemusic", "rid": os.urandom(4).hex(), "by": by, "photo": photo, "phone": phone,
                                   "gid": gid if person else "", "note": note, "at": int(time.time())})
                 d["requests"] = (waiting + fresh)[-40:]
+                d["asks"] = ((d.get("asks") or []) + [{k: r.get(k, "") for k in ("rid", "by", "photo", "title", "artist", "thumb", "note")}
+                                                      | {"at": time.time()} for r in fresh])[-8:]
                 return [r["rid"] for r in fresh], bool(d.get("requestsAuto"))
             taken, auto = deck_update(ask)
             if person and taken:
@@ -5832,9 +5834,20 @@ def clip_seconds(wav):
         return w.getnframes() / float(w.getframerate() or 1)
 
 
-def deck_room_clip(deck, room, mp3, length, track, at=0):
+def deck_moment(song, length):
+    """What the stage shows while a dedication is read: who, what they said,
+    for which song, and until when."""
+    if not song:
+        return None
+    return {"rid": song.get("rid", ""), "by": song.get("by", ""), "photo": song.get("photo", ""), "note": song.get("note", ""),
+            "title": song.get("title", ""), "artist": song.get("artist", ""), "thumb": song.get("thumb", ""),
+            "start": time.time(), "until": time.time() + length}
+
+
+def deck_room_clip(deck, room, mp3, length, track, at=0, song=None):
     """A Sonos room plays a clip (from the guest page's server), then goes
-    back to its queue at track (from at seconds) and plays on."""
+    back to its queue at track (from at seconds) and plays on. With song, the
+    stage shows its dedication meanwhile."""
     url = (deck.get("guests") or {}).get("url")
     if not url:
         return False
@@ -5850,6 +5863,8 @@ def deck_room_clip(deck, room, mp3, length, track, at=0):
             if state == "PLAYING":
                 break
             time.sleep(0.3)
+        if song:
+            deck_update(lambda d: d.update(speaking=deck_moment(song, length)))
         time.sleep(length + 0.6)
     finally:
         sonos_call(ip, "AVTransport", "SetAVTransportURI", {"InstanceID": 0, "CurrentURI": f"x-rincon-queue:{room['id']}#0",
@@ -5860,13 +5875,14 @@ def deck_room_clip(deck, room, mp3, length, track, at=0):
         if deck.get("crossfade"):
             sonos_call(ip, "AVTransport", "SetCrossfadeMode", {"InstanceID": 0, "CrossfadeMode": 1})
         sonos_call(ip, "AVTransport", "Play", {"InstanceID": 0, "Speed": 1})
-        deck_update(lambda d: d.update(voiceUntil=0))
+        deck_update(lambda d: d.update(voiceUntil=0, speaking=None))
         deck_sonos_soon()
     return True
 
 
-def deck_laptop_clip(song, wav, length):
-    """Play a clip on the laptop, the song's app dipping under it."""
+def deck_laptop_clip(song, wav, length, moment=False):
+    """Play a clip on the laptop, the song's app dipping under it (with
+    moment, the stage shows the song's dedication meanwhile)."""
     was = deck_app_volume(song) if song else None
     def ramp(start, end, seconds, steps=6):
         for i in range(1, steps + 1):
@@ -5874,9 +5890,13 @@ def deck_laptop_clip(song, wav, length):
             time.sleep(seconds / steps)
     if was:
         ramp(was, was * VOICE_DUCK, 0.6)
+    if moment:
+        deck_update(lambda d: d.update(speaking=deck_moment(song, length)))
     try:
         subprocess.run(["pw-play", str(wav)], stdin=subprocess.DEVNULL, timeout=length + 15)
     finally:
+        if moment:
+            deck_update(lambda d: d.update(speaking=None))
         if was:
             ramp(was * VOICE_DUCK, was, 1.5)
 
@@ -5899,9 +5919,9 @@ def deck_say(uid, before=False):
     if room:
         mp3 = voice_mp3(wav)
         track = int((sonos_call(room["ip"], "AVTransport", "GetPositionInfo", {"InstanceID": 0}) or {}).get("Track") or 0)
-        return bool(mp3 and track) and deck_room_clip(deck, room, mp3, length, track + (1 if before else 0))
+        return bool(mp3 and track) and deck_room_clip(deck, room, mp3, length, track + (1 if before else 0), song=song)
     time.sleep(2.5)             # let the song get going: the voice talks over its intro
-    deck_laptop_clip(song, wav, length)
+    deck_laptop_clip(song, wav, length, moment=True)
     return True
 
 
