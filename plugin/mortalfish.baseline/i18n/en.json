@@ -700,5 +700,7 @@
   "deck.towardThrowbacks": "Throwbacks",
   "deck.towardHouse": "Deep house",
   "deck.towardLatin": "Latin heat",
-  "deck.towardChill": "Chill out"
+  "deck.towardChill": "Chill out",
+  "deck.autoTidy": "Auto-DJ tidies its songs once their tempos are in",
+  "deck.autoTidyTip": "When Auto-DJ adds songs, it waits for their real tempo and key, then fixes the bumps among them (yours stay put)"
 }

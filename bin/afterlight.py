@@ -3903,7 +3903,8 @@ DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kin
               "lock": False, "requests": [], "guests": None, "requestsAuto": False, "votes": {}, "lastCall": 0,
               "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": "",
               "micViz": False, "speaking": None, "asks": [], "awoke": False, "phoneSeen": 0, "ready": None,
-              "recapAt": 0, "closedAt": 0, "skipped": [], "direction": "", "toward": None}
+              "recapAt": 0, "closedAt": 0, "skipped": [], "direction": "", "toward": None,
+              "autoTidy": True, "autodjSettle": None}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -4359,6 +4360,10 @@ def deck_tick(last):
     status for next time."""
     deck = deck_read()
     deck_closing(deck)
+    if deck_settle_due(deck):
+        uids = set(deck["autodjSettle"]["uids"])
+        deck_edit(lambda d: (deck_tidy(d, uids), d.update(autodjSettle=None)))
+        deck_after_edit()
     if not deck["playing"] or not deck.get("now"):
         return None
     if deck_autodj_due(deck):
@@ -5052,12 +5057,12 @@ def deck_bump(before, song):
         + (3 if deck_artists(before) & deck_artists(song) else 0)
 
 
-def deck_smooth_bumps(d, full, now):
+def deck_smooth_bumps(d, full, now, fixed=None):
     """Fix the bumps: keep the order, but move a song that doesn't sit well
     (the ◆ ones) to wherever it fits best, one move at a time, while that
     makes the set smoother. Pinned songs stay put."""
     info = lambda s: full.get(s["uid"], s)
-    pinned = set(d["pinned"])
+    pinned = set(d["pinned"]) | set(fixed or ())
     def total(seq):
         return sum(deck_bump(info(a) if a else now, info(b)) for a, b in zip([None] + seq[:-1], seq))
     seq = list(d["set"])
@@ -5085,6 +5090,28 @@ def deck_smooth_bumps(d, full, now):
         best, seq, moved = choice[0], choice[1], True
     d["set"] = seq
     return moved or True
+
+
+DECK_TIDY_WAIT = 240           # seconds to wait for Auto-DJ's songs' tempos before tidying anyway
+
+
+def deck_tidy(d, uids):
+    """Auto-DJ's songs, once their real tempo and key are in: Fix bumps, but
+    only those songs move. The next song, yours, and pinned ones stay."""
+    full = {s["uid"]: s for s in deck_with_details({**d, "set": list(d["set"]), "played": [], "now": d.get("now")})["set"]}
+    now = deck_with_details({**d, "set": [], "played": []}).get("now")
+    fixed = {s["uid"] for i, s in enumerate(d["set"]) if i == 0 or s["uid"] not in uids}
+    return deck_smooth_bumps(d, full, now, fixed)
+
+
+def deck_settle_due(deck):
+    """Auto-DJ added songs a while ago and their tempos are in (or it's waited long enough)."""
+    settle = deck.get("autodjSettle") or {}
+    if not settle.get("uids") or not deck.get("autoTidy", True):
+        return False
+    details = deck_details_read()
+    waiting = [s for s in deck["set"] if s["uid"] in settle["uids"] and not details.get(deck_song_key(s), {}).get("bpm")]
+    return not waiting or time.time() - settle.get("at", 0) > DECK_TIDY_WAIT
 
 
 def deck_pause(d):
@@ -6413,6 +6440,8 @@ def deck_command(settings, args):
         deck_update(lambda d: d.update(autodj=args[1] == "on", autodjAt=0, **({} if args[1] == "on" else {"direction": "", "toward": None})))
         if args[1] == "on":
             deck_watch()
+    elif action == "autodj" and len(args) == 3 and args[1] == "tidy" and args[2] in {"on", "off"}:
+        deck_update(lambda d: d.update(autoTidy=args[2] == "on", **({} if args[2] == "on" else {"autodjSettle": None})))
     elif action == "autodj" and len(args) >= 3 and args[1] == "toward":
         deck_toward(settings, " ".join(args[2:]))
     elif action == "autodj" and len(args) == 4 and args[1] == "from" and args[2] in DECK_SERVICES:
@@ -6688,6 +6717,10 @@ def deck_fill(settings, count=5, auto=False, seed=None):
         # Near the song they follow in tempo, in an order that mixes, the way the shape points.
         found = deck_mix_pick(picks, anchor, count, deck.get("direction") or "")
     def place(d):
+        heading = (d.get("toward") or {}).get("brief") and d["toward"].get("done", 0) < d["toward"].get("steps", 6)
+        if (auto or seed) and found and not heading:
+            # Tidied once their real tempos are in (Grok's guesses can be off).
+            d["autodjSettle"] = {"uids": [s["uid"] for s in found], "at": time.time()}
         if auto and found and (d.get("toward") or {}).get("brief"):
             d["toward"]["done"] = d["toward"].get("done", 0) + len(found)
         if seed:                            # straight after the pick

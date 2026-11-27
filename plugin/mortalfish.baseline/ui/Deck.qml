@@ -1821,6 +1821,14 @@ Item {
                 glyph: "󰅖"; text: strings.t("deck.towardOff")
                 onTapped: root.run(["deck", "autodj", "toward", "off"])
               }
+              // Auto-DJ tidies its own songs once their real tempos are in (on unless you turn it off).
+              HeadLink {
+                height: 30
+                glyph: root.deck.autoTidy !== false ? "󰄲" : "󰄱"
+                text: strings.t("deck.autoTidy")
+                tip: strings.t("deck.autoTidyTip")
+                onTapped: root.run(["deck", "autodj", "tidy", root.deck.autoTidy !== false ? "off" : "on"])
+              }
             }
             // Naming a set to save (what, and where), or finding a song in this one.
             Rectangle {

@@ -1821,3 +1821,29 @@ class AutoDJTowardTest(unittest.TestCase):
         self.assertEqual(state["toward"]["brief"], "deep house")
         self.assertTrue(state["autodj"])
         self.assertEqual(fill.call_args.kwargs, {"count": 6, "auto": True})
+
+
+class AutoDJTidyTest(unittest.TestCase):
+    def test_only_autodjs_songs_move_and_the_next_stays(self):
+        song = lambda uid, bpm: {"uid": uid, "title": uid, "artist": uid, "bpm": bpm, "key": "8A", "service": "x"}
+        d = {"now": song("now", 124), "pinned": [], "played": [],
+             "set": [song("next", 124), song("mine", 122), song("a1", 98), song("a2", 123), song("a3", 100)]}
+        with mock.patch.object(al, "deck_with_details", side_effect=lambda x: x):
+            al.deck_tidy(d, {"a1", "a2", "a3"})
+        order = [s["uid"] for s in d["set"]]
+        self.assertEqual(order[:2], ["next", "mine"])                  # next and yours stay put
+        self.assertEqual(order[2], "a2")                               # the near-tempo one comes first
+        self.assertEqual(sorted(order[3:]), ["a1", "a3"])              # the slow pair sit together
+
+    def test_settle_waits_for_tempos_then_goes(self):
+        deck = {"autoTidy": True, "autodjSettle": {"uids": ["a"], "at": time.time()},
+                "set": [{"uid": "a", "service": "applemusic", "id": "9"}]}
+        with mock.patch.object(al, "deck_details_read", return_value={}):
+            self.assertFalse(al.deck_settle_due(deck))
+            deck["autodjSettle"]["at"] -= al.DECK_TIDY_WAIT + 1
+            self.assertTrue(al.deck_settle_due(deck))                  # waited long enough
+        deck["autodjSettle"]["at"] = time.time()
+        with mock.patch.object(al, "deck_details_read", return_value={"am:9": {"bpm": 120}}):
+            self.assertTrue(al.deck_settle_due(deck))
+            deck["autoTidy"] = False
+            self.assertFalse(al.deck_settle_due(deck))
