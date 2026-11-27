@@ -38,6 +38,7 @@ Most of it is ordinary Omarchy configuration and should work on any machine, x86
 - Optional:
   - a **Razer Basilisk V3** mouse for the lighting and extra buttons (other mice need tweaking; see [Built on](#built-on))
   - **[Beatport](https://www.beatport.com)** and/or **[YouTube Music](https://music.youtube.com)** with the [Chrome add-on](chrome-extension.md) for the Player tab
+  - **Sonos** (S2): say "play … on Sonos in the kitchen" to OmaRelay and the Grok agent plays it, through [Sonos's MCP server](https://support.sonos.com/en/article/control-your-sonos-system-with-ai-using-sonos-27mcp). Set up in [OmaRelay's README](https://github.com/mortalfish-studio/omarelay#sonos-through-the-grok-agent)
 
 Using a different coding or chat app, such as [Herdr](https://herdr.dev) (`omarchy install ai herdr`), Claude or ChatGPT? See [adapting.md](adapting.md).
 

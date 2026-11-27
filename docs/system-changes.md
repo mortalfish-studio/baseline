@@ -96,5 +96,6 @@ Chrome's colour follows the look through Omarchy's own browser policy (`/etc/opt
 | Studio → Browse / Add | clones the public catalog; downloads pictures **only if you choose to**, from Wallhaven, Unsplash or Wikimedia |
 | adding a Wallhaven link | asks Wallhaven's API for the picture and its credit |
 | Share… | opens a public pull request on the catalog (only when you press it) |
+| saying "Sonos" to OmaRelay | the Grok agent (`grok -p`, Sonos tools only) talks to Sonos's cloud; only if you've added and signed in to the Sonos MCP yourself |
 
 Nothing is sent anywhere else, and nothing personal goes into shared looks: commits use your GitHub no-reply address and an author handle you choose.
