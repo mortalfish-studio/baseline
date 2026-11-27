@@ -506,7 +506,7 @@
   "deck.buildFrom": "Starts from %1, then eases in, builds, peaks and winds down. Grok takes about half a minute.",
   "deck.buildNote": "Grok eases in, builds, peaks and winds down. It takes about half a minute; the songs land in the set.",
   "deck.search": "Find a song, album or playlist",
-  "deck.findHint": "Search for a song, album or playlist (yours come first). ▶ plays it now, + adds it; or drag it into the set, onto the cover, or onto a room.",
+  "deck.findHint": "Search for a song, album or playlist (yours come first). Tap one to choose: now, next, later or somewhere in the set; or drag it in, onto the cover, or onto a room.",
   "deck.playNow": "Play now",
   "deck.add": "Add to the set",
   "deck.played": "Played",
@@ -537,7 +537,16 @@
   "deck.dropToLeave": "Drop outside to take it out",
   "deck.busy": "In use",
   "deck.paused": "Paused",
-  "deck.sendHome": "Back to workspace %1",
+  "deck.sendHome": "Back to Deck",
   "deck.yourPlaylist": "Your playlist",
-  "deck.playlist": "Playlist"
+  "deck.playlist": "Playlist",
+  "hover.deckNext": "Next on the Deck: %1",
+  "deck.bloomNow": "Now",
+  "deck.bloomNext": "Next",
+  "deck.bloomLater": "Later",
+  "deck.bloomSomewhere": "Somewhere",
+  "deck.bloomMix": "Mix in",
+  "deck.crate": "Crate",
+  "deck.crateOpen": "Open the crate",
+  "deck.crateClose": "Fold the crate away"
 }

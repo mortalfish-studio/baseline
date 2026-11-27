@@ -609,6 +609,30 @@ class DeckTests(TempCase):
         self.assertIn("Start with «Lady by Modjo»", asked["ask"])
         self.assertEqual([(s["title"], s["why"]) for s in d["set"]], [("Lady", "opener"), ("Finally", "builds")])
 
+    def test_mix_in_scatters_songs_after_the_next_one(self):
+        for n in range(6):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        first = al.deck_read()["set"][0]["uid"]
+        self.patch("deck_expand", lambda service, item: [al.deck_item(service, self.apple(20)), al.deck_item(service, self.apple(21))])
+        d = self.deck("add", "applemusic", json.dumps({"kind": "playlist", "id": "pl.x", "title": "Mix"}), "--scatter")
+        self.assertEqual(len(d["set"]), 8)
+        self.assertEqual(d["set"][0]["uid"], first)                   # what's next stays next
+        self.assertEqual([s["title"] for s in d["set"] if s["title"] not in ("Song 20", "Song 21")],
+                         [f"Song {n}" for n in range(6)])              # the rest keep their order
+
+    def test_previous_goes_back_or_restarts(self):
+        started = []
+        self.patch("deck_start", lambda deck, song=None, start_at=0: (started.append(song["uid"]), deck.update(now=song))[1] or True)
+        deck = {**al.DECK_EMPTY, "set": [{"uid": "c"}], "played": [{"uid": "a"}], "now": {"uid": "b"}, "playing": True}
+        self.patch("deck_status", lambda d: {"time": 30})
+        al.deck_previous(deck)                                         # well into a song: back to its start
+        self.assertEqual(started, ["b"])
+        self.patch("deck_status", lambda d: {"time": 2})
+        al.deck_previous(deck)                                         # just started: the one before
+        self.assertEqual(started, ["b", "a"])
+        self.assertEqual([s["uid"] for s in deck["set"]], ["b", "c"])
+        self.assertEqual(deck["played"], [])
+
     def test_sonos_queue_entry_for_an_apple_song(self):
         uri, meta = al.sonos_apple_uri("1440833098", "13")
         self.assertEqual(uri, "x-sonos-http:song%3a1440833098.mp4?sid=204&flags=8232&sn=13")
@@ -1048,6 +1072,34 @@ class SonosTests(TempCase):
         self.assertEqual(log.read_text().splitlines(), [
             "omarchy-audio-output-volume raise", "afterlight sonos volume -1 --osd",
             "afterlight sonos volume mute-toggle --osd"])
+
+
+    def test_media_keys_drive_the_deck_while_it_plays(self):
+        """baseline-media: the Deck while playing or paused by you, Omarchy otherwise."""
+        bin_dir = self.tmp / "bin"
+        (self.tmp / ".local/bin").mkdir(parents=True)
+        bin_dir.mkdir()
+        log = self.tmp / "calls"
+        for name, where in (("afterlight", self.tmp / ".local/bin"), ("omarchy-shell", bin_dir)):
+            tool = where / name
+            tool.write_text(f'#!/bin/bash\necho "{name} $*" >> "{log}"\n')
+            tool.chmod(0o755)
+        env = {"HOME": str(self.tmp), "PATH": f"{bin_dir}:/usr/bin:/bin", "XDG_STATE_HOME": str(self.tmp / "state")}
+        script = str(ROOT / "system/bin/baseline-media")
+        import subprocess
+        deck = self.tmp / "state/afterlight/deck.json"
+        subprocess.run([script, "next"], env=env, check=True)                       # no Deck yet
+        deck.parent.mkdir(parents=True)
+        deck.write_text(json.dumps({"playing": True, "now": {"uid": "a"}}))
+        subprocess.run([script, "playPause"], env=env, check=True)
+        subprocess.run([script, "previous"], env=env, check=True)
+        deck.write_text(json.dumps({"playing": False, "paused": True, "now": {"uid": "a"}}))
+        subprocess.run([script, "playPause"], env=env, check=True)
+        deck.write_text(json.dumps({"playing": False, "paused": False, "now": {"uid": "a"}}))   # you took over
+        subprocess.run([script, "playPause"], env=env, check=True)
+        self.assertEqual(log.read_text().splitlines(), [
+            "omarchy-shell media next", "afterlight deck pause", "afterlight deck previous",
+            "afterlight deck play", "omarchy-shell media playPause"])
 
 
 class SendToSonosTests(TempCase):

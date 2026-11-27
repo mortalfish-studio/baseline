@@ -15,6 +15,7 @@ Installed with Omarchy's own tools (`omarchy pkg add`, `omarchy install …`):
 | python, imagemagick, rsync, patch, diffutils | the `afterlight` command, picture handling, plugin copies |
 | [starship](https://starship.rs/) | the prompt (Omarchy ships it already) |
 | [OpenRGB](https://gitlab.com/CalcProgrammer1/OpenRGB) | the Razer mouse's lights; its package adds udev rules giving your user access to RGB devices |
+| [cava](https://github.com/karlstav/cava) | the Deck's equalizer: it reads the laptop's sound from PipeWire while the Deck is on screen and playing on the laptop |
 | [T3 Code](https://github.com/pingdotgg/t3code) | the coding agent app (`omarchy install ai t3 code`) |
 | [Grok Bot](https://x.ai/bot) | the chat app (`omarchy pkg add grok-bot`) |
 | [Superwhisper](https://superwhisper.com) | dictation (`omarchy install dictation superwhisper`) |
@@ -31,8 +32,9 @@ These are symlinks back to your checkout, so the repo stays the single source. `
 | `~/.local/bin/afterlight` | the `afterlight` command |
 | `~/.local/bin/afterlight-mode`, `~/.local/bin/afterlight-wallpaper` | small helpers used by the menu, timer and boot hook |
 | `~/.local/bin/baseline-volume` | the volume keys: the picked Sonos room, or else the laptop through Omarchy's own `omarchy-audio-output-volume` |
+| `~/.local/bin/baseline-media` | the media keys: the Deck while it plays (or you paused it), or else Omarchy's own media control |
 | `~/.config/omarchy/plugins/mortalfish.baseline` | the Baseline bar widget, panel and Studio |
-| `~/.config/hypr/home.lua` | home workspaces, window rules, autostart, mouse buttons (below), and the volume keys (rebound to `baseline-volume`) |
+| `~/.config/hypr/home.lua` | home workspaces, window rules, autostart, mouse buttons (below), the volume keys (rebound to `baseline-volume`) and the media keys (rebound to `baseline-media`) |
 | `~/.config/omarchy/hooks/post-boot.d/baseline-boot` | picks Day or Night and a wallpaper at login; a once-a-day greeting |
 | `~/.config/omarchy/hooks/post-update.d/baseline-repair` | after `omarchy update`: check and repair everything, quietly |
 | `~/.config/omarchy/hooks/theme-set.d/baseline-theme` | after a theme switch: T3 Code's neon layer and the prompt colours |
@@ -49,7 +51,7 @@ These are symlinks back to your checkout, so the repo stays the single source. `
 | File | Change |
 |---|---|
 | `~/.config/omarchy/shell.json` | **the bar**: moved to the bottom, its layout set (menu and workspace names left, Baseline right), Omarchy's notifications and on-screen display swapped for Baseline's copies. Backed up as `shell.json.bak-baseline-<time>` before each change. |
-| `~/.config/omarchy/plugins/mortalfish.notifications`, `.osd`, `.workspaces` | copies of Omarchy's plugins with changes: **only Grok Bot, T3 Code and Baseline notifications pop up** (others go quietly to history), pop-ups near the top, workspaces named term/web/code/chat/video/music. Rebuilt from Omarchy's originals after each update. |
+| `~/.config/omarchy/plugins/mortalfish.notifications`, `.osd`, `.workspaces` | copies of Omarchy's plugins with changes: **only Grok Bot, T3 Code and Baseline notifications pop up** (others go quietly to history), pop-ups near the top, workspaces named term/web/code/chat/video/music/deck. Rebuilt from Omarchy's originals after each update. |
 | `~/.config/hypr/hyprland.lua` | one line added if missing: `require("hypr.home")` |
 | `~/.config/hypr/baseline_apps.lua` | which apps open on workspaces 3 (coding) and 4 (chat) and start at login: T3 Code and Grok Bot unless changed in Setup → Apps (`afterlight apps`) |
 | `~/.config/hypr/mouse.lua` | the mouse's side-button bindings (written by `afterlight mouse`) |
@@ -84,6 +86,7 @@ Chrome's colour follows the look through Omarchy's own browser policy (`/etc/opt
 - **Mouse** (Razer Basilisk V3 only; other mice need [adapting](adapting.md#a-different-mouse)): lights in the look's colours; slow-down button = hold to dictate, front side button = OmaRelay voice, rear side button = next track, wheel tilt = previous/next workspace. All changeable in Setup.
 - **Superwhisper**: Setup can change its recording indicator style.
 - **Volume keys**: Omarchy's volume up, down, mute (and Alt + up/down) are rebound to `baseline-volume`. With the laptop picked they do exactly what they did; with Sonos picked in the Player tab they change that room's volume.
+- **Media keys**: play/pause, next and previous (and their Alt forms) are rebound to `baseline-media`. While the Deck plays, or you paused it, they drive the Deck wherever it plays; otherwise they do exactly what they did.
 
 ## Background activity and network
 
@@ -93,6 +96,7 @@ Chrome's colour follows the look through Omarchy's own browser policy (`/etc/opt
 | at login | Day/Night by the clock, a wallpaper, a greeting once a day |
 | 08:30 daily | morning check: Omarchy update, GitHub notifications (`gh`), coding-agent limits |
 | opening the Status tab | GitHub (at most every 6 hours) for new Baseline and OmaRelay changes |
+| while the Deck is on screen and playing on the laptop | `cava` reads the sound going out of the laptop (PipeWire), only to draw the equalizer; nothing is recorded or kept |
 | while the Deck plays | a watcher (`afterlight deck run`) checks every couple of seconds where the song is, to start the next on the laptop or follow the Sonos room; it exits once nothing is playing |
 | after `omarchy update` | check and repair, notifying only if something needed fixing |
 | saving or deleting a look | runs your backup command, if you set one (`backup.command`); nothing by default |

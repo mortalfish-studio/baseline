@@ -613,6 +613,14 @@ BarWidget {
     }
   }
 
+  // The Deck: is it playing, and what's next (for the hover card).
+  property var deckState: null
+  readonly property var deckNext: deckState && deckState.playing && deckState.set && deckState.set.length ? deckState.set[0] : null
+  Commons.WatchedFile {
+    path: Quickshell.env("HOME") + "/.local/state/afterlight/deck.json"
+    onTextChanged: { try { root.deckState = JSON.parse(text) } catch (error) {} }
+  }
+
   // Where the music is coming from (the browser add-on reports the tab that
   // starts making sound): "beatport", "ytmusic", "applemusic" or "youtube".
   property string musicSource: "beatport"

@@ -97,9 +97,9 @@ note "$(python3 "$BASELINE_DIR/bin/afterlight" snapshot --added=$added)"
 # ---------------------------------------------------------------- packages
 
 step "Packages"
-omarchy pkg add python imagemagick rsync patch diffutils starship openrgb >/dev/null 2>&1 \
+omarchy pkg add python imagemagick rsync patch diffutils starship openrgb cava >/dev/null 2>&1 \
   && note "python, imagemagick, starship, openrgb and friends are in" \
-  || warn "some packages didn't install; run: omarchy pkg add python imagemagick rsync patch starship openrgb"
+  || warn "some packages didn't install; run: omarchy pkg add python imagemagick rsync patch starship openrgb cava"
 
 # ---------------------------------------------------------------- the apps Baseline works with
 

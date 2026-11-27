@@ -1,0 +1,23 @@
+#!/bin/bash
+# The media keys (play/pause, next, previous): the Deck while it's playing, or
+# paused by you, wherever it plays (laptop or a Sonos room). Otherwise
+# Omarchy's own media control, exactly as before.
+#   baseline-media playPause|next|previous
+action=${1:?usage: baseline-media playPause|next|previous}
+deck="${XDG_STATE_HOME:-$HOME/.local/state}/afterlight/deck.json"
+mode=""
+if [[ -s $deck ]] && command -v jq >/dev/null; then
+  mode=$(jq -r 'if .playing == true then "playing" elif .paused == true and .now != null then "paused" else "" end' "$deck" 2>/dev/null)
+fi
+if [[ -n $mode ]]; then
+  case $action in
+    playPause) [[ $mode == playing ]] && exec "$HOME/.local/bin/afterlight" deck pause
+               exec "$HOME/.local/bin/afterlight" deck play ;;
+    next) exec "$HOME/.local/bin/afterlight" deck next ;;
+    previous) exec "$HOME/.local/bin/afterlight" deck previous ;;
+  esac
+fi
+case $action in
+  playPause | next | previous) exec omarchy-shell media "$action" ;;
+esac
+exit 2

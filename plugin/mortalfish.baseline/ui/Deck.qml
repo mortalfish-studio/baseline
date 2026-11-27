@@ -40,6 +40,7 @@ Item {
   function show(silent) {
     window.visible = true
     read()
+    if (root.host && root.host.refreshAfterlight) root.host.refreshAfterlight()
     if (silent) return
     placeTries = 0
     place.restart()
@@ -249,6 +250,117 @@ Item {
   property string dragTitle: ""
   property string dragThumb: ""
   property int dropIndex: -1
+  // The crate (Build a set and search) folds away to give the music room;
+  // remembered in settings (deck.crate).
+  property bool crateFolded: false
+  readonly property bool crateOpen: !crateFolded
+  function applyCrate() {
+    const d = root.host && root.host.afterState ? root.host.afterState.settings.deck : null
+    if (d && typeof d.crate === "boolean") root.crateFolded = !d.crate
+  }
+  Component.onCompleted: applyCrate()
+  Connections {
+    target: root.host
+    function onAfterStateChanged() { root.applyCrate() }
+  }
+  function setCrate(open) {
+    crateFolded = !open
+    Quickshell.execDetached([tool, "set", "deck.crate", open ? "true" : "false"])
+  }
+
+  // ------------------------------------------------------------ the Bloom
+  // Where should this go? Four petals around the pointer: Now (up), Next
+  // (right), Later, at the end (down), and Somewhere (left: one song at a
+  // random spot, an album or playlist mixed through the set). For a song
+  // already in the set the left petal removes it. Tap a petal, or hold, flick
+  // toward one and let go; the cover then flies to where it landed.
+  property bool bloomOpen: false
+  property bool bloomFlick: false
+  property string bloomFrom: ""            // "found" | "set"
+  property var bloomItem: null
+  property string bloomUid: ""
+  property int bloomPick: -1
+  property point bloomAt: Qt.point(0, 0)
+  readonly property bool bloomMany: !!bloomItem && (bloomItem.kind === "album" || bloomItem.kind === "playlist")
+  readonly property var petals: [
+    { key: "now", glyph: "󰐊", label: strings.t("deck.bloomNow"), angle: -90 },
+    { key: "next", glyph: "󰒭", label: strings.t("deck.bloomNext"), angle: 0 },
+    { key: "later", glyph: "󰐒", label: strings.t("deck.bloomLater"), angle: 90 },
+    bloomFrom === "set" ? { key: "remove", glyph: "󰅖", label: strings.t("deck.remove"), angle: 180 }
+                        : { key: "somewhere", glyph: "󰒝", label: strings.t(bloomMany ? "deck.bloomMix" : "deck.bloomSomewhere"), angle: 180 }
+  ]
+  function tapFound(item, at) {
+    if (!deck.playing) run(["deck", "add", service, JSON.stringify(item), "--play"])     // nothing to interrupt
+    else openBloom("found", item, "", at)
+  }
+  function openBloom(from, item, uid, at) {
+    if (dragging) return
+    bloomFrom = from; bloomItem = item; bloomUid = uid; bloomPick = -1; bloomFlick = false
+    const m = 120
+    bloomAt = Qt.point(Math.max(m, Math.min(stage.width - m, at.x)), Math.max(m, Math.min(stage.height - m, at.y)))
+    bloomOpen = true
+  }
+  function closeBloom() { bloomOpen = false; bloomFlick = false; bloomPick = -1 }
+  function aimBloom(at) {
+    const dx = at.x - bloomAt.x, dy = at.y - bloomAt.y
+    if (Math.hypot(dx, dy) < 28) { bloomPick = -1; return }
+    const angle = Math.atan2(dy, dx) * 180 / Math.PI
+    let best = -1, gap = 999
+    for (let i = 0; i < petals.length; i++) {
+      const d = Math.abs(((angle - petals[i].angle + 540) % 360) - 180)
+      if (d < gap) { gap = d; best = i }
+    }
+    bloomPick = best
+  }
+  function releaseFlick() {
+    bloomFlick = false
+    if (bloomPick >= 0) chooseBloom(bloomPick)
+  }
+  function chooseBloom(i) {
+    const key = petals[i].key
+    const item = bloomItem
+    const count = (deck.set || []).length
+    if (bloomFrom === "found") {
+      const json = JSON.stringify(item)
+      if (key === "now") run(["deck", "add", service, json, "--play"])
+      else if (key === "next") run(["deck", "add", service, json, "--next"])
+      else if (key === "later") run(["deck", "add", service, json])
+      else run(["deck", "add", service, json, "--scatter"])
+    } else {
+      if (key === "now") run(["deck", "play", bloomUid])
+      else if (key === "next") run(["deck", "move", bloomUid, "0"])
+      else if (key === "later") run(["deck", "move", bloomUid, String(count)])
+      else run(["deck", "remove", bloomUid])
+    }
+    fly(key, item ? item.thumb || "" : "")
+    closeBloom()
+  }
+
+  // The cover's flight to where it landed, and a glow there.
+  function fly(key, thumb) {
+    const top = setList.mapToItem(stage, 0, 0)
+    const listBottom = Math.min(setList.contentHeight, setList.height)
+    let to, glow
+    if (key === "now") {
+      const c = nowCover.mapToItem(stage, 0, 0)
+      to = Qt.point(c.x + 88, c.y + 88); glow = Qt.rect(c.x - 6, c.y - 6, 188, 188)
+    } else if (key === "next") {
+      to = Qt.point(top.x + 80, top.y + 30); glow = Qt.rect(top.x, top.y, setList.width, 62)
+    } else if (key === "later") {
+      to = Qt.point(top.x + 80, top.y + Math.max(30, listBottom - 30)); glow = Qt.rect(top.x, top.y + Math.max(0, listBottom - 62), setList.width, 62)
+    } else if (key === "somewhere") {
+      to = Qt.point(top.x + 80, top.y + Math.max(30, listBottom / 2)); glow = Qt.rect(top.x, top.y, setList.width, Math.max(62, listBottom))
+    } else {
+      to = Qt.point(bloomAt.x, bloomAt.y + 40); glow = Qt.rect(0, 0, 0, 0)
+    }
+    flyer.thumb = thumb
+    flyer.removing = key === "remove"
+    flyer.fromX = bloomAt.x - 24; flyer.fromY = bloomAt.y - 24
+    flyer.toX = to.x - 24; flyer.toY = to.y - 24
+    landing.x = glow.x; landing.y = glow.y; landing.width = glow.width; landing.height = glow.height
+    flight.restart()
+  }
+
   function beginDrag(from, uid, item, title, thumb) {
     dragFrom = from; dragUid = uid; dragItem = item; dragTitle = title; dragThumb = thumb
     dropIndex = -1
@@ -298,7 +410,7 @@ Item {
       id: stage
       anchors.fill: parent
       focus: true
-      Keys.onEscapePressed: if (root.popped) root.goHome()
+      Keys.onEscapePressed: if (root.bloomOpen) root.closeBloom(); else if (root.popped) root.goHome()
       Keys.onSpacePressed: root.run(["deck", root.deck.playing ? "pause" : "play"])
 
       Rectangle {
@@ -359,11 +471,44 @@ Item {
           spacing: 22
 
           // ============================================== the crate
-          ColumnLayout {
-            Layout.preferredWidth: 380
-            Layout.maximumWidth: 380
+          Item {
+            id: crateBox
+            Layout.preferredWidth: root.crateOpen ? 380 : 44
+            Layout.maximumWidth: root.crateOpen ? 380 : 44
             Layout.fillHeight: true
+            clip: true
+            Behavior on Layout.preferredWidth { NumberAnimation { duration: Style.duration(220); easing.type: Easing.OutCubic } }
+
+            // Folded: a rail with search and Build, and the way back out.
+            ColumnLayout {
+              anchors.top: parent.top
+              anchors.horizontalCenter: parent.horizontalCenter
+              anchors.horizontalCenterOffset: root.crateOpen ? -400 : 0
+              spacing: 8
+              opacity: root.crateOpen ? 0 : 1
+              visible: opacity > 0
+              Behavior on opacity { NumberAnimation { duration: Style.duration(160) } }
+              RoundButton { glyph: "󰅂"; tip: strings.t("deck.crateOpen"); onClicked: root.setCrate(true) }
+              RoundButton { glyph: "󰍉"; tip: strings.t("deck.search"); onClicked: { root.setCrate(true); query.forceActiveFocus() } }
+              RoundButton { glyph: "✦"; tip: strings.t("deck.build"); onClicked: { root.setCrate(true); brief.forceActiveFocus() } }
+            }
+
+          ColumnLayout {
+            id: crate
+            width: 380
+            height: parent.height
+            opacity: root.crateOpen ? 1 : 0
+            visible: opacity > 0
+            Behavior on opacity { NumberAnimation { duration: Style.duration(160) } }
             spacing: 10
+
+            RowLayout {
+              Layout.fillWidth: true
+              Label { text: strings.t("deck.crate").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; opacity: 0.5 }
+              Item { Layout.fillWidth: true }
+              RoundButton { glyph: "󰅁"; tip: strings.t("deck.crateClose"); onClicked: root.setCrate(false) }
+            }
+
 
             // ---- Build a set: a brief, a length, maybe a first song.
             Rectangle {
@@ -564,13 +709,30 @@ Item {
                     onClicked: root.run(["deck", "add", root.service, JSON.stringify(hit.modelData)])
                   }
                 }
-                HoverHandler { id: hitHover; cursorShape: root.dragging ? Qt.ClosedHandCursor : Qt.OpenHandCursor }
+                HoverHandler { id: hitHover; cursorShape: root.dragging ? Qt.ClosedHandCursor : Qt.PointingHandCursor }
+                // Tap: the Bloom (or, with nothing playing, just play it).
+                // Hold: the Bloom, then flick toward a petal and let go.
+                TapHandler {
+                  id: hitTap
+                  longPressThreshold: 0.35
+                  onTapped: function(point) {
+                    if (point.position.x > hit.width - 76) return          // the ▶ and + buttons
+                    root.tapFound(hit.modelData, hit.mapToItem(root.stageItem, point.position.x, point.position.y))
+                  }
+                  onLongPressed: root.openBloom("found", hit.modelData, "", hit.mapToItem(root.stageItem, hitTap.point.position.x, hitTap.point.position.y))
+                }
                 DragHandler {
                   target: null
                   grabPermissions: PointerHandler.CanTakeOverFromAnything
-                  onActiveChanged: if (active) root.beginDrag("found", "", hit.modelData, hit.modelData.title, hit.modelData.thumb || "")
-                                   else if (root.dragging) root.endDrag()
-                  onCentroidChanged: if (active) root.moveGhost(hit.mapToItem(stage, centroid.position.x, centroid.position.y))
+                  onActiveChanged: {
+                    if (active) { if (root.bloomOpen) root.bloomFlick = true; else root.beginDrag("found", "", hit.modelData, hit.modelData.title, hit.modelData.thumb || "") }
+                    else if (root.bloomFlick) root.releaseFlick()
+                    else if (root.dragging) root.endDrag()
+                  }
+                  onCentroidChanged: if (active) {
+                    const at = hit.mapToItem(root.stageItem, centroid.position.x, centroid.position.y)
+                    if (root.bloomFlick) root.aimBloom(at); else root.moveGhost(at)
+                  }
                 }
               }
               Label {
@@ -584,6 +746,7 @@ Item {
                 font.pixelSize: Style.font.caption
               }
             }
+          }
           }
 
           // ============================================== the deck
@@ -624,6 +787,7 @@ Item {
               Layout.fillWidth: true
               spacing: 20
               Item {
+                id: nowCover
                 Layout.preferredWidth: 176
                 Layout.preferredHeight: 176
                 Rectangle {
@@ -645,24 +809,66 @@ Item {
               ColumnLayout {
                 Layout.fillWidth: true
                 spacing: 4
-                Label {
+                // The title on the left, the Skyline on the right.
+                RowLayout {
                   Layout.fillWidth: true
-                  text: root.now ? root.now.title : strings.t("deck.empty")
-                  font.pixelSize: 26
-                  font.bold: true
-                  color: root.amber
-                  wrapMode: Text.Wrap
-                  maximumLineCount: 2
-                }
-                Label { Layout.fillWidth: true; text: root.now ? root.now.artist : strings.t("deck.emptyHint"); opacity: 0.85 }
-                Label {
-                  Layout.fillWidth: true
-                  text: root.now ? (root.whereId === "laptop" ? "󰓃  " + strings.t("hover.playingOn").arg(root.whereName)
-                                                            : "󰜟  " + strings.t("hover.playingIn").arg(root.whereName))
-                                    + " · " + (root.now.service === "applemusic" ? "Apple Music" : "YouTube Music") : ""
-                  font.family: "Iosevka Nerd Font Propo"
-                  font.pixelSize: Style.font.caption
-                  color: root.teal
+                  spacing: 16
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignTop
+                    spacing: 4
+                    Label {
+                      Layout.fillWidth: true
+                      // The name without its brackets ("[From …]", "(Radio Edit)"): those go
+                      // on their own line below. Long names shrink before they're ever cut.
+                      text: root.now ? root.titleParts(root.now.title).main : strings.t("deck.empty")
+                      font.pixelSize: 26
+                      fontSizeMode: Text.Fit
+                      minimumPixelSize: 17
+                      Layout.maximumHeight: 68
+                      font.bold: true
+                      color: root.amber
+                      wrapMode: Text.Wrap
+                      maximumLineCount: 2
+                    }
+                    Label {
+                      Layout.fillWidth: true
+                      visible: text !== ""
+                      text: root.now ? root.titleParts(root.now.title).extra : ""
+                      font.pixelSize: Style.font.caption
+                      color: root.amber
+                      opacity: 0.65
+                      elide: Text.ElideRight
+                    }
+                    Label {
+                      Layout.fillWidth: true
+                      text: root.now ? root.now.artist : strings.t("deck.emptyHint")
+                      opacity: 0.85
+                      wrapMode: Text.Wrap
+                      maximumLineCount: 2
+                    }
+                    Label {
+                      Layout.fillWidth: true
+                      text: root.now ? (root.whereId === "laptop" ? "󰓃  " + strings.t("hover.playingOn").arg(root.whereName)
+                                                                : "󰜟  " + strings.t("hover.playingIn").arg(root.whereName))
+                                        + " · " + (root.now.service === "applemusic" ? "Apple Music" : "YouTube Music") : ""
+                      font.family: "Iosevka Nerd Font Propo"
+                      font.pixelSize: Style.font.caption
+                      color: root.teal
+                    }
+                  }
+                  DeckVisualizer {
+                    Layout.preferredWidth: Math.min(360, Math.max(200, root.stageItem.width * 0.24))
+                    Layout.preferredHeight: 112
+                    Layout.alignment: Qt.AlignTop
+                    visible: !!root.now
+                    active: root.seen && !!root.now
+                    playing: root.deck.playing
+                    live: !root.inSonos
+                    amber: root.amber
+                    teal: root.teal
+                    ground: root.ground
+                  }
                 }
                 // progress
                 Item {
@@ -818,12 +1024,28 @@ Item {
                     RoundButton { glyph: "󰅖"; tip: strings.t("deck.remove"); onClicked: root.run(["deck", "remove", row.uid]) }
                   }
                   HoverHandler { id: rowHover; cursorShape: root.dragging ? Qt.ClosedHandCursor : Qt.OpenHandCursor }
+                  TapHandler {
+                    id: rowTap
+                    longPressThreshold: 0.35
+                    readonly property var song: ({ uid: row.uid, title: row.title, artist: row.artist, thumb: row.thumb })
+                    onTapped: function(point) {
+                      if (point.position.x > row.width - 120) return       // play, pin, remove
+                      root.openBloom("set", song, row.uid, row.mapToItem(root.stageItem, point.position.x, point.position.y))
+                    }
+                    onLongPressed: root.openBloom("set", song, row.uid, row.mapToItem(root.stageItem, rowTap.point.position.x, rowTap.point.position.y))
+                  }
                   DragHandler {
                     target: null
                     grabPermissions: PointerHandler.CanTakeOverFromAnything
-                    onActiveChanged: if (active) root.beginDrag("set", row.uid, null, row.title, row.thumb)
-                                     else if (root.dragging) root.endDrag()
-                    onCentroidChanged: if (active) root.moveGhost(row.mapToItem(stage, centroid.position.x, centroid.position.y))
+                    onActiveChanged: {
+                      if (active) { if (root.bloomOpen) root.bloomFlick = true; else root.beginDrag("set", row.uid, null, row.title, row.thumb) }
+                      else if (root.bloomFlick) root.releaseFlick()
+                      else if (root.dragging) root.endDrag()
+                    }
+                    onCentroidChanged: if (active) {
+                      const at = row.mapToItem(root.stageItem, centroid.position.x, centroid.position.y)
+                      if (root.bloomFlick) root.aimBloom(at); else root.moveGhost(at)
+                    }
                   }
                   DropArea {
                     id: rowDrop
@@ -1016,6 +1238,160 @@ Item {
         }
       }
 
+      // ---- the Bloom
+      Item {
+        id: bloom
+        anchors.fill: parent
+        z: 150
+        visible: opacity > 0
+        opacity: root.bloomOpen ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: Style.duration(root.bloomOpen ? 160 : 110); easing.type: Easing.OutCubic } }
+        // A dim veil: a tap on it closes the Bloom.
+        Rectangle {
+          anchors.fill: parent
+          color: root.ground
+          opacity: 0.45
+          TapHandler { enabled: root.bloomOpen; onTapped: root.closeBloom() }
+        }
+        Item {
+          id: flower
+          x: root.bloomAt.x
+          y: root.bloomAt.y
+          property real reach: root.bloomOpen ? 92 : 40
+          Behavior on reach { NumberAnimation { duration: Style.duration(200); easing.type: Easing.OutCubic } }
+          scale: root.bloomOpen ? 1 : 0.95
+          Behavior on scale { NumberAnimation { duration: Style.duration(180); easing.type: Easing.OutCubic } }
+          // Two rings, the look's two colours.
+          Rectangle {
+            x: -flower.reach; y: -flower.reach
+            width: flower.reach * 2; height: width; radius: width / 2
+            color: "transparent"
+            border.width: 1
+            border.color: Util.alpha(root.amber, 0.35)
+          }
+          Rectangle {
+            x: -flower.reach * 0.62; y: -flower.reach * 0.62
+            width: flower.reach * 1.24; height: width; radius: width / 2
+            color: Util.alpha(root.ground, 0.6)
+            border.width: 1
+            border.color: Util.alpha(root.teal, 0.3)
+          }
+          // The line from the middle toward the petal being aimed at.
+          Rectangle {
+            visible: root.bloomPick >= 0
+            width: flower.reach - 30
+            height: 2
+            radius: 1
+            transformOrigin: Item.Left
+            rotation: root.bloomPick >= 0 ? root.petals[root.bloomPick].angle : 0
+            gradient: Gradient {
+              orientation: Gradient.Horizontal
+              GradientStop { position: 0; color: Util.alpha(root.amber, 0.1) }
+              GradientStop { position: 1; color: root.amber }
+            }
+          }
+          // What's being placed, in the middle.
+          Rectangle {
+            x: -27; y: -27
+            width: 54; height: 54
+            radius: Style.cornerRadius > 0 ? 8 : 0
+            color: root.ground
+            border.width: 2
+            border.color: root.amber
+            Cover {
+              anchors.fill: parent
+              anchors.margins: 3
+              url: root.bloomItem ? root.bloomItem.thumb || "" : ""
+              size: 48
+              glyph: root.bloomMany ? "󰲸" : "󰎈"
+            }
+          }
+          Repeater {
+            model: root.petals
+            delegate: Rectangle {
+              id: petal
+              required property var modelData
+              required property int index
+              readonly property bool aimed: root.bloomPick === index
+              readonly property real rad: modelData.angle * Math.PI / 180
+              x: Math.cos(rad) * flower.reach - width / 2
+              y: Math.sin(rad) * flower.reach - height / 2
+              width: petalRow.implicitWidth + 22
+              height: 34
+              radius: 17
+              color: aimed ? Util.alpha(modelData.key === "remove" ? Commons.Color.urgent : root.amber, 0.28) : root.ground
+              border.width: aimed ? 2 : 1
+              border.color: modelData.key === "remove" ? Commons.Color.urgent : (index % 2 ? root.teal : root.amber)
+              scale: aimed ? 1.1 : 1
+              Behavior on scale { NumberAnimation { duration: Style.duration(120); easing.type: Easing.OutCubic } }
+              Row {
+                id: petalRow
+                anchors.centerIn: parent
+                spacing: 7
+                Label { text: petal.modelData.glyph; font.family: "Iosevka Nerd Font Propo"; color: petal.border.color }
+                Label { text: petal.modelData.label.toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 1.5; font.bold: petal.aimed }
+              }
+              HoverHandler {
+                cursorShape: Qt.PointingHandCursor
+                onHoveredChanged: if (!root.bloomFlick) root.bloomPick = hovered ? petal.index : (root.bloomPick === petal.index ? -1 : root.bloomPick)
+              }
+              TapHandler { onTapped: root.chooseBloom(petal.index) }
+            }
+          }
+          // The title, under it all.
+          Label {
+            x: -150
+            y: flower.reach + 26
+            width: 300
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
+            text: root.bloomItem ? root.bloomItem.title : ""
+            font.bold: true
+          }
+        }
+      }
+
+      // ---- a cover flying to where it landed, and the glow it leaves
+      Rectangle {
+        id: landing
+        z: 140
+        radius: Style.cornerRadius > 0 ? 8 : 0
+        color: Util.alpha(root.amber, 0.12)
+        border.width: 2
+        border.color: root.amber
+        opacity: 0
+      }
+      Item {
+        id: flyer
+        z: 160
+        width: 48; height: 48
+        property string thumb: ""
+        property bool removing: false
+        property real fromX: 0; property real fromY: 0
+        property real toX: 0; property real toY: 0
+        opacity: 0
+        Cover { anchors.fill: parent; url: flyer.thumb; size: 48 }
+      }
+      SequentialAnimation {
+        id: flight
+        PropertyAction { target: flyer; property: "opacity"; value: 1 }
+        PropertyAction { target: flyer; property: "scale"; value: 1 }
+        ParallelAnimation {
+          // Across on one curve and down on another: an arc.
+          NumberAnimation { target: flyer; property: "x"; from: flyer.fromX; to: flyer.toX; duration: Style.duration(340); easing.type: Easing.InOutCubic }
+          NumberAnimation { target: flyer; property: "y"; from: flyer.fromY; to: flyer.toY; duration: Style.duration(340); easing.type: flyer.toY < flyer.fromY ? Easing.OutCubic : Easing.InCubic }
+          NumberAnimation { target: flyer; property: "scale"; to: flyer.removing ? 0.6 : 0.8; duration: Style.duration(340) }
+          NumberAnimation { target: flyer; property: "opacity"; to: flyer.removing ? 0 : 1; duration: Style.duration(340) }
+        }
+        ParallelAnimation {
+          NumberAnimation { target: flyer; property: "opacity"; to: 0; duration: Style.duration(120) }
+          SequentialAnimation {
+            NumberAnimation { target: landing; property: "opacity"; to: flyer.removing ? 0 : 0.9; duration: Style.duration(90) }
+            NumberAnimation { target: landing; property: "opacity"; to: 0; duration: Style.duration(420); easing.type: Easing.OutCubic }
+          }
+        }
+      }
+
       // ---- the ghost that follows a drag
       Rectangle {
         id: ghost
@@ -1042,6 +1418,14 @@ Item {
         }
       }
     }
+  }
+
+  // "Song (Radio Edit) [From the Film]": main "Song", extra "Radio Edit · From the Film".
+  function titleParts(title) {
+    const t = String(title || "")
+    const extra = []
+    const main = t.replace(/\s*[\(\[]([^\)\]]{2,80})[\)\]]/g, function(all, inside) { extra.push(inside.trim()); return "" }).trim()
+    return main ? { main: main, extra: extra.join(" · ") } : { main: t, extra: "" }
   }
 
   function clock(seconds) {

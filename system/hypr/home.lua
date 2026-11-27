@@ -36,6 +36,16 @@ o.rebind("XF86AudioMute", "Mute", volume .. " mute-toggle", { locked = true })
 o.rebind("ALT + XF86AudioRaiseVolume", "Volume up precise", volume .. " +1", { locked = true, repeating = true })
 o.rebind("ALT + XF86AudioLowerVolume", "Volume down precise", volume .. " -1", { locked = true, repeating = true })
 
+-- Media keys: the Deck while it plays (or you paused it), wherever it plays;
+-- otherwise Omarchy's own media control, as before (baseline-media).
+local media = os.getenv("HOME") .. "/.local/bin/baseline-media"
+o.rebind("XF86AudioPlay", "Play", media .. " playPause", { locked = true })
+o.rebind("XF86AudioPause", "Pause", media .. " playPause", { locked = true })
+o.rebind("XF86AudioNext", "Next track", media .. " next", { locked = true })
+o.rebind("ALT + XF86AudioPlay", "Next track", media .. " next", { locked = true })
+o.rebind("XF86AudioPrev", "Previous track", media .. " previous", { locked = true })
+o.rebind("ALT + SHIFT + XF86AudioPlay", "Previous track", media .. " previous", { locked = true })
+
 -- Baseline Studio (the picture library and look maker): a centred float.
 o.window({ title = "^Baseline Studio$" }, { float = true, center = true, size = { 1240, 840 } })
 -- The Deck (the set of songs to arrange and play) lives on workspace 7, filling

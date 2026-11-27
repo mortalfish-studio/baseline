@@ -93,7 +93,7 @@ DEFAULTS = {
     # Where "play <something>" looks when it isn't a Beatport chart or playlist
     # and no service is named: "ytmusic" or "applemusic".
     "music": {"service": "ytmusic"},
-    "deck": {"home": True},          # the Deck kept open on workspace 7
+    "deck": {"home": True, "crate": True},   # the Deck kept open on workspace 7; its crate unfolded
     "battery": {"limit": False, "limitPercent": 80},
     # Beatport links pinned in the Player tab: [{"name": ..., "url": ...}]
     "beatport": {"pins": []},
@@ -3852,6 +3852,7 @@ DECK_NOW = STATE.parent / "deck-now.json"
 DECK_LOCK = STATE.parent / "deck.lock"
 DECK_RUN_LOCK = STATE.parent / "deck-run.lock"
 DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kind": "laptop"}, "playing": False,
+              "paused": False,
               "pushed": [], "updated": 0}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -4084,6 +4085,7 @@ def deck_start(deck, song=None, start_at=0):
     deck["now"] = song
     deck["set"] = [s for s in deck["set"] if s["uid"] != song["uid"]]
     deck["playing"] = True
+    deck["paused"] = False
     room = deck_where_room(deck)
     if room:
         sn = sonos_apple_sn()
@@ -4105,6 +4107,20 @@ def deck_start(deck, song=None, start_at=0):
     deck["expect"] = {"uid": song["uid"], "since": time.time()}
     deck_watch()
     return True
+
+
+def deck_previous(deck):
+    """Back: to the start of the song if it's a few seconds in, else the song
+    before it (from what's played), with this one next again."""
+    if deck.get("now") and deck["playing"] and deck_status(deck).get("time", 0) > 5:
+        return deck_start(deck, deck["now"])
+    if not deck["played"]:
+        return deck_start(deck, deck["now"]) if deck.get("now") else False
+    before = deck["played"].pop()
+    if deck.get("now"):
+        deck["set"].insert(0, deck["now"])
+        deck["now"] = None          # so it isn't counted as played again
+    return deck_start(deck, before)
 
 
 def deck_watch():
@@ -4163,7 +4179,7 @@ def deck_tick(last):
     if ran_out or stopped or not last.get("length"):
         deck_update(lambda d: deck_start(d))        # the song finished: next
     else:
-        deck_update(lambda d: d.update(playing=False))   # you played something else: step back
+        deck_update(lambda d: d.update(playing=False, paused=False))   # you played something else: step back
     return None
 
 
@@ -4239,6 +4255,12 @@ def deck_command(settings, args):
         def add(d):
             known = {(s["service"], s.get("id"), s.get("video")) for s in d["set"]}
             fresh = [s for s in songs if (s["service"], s.get("id"), s.get("video")) not in known]
+            if "--scatter" in args:
+                # Somewhere: each song at a random spot after the next one, so
+                # an album or playlist mixes into the set.
+                for song in fresh:
+                    d["set"].insert(random.randint(min(1, len(d["set"])), len(d["set"])), song)
+                return fresh
             where = len(d["set"]) if at < 0 else min(at, len(d["set"]))
             d["set"][where:where] = fresh
             if "--play" in args and fresh:
@@ -4286,6 +4308,7 @@ def deck_command(settings, args):
         def play(d):
             if not uid and d.get("now") and not d["playing"]:
                 d["playing"] = True        # carry on with what was playing
+                d["paused"] = False
                 deck_resume(d)
                 return True
             song = next((s for s in d["set"] + d["played"] if s["uid"] == uid), None) if uid else None
@@ -4296,6 +4319,7 @@ def deck_command(settings, args):
     elif action == "pause":
         def pause(d):
             d["playing"] = False
+            d["paused"] = bool(d.get("now"))      # the play key carries on with the Deck
             room = deck_where_room(d)
             if room:
                 sonos_call(room["ip"], "AVTransport", "Pause", {"InstanceID": 0})
@@ -4306,6 +4330,8 @@ def deck_command(settings, args):
         deck_update(pause)
     elif action == "next":
         deck_update(lambda d: deck_start(d))
+    elif action == "previous":
+        deck_update(deck_previous)
     elif action == "where" and len(args) == 2:
         deck_where(args[1], settings)
     elif action == "rooms":
@@ -4330,8 +4356,8 @@ def deck_command(settings, args):
     elif action == "run":
         deck_run()
     else:
-        sys.exit("Usage: afterlight deck [state|add <ytmusic|applemusic> <item json> [--next]|move <uid> <index>|"
-                 "remove <uid>|pin <uid>|shuffle|clear|play [uid]|pause|next|where <laptop|room id>|rooms|join <room id>|"
+        sys.exit("Usage: afterlight deck [state|add <ytmusic|applemusic> <item json> [--next|--play|--at <n>|--scatter]|move <uid> <index>|"
+                 "remove <uid>|pin <uid>|shuffle|clear|play [uid]|pause|next|previous|where <laptop|room id>|rooms|join <room id>|"
                  "leave <room id>|everywhere|volume <room id> <0-100>|search <service> <words>|fill|"
                  "build <minutes> <what it's for> [--start <song>] [--replace]|run]")
 
@@ -4959,6 +4985,7 @@ def repo_links():
         (LOCAL_BIN / "afterlight-mode", REPO / "system/bin/afterlight-mode", "Mode helper"),
         (LOCAL_BIN / "afterlight-wallpaper", REPO / "system/bin/afterlight-wallpaper", "Wallpaper helper"),
         (LOCAL_BIN / "baseline-volume", REPO / "system/bin/baseline-volume", "Volume keys helper"),
+        (LOCAL_BIN / "baseline-media", REPO / "system/bin/baseline-media", "Media keys helper"),
         (PLUGINS_DIR / "mortalfish.baseline", REPO / "plugin/mortalfish.baseline", "Baseline plugin"),
         (CONFIG / "hypr/home.lua", REPO / "system/hypr/home.lua", "Workspaces and window rules"),
         (HOOKS / "post-boot.d/baseline-boot", REPO / "system/hooks/baseline-boot", "Boot hook"),
@@ -5540,7 +5567,7 @@ def battery_apply(settings):
 # The installer takes a snapshot of everything Baseline is about to change,
 # before it changes anything; `afterlight uninstall` puts it all back.
 BEFORE = HOME / ".local/share/baseline-before"
-BASELINE_PACKAGES = ("python", "imagemagick", "rsync", "patch", "diffutils", "starship", "openrgb")
+BASELINE_PACKAGES = ("python", "imagemagick", "rsync", "patch", "diffutils", "starship", "openrgb", "cava")
 # The apps the installer adds when missing: how to tell, and how to take one off.
 BASELINE_APPS = {
     "T3 Code": (lambda: (HOME / ".local/share/t3code/T3-Code.AppImage").exists(), "omarchy remove ai t3 code"),

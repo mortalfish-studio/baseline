@@ -286,6 +286,20 @@ Column {
       }
     }
   }
+  // What the Deck plays next.
+  Label {
+    width: parent.width
+    visible: !!root.host && !!root.host.deckNext
+    textFormat: Text.PlainText
+    elide: Text.ElideRight
+    text: root.host && root.host.deckNext
+      ? "󰒭  " + strings.t("hover.deckNext").arg(root.host.deckNext.title + (root.host.deckNext.artist ? " · " + root.host.deckNext.artist : ""))
+      : ""
+    font.family: "Iosevka Nerd Font Propo"
+    font.pixelSize: Style.font.caption
+    color: root.amber
+    opacity: 0.9
+  }
 
 
 }
