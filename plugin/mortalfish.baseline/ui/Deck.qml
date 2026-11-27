@@ -811,13 +811,17 @@ Item {
         }
       }
 
+      // The accent line along the top: clear of the window's rounded corners, fading at the ends.
       Rectangle {
         anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+        anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.topMargin: 1
         height: 2
         gradient: Gradient {
           orientation: Gradient.Horizontal
-          GradientStop { position: 0; color: root.amber }
-          GradientStop { position: 1; color: root.teal }
+          GradientStop { position: 0; color: "transparent" }
+          GradientStop { position: 0.08; color: root.amber }
+          GradientStop { position: 0.92; color: root.teal }
+          GradientStop { position: 1; color: "transparent" }
         }
       }
 
@@ -1464,7 +1468,7 @@ Item {
                   border.width: 2
                   border.color: nowDrop.containsDrag ? root.teal : Util.alpha(root.amber, root.deck.playing ? 0.9 : 0.35)
                 }
-                Cover { anchors.fill: parent; url: root.now ? root.now.thumb || "" : ""; size: 176; glyph: "󰎆"; radius: 12 }
+                CrossCover { anchors.fill: parent; url: root.now ? root.now.thumb || "" : ""; size: 176; glyph: "󰎆"; radius: 12 }
                 DropArea {
                   id: nowDrop
                   anchors.fill: parent
@@ -2615,8 +2619,15 @@ Item {
         }
         Rectangle {
           anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-          height: 3
-          gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: root.amber } GradientStop { position: 1; color: root.teal } }
+          anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.topMargin: 1
+          height: 2
+          gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0; color: "transparent" }
+            GradientStop { position: 0.08; color: root.amber }
+            GradientStop { position: 0.92; color: root.teal }
+            GradientStop { position: 1; color: "transparent" }
+          }
         }
 
         // Last call, while it runs: a small amber tag by the clock.
@@ -2774,40 +2785,7 @@ Item {
               shadowScale: 1.02 + stageView.bass * 0.03
               autoPaddingEnabled: true
             }
-            // Two covers: a new song's loads behind the scenes, then dissolves
-            // in over the old one (settling from a touch larger), never a blank.
-            readonly property string want: root.now ? root.now.thumb || "" : ""
-            property bool aFront: true
-            property bool pending: false
-            readonly property var front: aFront ? coverA : coverB
-            readonly property var back: aFront ? coverB : coverA
-            Cover { id: coverA; anchors.fill: parent; size: stageView.big; radius: stageCoverShadow.radius; z: stageCoverShadow.aFront ? 0 : 1 }
-            Cover { id: coverB; anchors.fill: parent; size: stageView.big; radius: stageCoverShadow.radius; z: stageCoverShadow.aFront ? 1 : 0; opacity: 0 }
-            Component.onCompleted: coverA.url = want
-            onWantChanged: {
-              if (want === front.url) { pending = false; return }
-              if (!stageView.visible || Style.reduceMotion || front.url === "") { front.url = want; return }
-              swap.stop()
-              back.opacity = 0; back.scale = 1.03
-              back.url = want
-              pending = true; waited.restart()
-            }
-            // The new cover's loaded (or it's taken too long): cross over.
-            Timer { id: waited; interval: 4000; onTriggered: if (stageCoverShadow.pending) swap.restart() }
-            Timer {
-              running: stageCoverShadow.pending && !swap.running
-              interval: 40; repeat: true
-              onTriggered: if (stageCoverShadow.back.ready) swap.restart()
-            }
-            SequentialAnimation {
-              id: swap
-              ScriptAction { script: stageCoverShadow.pending = false }
-              ParallelAnimation {
-                NumberAnimation { target: stageCoverShadow.back; property: "opacity"; to: 1; duration: Style.duration(900); easing.type: Easing.InOutQuad }
-                NumberAnimation { target: stageCoverShadow.back; property: "scale"; to: 1; duration: Style.duration(1400); easing.type: Easing.OutCubic }
-              }
-              ScriptAction { script: { stageCoverShadow.aFront = !stageCoverShadow.aFront; stageCoverShadow.back.opacity = 0 } }
-            }
+            CrossCover { anchors.fill: parent; size: stageView.big; radius: stageCoverShadow.radius; url: root.now ? root.now.thumb || "" : ""; live: stageView.visible }
           }
           // A guest's request playing: their face, big, on the cover's corner,
           // glowing a little and moving with the music.
@@ -3234,8 +3212,15 @@ Item {
           }
           Rectangle {
             anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-            height: 3
-            gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: root.amber } GradientStop { position: 1; color: root.teal } }
+            anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.topMargin: 1
+            height: 2
+            gradient: Gradient {
+              orientation: Gradient.Horizontal
+              GradientStop { position: 0; color: "transparent" }
+              GradientStop { position: 0.08; color: root.amber }
+              GradientStop { position: 0.92; color: root.teal }
+              GradientStop { position: 1; color: "transparent" }
+            }
           }
 
           ColumnLayout {
@@ -4140,6 +4125,47 @@ Item {
     }
     HoverHandler { cursorShape: Qt.PointingHandCursor; onHoveredChanged: root.hint(qt, strings.t("deck.qrTapHint"), hovered) }
     TapHandler { onTapped: root.qrBig = true }
+  }
+
+  // A cover that changes by dissolving: the new one loads out of sight, then
+  // fades in over the old (settling from a touch larger), never a blank.
+  component CrossCover: Item {
+    id: cross
+    property string url: ""
+    property int size: 48
+    property real radius: 0
+    property string glyph: "󰎈"
+    property bool live: true            // off-screen: just swap
+    property bool aFront: true
+    property bool pending: false
+    readonly property var front: aFront ? crossA : crossB
+    readonly property var back: aFront ? crossB : crossA
+    Cover { id: crossA; anchors.fill: parent; size: cross.size; radius: cross.radius; glyph: cross.glyph; z: cross.aFront ? 0 : 1 }
+    Cover { id: crossB; anchors.fill: parent; size: cross.size; radius: cross.radius; glyph: cross.glyph; z: cross.aFront ? 1 : 0; opacity: 0 }
+    Component.onCompleted: crossA.url = url
+    onUrlChanged: {
+      if (url === front.url) { pending = false; return }
+      if (!live || Style.reduceMotion || front.url === "") { swap.stop(); front.url = url; back.opacity = 0; pending = false; return }
+      swap.stop()
+      back.opacity = 0; back.scale = 1.03
+      back.url = url
+      pending = true; waited.restart()
+    }
+    Timer { id: waited; interval: 4000; onTriggered: if (cross.pending) swap.restart() }
+    Timer {
+      running: cross.pending && !swap.running
+      interval: 40; repeat: true
+      onTriggered: if (cross.back.ready) swap.restart()
+    }
+    SequentialAnimation {
+      id: swap
+      ScriptAction { script: cross.pending = false }
+      ParallelAnimation {
+        NumberAnimation { target: cross.back; property: "opacity"; to: 1; duration: Style.duration(900); easing.type: Easing.InOutQuad }
+        NumberAnimation { target: cross.back; property: "scale"; to: 1; duration: Style.duration(1400); easing.type: Easing.OutCubic }
+      }
+      ScriptAction { script: { cross.aFront = !cross.aFront; cross.back.opacity = 0 } }
+    }
   }
 
   component Cover: Rectangle {

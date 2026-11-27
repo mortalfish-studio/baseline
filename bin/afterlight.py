@@ -3824,7 +3824,7 @@ def grok_ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False):
               + (' "e" is the song\'s energy from 1 (calm) to 10 (peak); "c" is its chapter of the set, one of '
                  '"Warm up", "Build", "Peak", "Wind down".' if shape else "")
               + (' "e" is its energy from 1 (calm) to 10 (peak), "b" its tempo in BPM and "k" its key on the Camelot wheel '
-                 '(1A to 12B), as best you know them.' if mix else ""))
+                 '(1A to 12B): rough is fine, don\'t deliberate.' if mix else ""))
     workdir = STATE.parent / "grok-music"
     workdir.mkdir(parents=True, exist_ok=True)
     try:
@@ -6654,7 +6654,10 @@ def deck_fill(settings, count=5, auto=False, seed=None):
         if seed:
             toast("Auto-DJ is listening to your pick…", seed["title"], glyph="∞")
         ask, anchor = deck_autodj_ask(deck, seed)
-        ideas = grok_ideas("", ask=ask, count=count + 5, timeout=90, mix=True)
+        ideas = grok_ideas("", ask=ask, count=count + 3, timeout=150, mix=True)
+        if not ideas["songs"]:          # Grok stalled: once more, asking less
+            ask, anchor = deck_autodj_ask(deck, seed, compact=True)
+            ideas = grok_ideas("", ask=ask, count=count + 3, timeout=120, mix=True)
     else:
         toast("Grok is picking songs…", "That fit " + ", ".join(s["title"] for s in recent[-3:]), glyph="✦")
         listing = "; ".join(f"{s['title']} by {s['artist']}" for s in recent[-8:])
@@ -6666,7 +6669,7 @@ def deck_fill(settings, count=5, auto=False, seed=None):
                       set().union(*(deck_artists(s) for s in recent[-3:])) if auto and recent else set())
     found, picks = [], []
     for idea, match in find_songs(service, [i for i in ideas["songs"] if song_key(i["t"]) not in have]):
-        if match and len(found) < (count + 5 if anchor else count) and song_key(match["title"]) not in have:
+        if match and len(found) < (count + 3 if anchor else count) and song_key(match["title"]) not in have:
             song = deck_item(service, match)
             if (auto or seed) and deck_artists(song) & recent_artists:
                 continue                    # not the same artists again straight away
@@ -6712,7 +6715,9 @@ def deck_night(deck):
 def deck_mix_words(song, picked=False):
     """A song for Auto-DJ: title and artist, what's known of its tempo, key
     and energy, and whether a guest asked for it or Auto-DJ picked it."""
-    words = deck_seed_words(song)
+    # Title and artist only: exact tempo and key figures make Grok deliberate
+    # for minutes; it knows the songs, and the tempo is checked afterwards.
+    words = f"{song['title']} by {song['artist']}".replace("»", "")[:120]
     if song.get("rid"):
         words += " [guest request]"
     elif not picked and str(song.get("from", "")).startswith("✦ Auto-DJ"):
@@ -6720,7 +6725,7 @@ def deck_mix_words(song, picked=False):
     return words
 
 
-def deck_autodj_ask(deck, seed=None):
+def deck_autodj_ask(deck, seed=None, compact=False):
     """What Auto-DJ asks Grok: where the night is now (the newest songs
     weighted most, with their tempo, key and energy), what follows them, the
     room's taste (requests, votes, skips), and the direction, if a shape set one."""
@@ -6730,25 +6735,27 @@ def deck_autodj_ask(deck, seed=None):
         at = next((i for i, x in enumerate(night) if x.get("uid") == seed.get("uid")), len(night) - 1)
         night = night[:at + 1]
     anchor = night[-1]
-    window, earlier = night[-6:], night[:-6]
+    window, earlier = night[-6:], night[:-6][-12:]
+    if compact:                     # the retry: just where the night is now
+        window, earlier = night[-4:], []
     ask = "You're the DJ. "
     if earlier:
-        ask += "Earlier tonight: " + "; ".join(f"{x['title']} by {x['artist']}" for x in earlier).replace("»", "")[:1200] + ". "
+        ask += "Earlier tonight: " + "; ".join(f"{x['title']} by {x['artist']}" + (" [guest request]" if x.get("rid") else "")
+                                               for x in earlier).replace("»", "")[:1400] + ". "
     if len(window) > 1:
         ask += ("Where the night is now, oldest to newest (these matter most, the newest most of all): "
                 + "; ".join(deck_mix_words(x, picked=bool(seed) and x is anchor) for x in window)[:1400] + ". ")
     ask += (f"The next song follows «{deck_mix_words(anchor, picked=bool(seed))}»"
             + (", which the listener just picked" if seed or len(night) == 1 else "")
-            + ": stay close to its tempo (within about 8%, half or double time counts) and in a key that mixes with it, "
-              "and carry on its sound, genre and era. ")
+            + ": close to it in tempo, in a key that mixes with it, and carrying on its sound, genre and era. ")
     if any(x.get("rid") for x in night):
         ask += "Songs marked [guest request] are what the room asked for: lean towards their style. "
-    crowd = deck_crowd(deck)
+    crowd = deck_crowd(deck) if not compact else {"up": [], "down": []}
     if crowd["up"]:
         ask += "The guests loved: " + "; ".join(crowd["up"])[:500] + ". "
     if crowd["down"]:
         ask += "They didn't like: " + "; ".join(crowd["down"])[:400] + ": less like those. "
-    skipped = [f"{x['title']} by {x['artist']}" for x in (deck.get("skipped") or [])[-8:]]
+    skipped = [f"{x['title']} by {x['artist']}" for x in (deck.get("skipped") or [])[-6:]] if not compact else []
     if skipped:
         ask += "The DJ skipped these quickly: " + "; ".join(skipped)[:500] + ": steer away from them. "
     direction = DIRECTIONS.get(deck.get("direction") or "")
