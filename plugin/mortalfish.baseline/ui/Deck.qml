@@ -704,18 +704,27 @@ Item {
     return (a.slice(-1) === b.slice(-1) && (d === 1 || d === 11)) || na === nb
   }
   function tempoStep(from, to) {
-    // How the tempo moves from one song to the next: the plain difference in
-    // BPM ("−11"), or "½×" / "2×" when it only mixes at half or double time;
-    // fits is whether it mixes at all (within 8%). null when either isn't known.
+    // Does the tempo flow from one song to the next: within 8%, or at half or
+    // double time. null when either isn't known.
     if (!from || !to) return null
     const near = (a, b) => Math.abs(a - b) / b <= 0.08
-    const straight = near(to, from)
-    const halfTime = !straight && (near(to, from * 2) || near(to, from / 2))
-    const diff = Math.round(to - from)
-    return { text: halfTime ? (to > from ? "2×" : "½×") : diff === 0 ? "" : (diff > 0 ? "+" : "−") + Math.abs(diff),
-             fits: straight || halfTime }
+    return { fits: near(to, from) || near(to, from * 2) || near(to, from / 2) }
   }
-  // The set's columns, the same on every row and the Now row.
+  // Bumps: songs that don't flow from the one before (the playing one, for
+  // the first): a key clash or a tempo jump. What Smooth it out fixes.
+  readonly property int bumps: {
+    const list = deck.set || []
+    let before = now && now.title ? now : null, n = 0
+    for (const s of list) {
+      if (before) {
+        const t = tempoStep(before.bpm || 0, s.bpm || 0)
+        if (!keysFit(before.key || "", s.key || "") || (t !== null && !t.fits)) n++
+      }
+      before = s
+    }
+    return n
+  }
+  // The set's columns, the same on every row.
   readonly property int keyColumn: 40
   readonly property int bpmColumn: 48
   readonly property int timeColumn: 66
@@ -1675,9 +1684,10 @@ Item {
                   }
                   Label {
                     anchors.right: parent.right; anchors.bottom: parent.bottom
+                    // What's left, then how long it is.
                     visible: root.pos.length > 0
-                    text: root.clock(root.pos.length)
-                    font.pixelSize: Style.font.caption; opacity: 0.6
+                    text: "−" + root.clock(root.nowLeft) + "  /  " + root.clock(root.pos.length)
+                    font.pixelSize: Style.font.caption; color: root.teal
                   }
                 }
                 Flow {
@@ -1802,7 +1812,15 @@ Item {
               HeadLink { visible: root.selectedUids.length > 0; glyph: "󰐒"; text: strings.t("deck.bloomLater"); onTapped: root.placePicked("end") }
               HeadLink { visible: root.selectedUids.length > 0 && !root.locked; glyph: "󰅖"; text: strings.t("deck.remove"); onTapped: root.placePicked("remove") }
               HeadLink { visible: root.selectedUids.length > 0; glyph: "󰜺"; onTapped: root.clearPicked() }
-              // Otherwise: the tools for the set.
+              // Otherwise: the tools for the set. Smooth it out reorders so it
+              // flows (Fix the bumps; pinned songs stay, Undo puts it back).
+              HeadLink {
+                visible: root.selectedUids.length === 0 && root.bumps > 0 && !root.locked
+                glyph: "󰘖"; on: true
+                text: strings.tn("deck.smoothIt", root.bumps).arg(root.bumps)
+                tip: strings.t("deck.smoothItTip")
+                onTapped: root.run(["deck", "shape", "bumps"])
+              }
               HeadLink {
                 visible: root.selectedUids.length === 0 && (root.deck.undo || 0) > 0 && !root.locked
                 glyph: "󰕌"; text: strings.t("deck.undo"); onTapped: root.run(["deck", "undo"])
@@ -2196,7 +2214,7 @@ Item {
                   Item { width: 1; height: 8 }
                 }
 
-                // ---- what's played (folded) and the playhead: the set as past, now and next.
+                // ---- what's played (folded): the set as past, then next (what's playing is up top).
                 header: Column {
                   width: setList.width
                   spacing: 4
@@ -2254,67 +2272,6 @@ Item {
                         onActiveChanged: if (active) root.beginDrag("played", was.modelData.uid, null, was.modelData.title, was.modelData.thumb || "")
                                          else if (root.dragging) root.endDrag()
                         onCentroidChanged: if (active) root.moveGhost(was.mapToItem(stage, centroid.position.x, centroid.position.y))
-                      }
-                    }
-                  }
-                  // The playhead.
-                  Rectangle {
-                    width: setList.width
-                    height: 46
-                    visible: !!root.now && root.filter === ""
-                    radius: Style.cornerRadius > 0 ? 5 : 0
-                    color: Util.alpha(root.amber, 0.08)
-                    clip: true
-                    Rectangle { width: 3; height: parent.height; color: root.amber }
-                    RowLayout {
-                      anchors.fill: parent
-                      anchors.leftMargin: 12; anchors.rightMargin: 6
-                      spacing: 12
-                      Label { text: strings.t("deck.nowShort").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 3; color: root.amber; Layout.preferredWidth: 34 }
-                      Cover { url: root.now ? root.now.thumb || "" : ""; size: 32 }
-                      Label {
-                        Layout.fillWidth: true
-                        text: root.now ? root.now.title + "  ·  " + root.now.artist : ""
-                        font.bold: true
-                        font.pixelSize: Style.font.caption
-                        elide: Text.ElideRight
-                      }
-                      // What's playing: its key and tempo, in the same columns as the songs below.
-                      Label {
-                        Layout.preferredWidth: root.keyColumn
-                        horizontalAlignment: Text.AlignHCenter
-                        text: root.now && root.now.key ? root.now.key : "–"
-                        font.pixelSize: Style.font.caption; font.bold: true; color: root.amber
-                        opacity: root.now && root.now.key ? 1 : 0.3
-                      }
-                      Label {
-                        Layout.preferredWidth: root.bpmColumn
-                        horizontalAlignment: Text.AlignHCenter
-                        text: root.now && root.now.bpm > 0 ? Math.round(root.now.bpm) : "–"
-                        font.pixelSize: Style.font.caption; color: root.amber
-                        opacity: root.now && root.now.bpm > 0 ? 1 : 0.3
-                      }
-                      Label {
-                        Layout.preferredWidth: root.timeColumn
-                        horizontalAlignment: Text.AlignRight
-                        text: "−" + root.clock(root.nowLeft)
-                        font.pixelSize: Style.font.caption
-                        color: root.teal
-                      }
-                      Item {
-                        Layout.preferredWidth: root.actionsColumn
-                        implicitHeight: 20
-                        Equalizer { anchors.centerIn: parent; visible: root.deck.playing; on: root.deck.playing }
-                      }
-                    }
-                    Rectangle {
-                      anchors.bottom: parent.bottom
-                      height: 2
-                      width: root.pos.length > 0 ? parent.width * Math.min(1, root.shownTime / root.pos.length) : 0
-                      gradient: Gradient {
-                        orientation: Gradient.Horizontal
-                        GradientStop { position: 0; color: root.amber }
-                        GradientStop { position: 1; color: root.teal }
                       }
                     }
                   }
@@ -2482,7 +2439,11 @@ Item {
                         Label { Layout.fillWidth: true; text: slot.title; font.bold: true; elide: Text.ElideRight }
                         Label {
                           Layout.fillWidth: true
-                          readonly property string reasons: row.warns.map(w => strings.t("deck.warn." + w)).join("  ·  ")
+                          // In plain words: what doesn't flow from the song before.
+                          readonly property string reasons: [].concat(
+                              !ktChip.keyOk ? [strings.t("deck.clash").arg(slot.key).arg(ktChip.before.key)] : [],
+                              ktChip.jump ? [strings.t("deck.jump").arg(Math.round(ktChip.before.bpm)).arg(Math.round(slot.bpm))] : [],
+                              row.warns.filter(w => w !== "key" && w !== "tempo").map(w => strings.t("deck.warn." + w))).join("  ·  ")
                           text: root.serviceGlyph(slot.service) + "  " + slot.artist
                                 + (rowHover.hovered ? (reasons !== "" ? "  ·  ◆ " + reasons : slot.from !== "" ? "  ·  " + slot.from : "")
                                                     : slot.why !== "" ? "  ·  ✦ " + slot.why : "")
@@ -2513,29 +2474,14 @@ Item {
                           opacity: slot.key !== "" ? 1 : 0.3
                         }
                       }
-                      // Tempo, and its step from the song before (amber past 8%).
-                      Item {
+                      // Tempo: amber when it doesn't flow from the song before.
+                      Label {
                         Layout.preferredWidth: root.bpmColumn
-                        Layout.fillHeight: true
-                        Column {
-                          anchors.centerIn: parent
-                          spacing: 0
-                          Label {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            text: slot.bpm > 0 ? Math.round(slot.bpm) : "–"
-                            font.pixelSize: Style.font.caption
-                            color: ktChip.jump ? Commons.Color.warning : root.teal
-                            opacity: slot.bpm > 0 ? 1 : 0.3
-                          }
-                          Label {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            visible: slot.bpm > 0 && ktChip.step !== null && ktChip.step.text !== ""
-                            text: ktChip.step === null ? "" : ktChip.step.text
-                            font.pixelSize: Style.font.caption - 2
-                            color: ktChip.jump ? Commons.Color.warning : root.teal
-                            opacity: 0.6
-                          }
-                        }
+                        horizontalAlignment: Text.AlignHCenter
+                        text: slot.bpm > 0 ? Math.round(slot.bpm) : "–"
+                        font.pixelSize: Style.font.caption
+                        color: ktChip.jump ? Commons.Color.warning : root.teal
+                        opacity: slot.bpm > 0 ? 1 : 0.3
                       }
                       // When it starts.
                       Label {

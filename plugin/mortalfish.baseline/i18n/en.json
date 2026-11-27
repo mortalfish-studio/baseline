@@ -573,7 +573,7 @@
   "deck.sleepSong": "End of song",
   "deck.sleepIn": "%1 min",
   "deck.crossfade": "Crossfade",
-  "deck.nextIn": "Next in %1 s",
+  "deck.nextIn": "Next in %1",
   "deck.skipIt": "Skip it",
   "deck.yourSets": "Your sets",
   "deck.yourPlaylists": "Your playlists",
@@ -721,17 +721,26 @@
   "deck.setDoneTag": "The end of the set",
   "deck.setDone": "That's the set.",
   "deck.setDoneLast": "Last up: %1 · %2",
-  "deck.runningLow": { "one": "%1 song left", "other": "%1 songs left" },
+  "deck.runningLow": {
+    "one": "%1 song left",
+    "other": "%1 songs left"
+  },
   "deck.autodjTurnOn": "Turn on Auto-DJ",
   "deck.silent": "The music stopped: %1. Press Play to try again",
   "deck.batteryLow": "Battery at %1%: plug the laptop in",
   "deck.soft": "Soft",
   "deck.softOff": "Hard cuts",
-  "deck.nextIn": "Next in %1",
   "deck.recapKeep": "Save tonight to Apple Music",
   "deck.recapKeeping": "Saving to Apple Music…",
   "deck.recapKeepName": "Party %1",
   "deck.autodjFindingToward": "Finding songs to head to %1… (about a minute)",
   "deck.autodjFindingSeed": "Finding songs to follow %1… (about a minute)",
-  "deck.autodjFindingNext": "Finding songs to carry the night on… (about a minute)"
+  "deck.autodjFindingNext": "Finding songs to carry the night on… (about a minute)",
+  "deck.clash": "key %1 clashes with %2",
+  "deck.jump": "tempo jumps %1 → %2",
+  "deck.smoothIt": {
+    "one": "Smooth it out (%1 bump)",
+    "other": "Smooth it out (%1 bumps)"
+  },
+  "deck.smoothItTip": "Reorder so each song flows from the one before. Pinned songs stay; Undo puts it back."
 }
