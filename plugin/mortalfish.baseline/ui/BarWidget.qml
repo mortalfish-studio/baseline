@@ -693,17 +693,21 @@ BarWidget {
   // still loading can name the last track for a beat): wait for the name to
   // hold and the cover to come, up to about three seconds, then show it.
   property int trackWaits: 0
+  property string trackArtShown: ""
   readonly property string trackArt: playingPlayer ? (playingPlayer.trackArtUrl || "") : ""
   // A cover that arrives while the popup shows goes straight in.
-  onTrackArtChanged: if (trackToast.opened && trackKey === trackShown && trackArt !== "") trackToast.art = trackArt
+  onTrackArtChanged: if (trackToast.opened && trackKey === trackShown && trackArt !== "") { trackToast.art = trackArt; trackArtShown = trackArt }
   Timer {
     id: trackSettle
     interval: 800
     onTriggered: {
       const p = root.playingPlayer
       if (!p || root.trackKey === "" || root.trackKey === root.trackShown) return
-      if (!p.trackArtUrl && root.trackWaits < 3) { root.trackWaits++; trackSettle.restart(); return }
+      // No cover yet, or still the last track's (Chrome swaps the file a moment later).
+      const stale = !p.trackArtUrl || p.trackArtUrl === root.trackArtShown
+      if (stale && root.trackWaits < 3) { root.trackWaits++; trackSettle.restart(); return }
       root.trackShown = root.trackKey
+      root.trackArtShown = p.trackArtUrl || ""
       const from = p.identity === "Chrome" || !p.identity ? root.musicSourceInfo.name : p.identity
       // Both popups sit at the top: take over from "Next track" rather than stack on it.
       Quickshell.execDetached(["omarchy-shell", "osd", "close"])

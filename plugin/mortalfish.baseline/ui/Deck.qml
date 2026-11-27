@@ -704,12 +704,16 @@ Item {
     return (a.slice(-1) === b.slice(-1) && (d === 1 || d === 11)) || na === nb
   }
   function tempoStep(from, to) {
-    // The change in BPM from one song to the next, by the nearest of half,
-    // same and double time; null when either isn't known.
+    // How the tempo moves from one song to the next: the plain difference in
+    // BPM ("−11"), or "½×" / "2×" when it only mixes at half or double time;
+    // fits is whether it mixes at all (within 8%). null when either isn't known.
     if (!from || !to) return null
-    let best = to - from
-    for (const f of [2, 0.5]) if (Math.abs(to - from * f) < Math.abs(best)) best = to - from * f
-    return Math.round(best)
+    const near = (a, b) => Math.abs(a - b) / b <= 0.08
+    const straight = near(to, from)
+    const halfTime = !straight && (near(to, from * 2) || near(to, from / 2))
+    const diff = Math.round(to - from)
+    return { text: halfTime ? (to > from ? "2×" : "½×") : diff === 0 ? "" : (diff > 0 ? "+" : "−") + Math.abs(diff),
+             fits: straight || halfTime }
   }
   // The set's columns, the same on every row and the Now row.
   readonly property int keyColumn: 40
@@ -2497,7 +2501,7 @@ Item {
                                                     : (slot.index - 1 < setModel.count ? setModel.get(slot.index - 1) : null)
                         readonly property bool keyOk: !before || root.keysFit(before.key || "", slot.key)
                         readonly property var step: before ? root.tempoStep(before.bpm || 0, slot.bpm) : null
-                        readonly property bool jump: step !== null && Math.abs(step) > (before.bpm || 120) * 0.08
+                        readonly property bool jump: step !== null && !step.fits
                         Layout.preferredWidth: root.keyColumn
                         Layout.fillHeight: true
                         Label {
@@ -2525,8 +2529,8 @@ Item {
                           }
                           Label {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            visible: slot.bpm > 0 && ktChip.step !== null && ktChip.step !== 0
-                            text: ktChip.step === null ? "" : (ktChip.step > 0 ? "+" : "−") + Math.abs(ktChip.step)
+                            visible: slot.bpm > 0 && ktChip.step !== null && ktChip.step.text !== ""
+                            text: ktChip.step === null ? "" : ktChip.step.text
                             font.pixelSize: Style.font.caption - 2
                             color: ktChip.jump ? Commons.Color.warning : root.teal
                             opacity: 0.6

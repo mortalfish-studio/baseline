@@ -27,9 +27,16 @@ Item {
     glyph = icon || "󰎆"
     opened = true
     hideTimer.restart()
+    reloadArt.restart()
   }
 
   Timer { id: hideTimer; interval: 3500; onTriggered: root.opened = false }
+  // Chrome may still be writing a new cover's file when the popup opens: look again once.
+  Timer {
+    id: reloadArt
+    interval: 700
+    onTriggered: if (root.art !== "") { const a = root.art; root.art = ""; root.art = a }
+  }
 
   OverlayWindow {
     id: panel
