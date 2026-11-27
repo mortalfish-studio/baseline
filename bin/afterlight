@@ -3366,13 +3366,20 @@ def ytm_say(words):
     query = " ".join(re.sub(r"^(?:some|the|my)\s+", "", said.strip(), flags=re.I).split())
     if not query:
         sys.exit("Say what to play.")
-    items = ytm_search(query)
+    # One of your own playlists, by name, first.
+    for p in ytm_playlists() if kind in {None, "playlist"} else []:
+        if song_key(p["name"]) == song_key(query) and YTM_ID.match(p["playlist"]):
+            return ytm_play({"kind": "playlist", "title": p["name"], "playlist": p["playlist"], "video": "",
+                             "browse": "", "subtitle": ""})
+    try:
+        items = ytm_search(query)
+    except (OSError, ValueError):
+        items = []
     if kind:
         items = [i for i in items if i["kind"] == kind] or items
-    if not items:
-        run("omarchy-osd", "-i", "󰀦", "-m", "Nothing on YouTube Music by that name")
-        sys.exit("Nothing found.")
-    ytm_play(items[0])
+    if items and confident(items[0], query):
+        return ytm_play(items[0])
+    suggest("ytmusic", query, items)
 
 
 def ytm_playlists(refresh=False):
@@ -3472,17 +3479,21 @@ def am_search(query):
     # Apple's own order within each kind; an artist first when the words are
     # just their name; live, remixed and karaoke takes last unless asked for.
     said = song_key(query)
+    # An artist goes first only when it's the one the songs found are by: an
+    # unknown band called "Get Lucky" doesn't beat Daft Punk's song.
+    song_artists = {song_key(t.get("artistName", "")) for t in songs}
     extra = re.compile(r"\b(?:live|remix|karaoke|cover|instrumental|acoustic|sped up|slowed)\b", re.I)
     def rank(item):
         if item["kind"] == "artist":
-            return 0 if song_key(item["title"]) == said else 3
+            return 0 if song_key(item["title"]) == said and song_key(item["title"]) in song_artists else 3
         unwanted = bool(extra.search(item["title"])) and not extra.search(query)
         words = set(said.split())
         by = set(song_key(item["subtitle"].split(" • ")[0]).split())
         named = set(song_key(item["title"]).split()) <= words and (song_key(item["title"]) == said or bool(by & words))
         if item["kind"] == "album":     # a single is a song: the song comes first
             single = bool(re.search(r" - (?:Single|EP)$", item["title"]))
-            return (0.5 if named and not single else 2) + unwanted * 2
+            # Named with its artist: the album. Its name alone: a song of that name first.
+            return (0.5 if named and bool(by & words) and not single else 1.2 if named else 2) + unwanted * 2
         return (1 if named else 1.5) + unwanted * 2
     items.sort(key=rank)
     return items[:30]
@@ -3559,10 +3570,106 @@ def am_say(words):
     items = am_search(query)
     if kind:
         items = [i for i in items if i["kind"] == kind] or items
-    if not items:
-        run("omarchy-osd", "-i", "󰀦", "-m", "Nothing on Apple Music by that name")
-        sys.exit("Nothing found.")
-    am_play(items[0])
+    if items and confident(items[0], query):
+        return am_play(items[0])
+    suggest("applemusic", query, items)
+
+
+# ---------------------------------------------------------------- suggestions
+# "Play …" plays only when the best match is clearly what was asked for.
+# Otherwise nothing plays: the Player tab opens on suggestions, the closest
+# matches at once and, a few seconds later, ideas from Grok's fast model
+# (searched for on the same service, so each one plays). suggest.json holds them.
+SUGGEST = STATE.parent / "suggest.json"
+GROK_FAST = "grok-4.7-build-fast"
+FILLER = {"the", "a", "an", "my", "some", "songs", "song", "music", "playlist", "please", "by", "from", "track",
+          "tracks", "album", "artist", "on", "of", "for", "me", "by"}
+
+
+MOODS = {"chill", "chilled", "relaxing", "relax", "calm", "sunset", "sunrise", "party", "workout", "gym", "focus",
+         "study", "sleep", "sleepy", "happy", "sad", "upbeat", "dinner", "cooking", "morning", "evening", "night",
+         "summer", "winter", "rainy", "rain", "background", "easy", "mellow", "dance", "something", "anything",
+         "kitchen", "lounge", "vibes", "vibe", "mood", "good", "nice", "new", "fresh", "old", "classic", "hits"}
+
+
+def confident(item, query):
+    """Is this search result clearly what was asked for? The title is all
+    said, and for a song or album the artist is said too (or nothing else is).
+    A mood ("chill music", "something for dinner") is never a match: that's
+    what suggestions are for."""
+    said = set(song_key(query).split()) - FILLER
+    if said and said <= MOODS:
+        return False
+    title = set(song_key(item.get("title", "")).split()) - FILLER
+    if not said or not title or not title <= said:
+        return False
+    if item.get("kind") in {"artist", "playlist"}:
+        return title == said
+    by = set(song_key(str(item.get("subtitle", "")).split(" • ")[0]).split()) - FILLER
+    rest = said - title - by
+    return title == said or (bool(by & said) and len(rest) <= 1)
+
+
+def suggest_write(value):
+    write_atomic(SUGGEST, json.dumps({**value, "at": time.time()}) + "\n")
+
+
+def suggest(service, query, items, open_tab=True):
+    """No clear match: show the closest ones and ask Grok for more."""
+    suggest_write({"service": service, "query": query[:120], "close": items[:6], "grok": [], "try": [],
+                   "pending": bool(shutil.which("grok"))})
+    if open_tab:
+        # The panel says it itself; a popup at the same moment would close it.
+        run("omarchy-shell", "-q", "mortalfish.baseline", "openTab", "player")
+    if shutil.which("grok"):
+        subprocess.Popen([str(Path(__file__).resolve()), "music", "grok", service, query[:200]],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    print(f"No exact match for {query}: suggestions are in the Player tab")
+
+
+def grok_ideas(query):
+    """Songs that fit what was asked, and searches to try, from Grok's fast
+    model with every tool off: {"songs": [{"t", "a", "w"}], "q": [...]}."""
+    prompt = (f"Music search helper. Someone asked to play: «{query.replace('»', '')[:200]}». "
+              "There was no exact match. Reply with ONLY compact JSON, no prose: "
+              '{"songs":[{"t":"title","a":"artist","w":"why it fits, max 30 chars"}],"q":["search phrase"]} '
+              "with 6 real, findable songs that fit (or the song they most likely meant first) and 3 short searches.")
+    workdir = STATE.parent / "grok-music"
+    workdir.mkdir(parents=True, exist_ok=True)
+    try:
+        result = subprocess.run(["grok", "-m", GROK_FAST, "--effort", "low", "--tools", "", "-p", prompt,
+                                 "--max-turns", "1", "--no-auto-update"], cwd=workdir, capture_output=True,
+                                text=True, timeout=45, stdin=subprocess.DEVNULL)
+        text = result.stdout
+        value = json.loads(text[text.index("{"):text.rindex("}") + 1])
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {"songs": [], "q": []}
+    songs = [{"t": clean_text(str(x.get("t", "")), 100), "a": clean_text(str(x.get("a", "")), 100),
+              "w": clean_text(str(x.get("w", "")), 40)}
+             for x in value.get("songs", []) if isinstance(x, dict) and x.get("t")][:8]
+    searches = [clean_text(str(q), 60) for q in value.get("q", []) if isinstance(q, str) and q.strip()][:4]
+    return {"songs": songs, "q": searches}
+
+
+def grok_suggest(service, query):
+    """Fill in Grok's ideas, each found on the service so it plays."""
+    ideas = grok_ideas(query)
+    found = []
+    search = am_search if service == "applemusic" else ytm_search
+    for idea in ideas["songs"]:
+        try:
+            results = [i for i in search(f"{idea['t']} {idea['a']}") if i["kind"] == "song"]
+        except (OSError, ValueError):
+            continue
+        match = next((i for i in results if song_key(i["title"]) == song_key(idea["t"])), results[0] if results else None)
+        if match and not any(f.get("id", f.get("video")) == match.get("id", match.get("video")) for f in found):
+            found.append({**match, "why": idea["w"]})
+    current = read_json(SUGGEST, {})
+    if current.get("query") != query[:120] or current.get("service") != service:
+        return      # a newer search has taken over
+    current.update(grok=found, pending=False, **{"try": ideas["q"]})
+    suggest_write(current)
 
 
 # ---------------------------------------------------------------- plugin copies
@@ -4925,6 +5032,19 @@ def main(argv):
         elif command == "toast" and 1 <= len(args) <= 3:
             # A music message in the bar's popup: afterlight toast <title> [detail] [glyph]
             toast(args[0], args[1] if len(args) > 1 else "", glyph=args[2] if len(args) > 2 else "󰜟")
+        elif command == "music":
+            action = args[0] if args else ""
+            if action == "suggest" and len(args) >= 3 and args[1] in {"ytmusic", "applemusic"}:
+                # Suggestions for a search typed in the Player tab (no playing).
+                query = " ".join(args[2:])
+                items = am_search(query) if args[1] == "applemusic" else ytm_search(query)
+                suggest(args[1], query, items, open_tab=False)
+            elif action == "grok" and len(args) >= 3 and args[1] in {"ytmusic", "applemusic"}:
+                grok_suggest(args[1], " ".join(args[2:]))
+            elif action == "clear":
+                SUGGEST.unlink(missing_ok=True)
+            else:
+                sys.exit("Usage: afterlight music [suggest|grok] ytmusic|applemusic <words> | clear")
         elif command == "applemusic":
             action = args[0] if args else ""
             if action == "search" and len(args) >= 2:

@@ -19,6 +19,7 @@ Coding apps that Omarchy installs include:
 | Sonos in the Player tab | your speakers on the local network (UPnP); the volume keys follow the picked room | `bin/afterlight`: the `sonos_*` functions; `system/bin/baseline-volume`; `ui/OutputSwitch.qml` |
 | Send to Sonos | the laptop's song carries on in a room, found on Apple Music there | `bin/afterlight`: `sonos_send` (`SONOS_SERVICE` names the service Grok plays from; the brief is `sonos_send_brief`) |
 | Apple Music | searched with Apple's public catalogue, played in the Apple Music web app (class `chrome-music.apple.com__-Default`, workspace 6) | `bin/afterlight`: the `am_*` functions (`am_country` picks the storefront from your locale); `chrome/beatport-baseline/background.js`: `appleMusic()` |
+| Suggestions | when "play …" has no clear match, Grok's fast model suggests songs | `bin/afterlight`: `confident()` decides what counts as a match; `grok_ideas()` (`GROK_FAST` names the model; swap in another headless agent); `ui/PlayerTab.qml` shows them |
 | Voice: Sonos | anything with "Sonos" in it goes to the Grok agent (`grok -p`), which uses the Sonos MCP | OmaRelay: `bin/omarelay_sonos.py` (`command()`: swap in another agent's headless command, such as `claude -p`, with the same Sonos MCP added to it) |
 | Agent threads in Baseline | read from T3 Code's database | `bin/afterlight`: `agents_from_db` / `agents_from_cli` |
 | Agent usage limits | `omarchy agent account list` (Claude, Codex, Grok) | `bin/afterlight` (morning check) and `ui/BarWidget.qml` |

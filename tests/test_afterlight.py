@@ -841,3 +841,53 @@ class AppleMusicTests(TempCase):
         self.assertEqual(settings["music"]["service"], "applemusic")
         with self.assertRaises(SystemExit):
             al.set_path(settings, "music.service", "spotify")
+
+
+class SuggestionTests(TempCase):
+
+    def song(self, title, by, kind="song"):
+        return {"kind": kind, "title": title, "subtitle": f"{by} • Some Album", "id": "1"}
+
+    def test_clear_matches_play(self):
+        self.assertTrue(al.confident(self.song("Dreams", "Fleetwood Mac"), "dreams by fleetwood mac"))
+        self.assertTrue(al.confident(self.song("Get Lucky", "Daft Punk"), "get lucky"))
+        self.assertTrue(al.confident(self.song("Rumours", "Fleetwood Mac", "album"), "rumours fleetwood mac"))
+        self.assertTrue(al.confident({"kind": "artist", "title": "Bonobo", "subtitle": "Electronic"}, "bonobo"))
+
+    def test_unclear_ones_become_suggestions(self):
+        self.assertFalse(al.confident(self.song("Castle on the Hill", "Ed Sheeran"), "sunset playlist for the kitchen"))
+        self.assertFalse(al.confident({"kind": "album", "title": "Chill Music", "subtitle": "Various"}, "chill music"))
+        self.assertFalse(al.confident(self.song("Dreams", "The Cranberries"), "dreams fleetwood mac live in boston"))
+        self.assertFalse(al.confident({"kind": "artist", "title": "Daft Punk", "subtitle": ""}, "daft punk remixes"))
+
+    def test_suggest_plays_nothing_and_asks_grok(self):
+        self.patch("SUGGEST", self.tmp / "suggest.json")
+        self.patch("run", lambda *a, **k: None)
+        self.patch("toast", lambda *a, **k: None)
+        started = []
+        with mock.patch("shutil.which", return_value="/usr/bin/grok"), \
+                mock.patch("subprocess.Popen", side_effect=lambda argv, **k: started.append(argv)), \
+                mock.patch("builtins.print"):
+            al.suggest("applemusic", "sunset playlist", [self.song("Sunset Lover", "Petit Biscuit")])
+        value = json.loads((self.tmp / "suggest.json").read_text())
+        self.assertEqual((value["service"], value["query"], value["pending"]), ("applemusic", "sunset playlist", True))
+        self.assertEqual(started[0][-4:], ["music", "grok", "applemusic", "sunset playlist"])
+
+    def test_grok_ideas_parse_and_run_without_tools(self):
+        reply = 'Sure:\n{"songs":[{"t":"Lovely Day","a":"Bill Withers","w":"Sunny classic"},{"x":1}],"q":["golden hour",3]}'
+        with mock.patch("subprocess.run", return_value=mock.Mock(stdout=reply)) as runner:
+            self.patch("STATE", self.tmp / "state.json")
+            ideas = al.grok_ideas("something for the kitchen")
+        argv = runner.call_args[0][0]
+        self.assertEqual(argv[argv.index("-m") + 1], al.GROK_FAST)
+        self.assertEqual(argv[argv.index("--tools") + 1], "")
+        self.assertEqual(ideas, {"songs": [{"t": "Lovely Day", "a": "Bill Withers", "w": "Sunny classic"}], "q": ["golden hour"]})
+        with mock.patch("subprocess.run", return_value=mock.Mock(stdout="no json here")):
+            self.assertEqual(al.grok_ideas("x"), {"songs": [], "q": []})
+
+    def test_a_newer_search_wins(self):
+        self.patch("SUGGEST", self.tmp / "suggest.json")
+        al.suggest_write({"service": "applemusic", "query": "newer", "close": [], "grok": [], "try": [], "pending": True})
+        self.patch("grok_ideas", lambda q: {"songs": [], "q": ["x"]})
+        al.grok_suggest("applemusic", "older")
+        self.assertTrue(json.loads((self.tmp / "suggest.json").read_text())["pending"])

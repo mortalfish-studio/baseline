@@ -59,7 +59,7 @@ These are symlinks back to your checkout, so the repo stays the single source. `
 | `~/.config/omarchy/afterlight/settings.json`, `sources.json` | Baseline's settings, and where each added picture came from |
 | `~/.config/omarchy/backgrounds/afterlight-*` | pictures you add, and darkened Night/Saver copies made from them |
 | `~/.config/systemd/user/afterlight-mode.timer` | the Day/Night schedule |
-| `~/.local/state/afterlight/` | state: health report, liked tracks, Beatport playlists, the Sonos speakers and room names found (`sonos.json`, kept current: rewritten when they change and at least daily), the music popup's last message (`toast.json`) and, while Sonos has the volume keys, `sonos-target` |
+| `~/.local/state/afterlight/` | state: health report, liked tracks, Beatport playlists, the Sonos speakers and room names found (`sonos.json`, kept current: rewritten when they change and at least daily), the music popup's last message (`toast.json`), the last suggestions (`suggest.json`) and, while Sonos has the volume keys, `sonos-target` |
 | `~/.local/share/baseline/looks/` | looks added from the [catalog](https://github.com/mortalfish-studio/baseline-looks) |
 | `~/.local/share/baseline/mine/` | looks you make in the Studio |
 | `~/.local/share/baseline-before/` | the snapshot taken before installing (moved aside by `afterlight uninstall`) |
@@ -101,6 +101,7 @@ Chrome's colour follows the look through Omarchy's own browser policy (`/etc/opt
 | Player tab, while it's open | asks your Sonos speakers on the **local network** (port 1400) for rooms, volume and what's playing, every few seconds; finds them through Avahi (mDNS). Nothing leaves your network |
 | saying "Sonos" to OmaRelay | the Grok agent (`grok -p`, Sonos tools only) talks to Sonos's cloud; only if you've added and signed in to the Sonos MCP yourself. OmaRelay gives it the room names Baseline last read |
 | Send to Sonos (the Player tab's *Continue … in* button, or "send this to the kitchen") | the Grok agent, as above, starts the laptop's song (title, artist, album) on Apple Music in that room; then Baseline skips to the song and second over the local network and pauses the laptop |
+| "play …" with no clear match, or *Ask Grok for ideas* | Grok's fast model (`grok -m grok-4.7-build-fast`, tools off) gets the words asked for and suggests songs; they're then searched on YouTube Music or Apple Music. Only if the Grok command line is installed and signed in |
 | searching Apple Music (Player tab, or "play … on Apple Music") | Apple's public catalogue search (`itunes.apple.com`), no account; the words searched and your region's storefront are sent |
 
 Nothing is sent anywhere else, and nothing personal goes into shared looks: commits use your GitHub no-reply address and an author handle you choose.

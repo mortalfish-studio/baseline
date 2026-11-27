@@ -379,6 +379,97 @@ Column {
     Quickshell.execDetached([tool, item.service || service, "play", JSON.stringify(item)])
   }
   Timer { id: ytPlayingClear; interval: 6000; onTriggered: root.ytPlaying = "" }
+
+  // ---- Suggestions: when "play …" (said or typed) has no clear match, nothing
+  // plays; the closest results show here at once and Grok's ideas follow.
+  property var suggestion: null
+  Commons.WatchedFile {
+    path: Quickshell.env("HOME") + "/.local/state/afterlight/suggest.json"
+    onTextChanged: {
+      try {
+        const v = JSON.parse(text)
+        root.suggestion = v && typeof v.at === "number" && Date.now() / 1000 - v.at < 1800 ? v : null
+      } catch (error) { root.suggestion = null }
+    }
+  }
+  function askGrok(query) {
+    if (query.trim() === "") return
+    Quickshell.execDetached([tool, "music", "suggest", service, query.trim()])
+  }
+  function trySearch(words) {
+    ytQuery.text = words
+    if (root.suggestion && root.suggestion.service) pickedService = root.suggestion.service
+    ytFind(words)
+  }
+  component SuggestRow: Rectangle {
+    id: sRow
+    property var item: ({})
+    property string service: "ytmusic"
+    property bool fromGrok: false
+    readonly property bool starting: root.ytPlaying === item.kind + item.title
+    width: parent ? parent.width : 0
+    implicitHeight: sRowLayout.implicitHeight + Style.space(6)
+    radius: Style.cornerRadius > 0 ? Style.space(3) : 0
+    color: sHover.hovered || starting ? Qt.rgba(root.amber.r, root.amber.g, root.amber.b, 0.12) : "transparent"
+    RowLayout {
+      id: sRowLayout
+      anchors.verticalCenter: parent.verticalCenter
+      x: Style.space(4)
+      width: parent.width - Style.space(8)
+      spacing: Style.space(8)
+      Rectangle {
+        Layout.preferredWidth: Style.space(34)
+        Layout.preferredHeight: Style.space(34)
+        radius: Style.cornerRadius > 0 ? Style.space(2) : 0
+        color: Qt.rgba(1, 1, 1, 0.05)
+        clip: true
+        Image {
+          anchors.fill: parent
+          fillMode: Image.PreserveAspectCrop
+          asynchronous: true
+          source: /^https:\/\//.test(sRow.item.thumb || "") ? sRow.item.thumb : ""
+        }
+        Label {
+          anchors.centerIn: parent
+          visible: !(sRow.item.thumb)
+          text: sRow.starting ? "󰐊" : (root.ytIcons[sRow.item.kind] || "󰎈")
+          font.family: "Iosevka Nerd Font Propo"
+          color: sRow.fromGrok ? root.amber : root.teal
+        }
+      }
+      ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 0
+        Label {
+          Layout.fillWidth: true
+          text: sRow.item.title || ""
+          textFormat: Text.PlainText
+          elide: Text.ElideRight
+          font.pixelSize: Style.font.caption
+          font.bold: true
+        }
+        Label {
+          Layout.fillWidth: true
+          text: strings.t("ytmusic.kind." + sRow.item.kind) + (sRow.item.subtitle ? " · " + sRow.item.subtitle : "")
+          textFormat: Text.PlainText
+          elide: Text.ElideRight
+          font.pixelSize: Style.font.caption
+          opacity: 0.65
+        }
+        Label {
+          Layout.fillWidth: true
+          visible: !!sRow.item.why
+          text: sRow.item.why || ""
+          textFormat: Text.PlainText
+          elide: Text.ElideRight
+          font.pixelSize: Style.font.caption
+          color: root.amber
+        }
+      }
+    }
+    HoverHandler { id: sHover; cursorShape: Qt.PointingHandCursor }
+    TapHandler { onTapped: root.ytPlay(Object.assign({}, sRow.item, { service: sRow.service })) }
+  }
   readonly property var ytIcons: ({ song: "󰎈", video: "󰗃", album: "󰀥", artist: "󰠃", playlist: "󰲸" })
 
   Column {
@@ -488,6 +579,77 @@ Column {
         }
         HoverHandler { id: ytHover; cursorShape: Qt.PointingHandCursor }
         TapHandler { onTapped: root.ytPlay(ytRow.modelData) }
+      }
+    }
+    Chip {
+      visible: ytQuery.text.trim() !== "" && !root.ytSearching
+      text: "✦  " + strings.t("suggest.ask")
+      tone: root.amber
+      onClicked: root.askGrok(ytQuery.text)
+    }
+    Column {
+      width: parent.width
+      spacing: Style.space(4)
+      visible: !!root.suggestion
+      RowLayout {
+        width: parent.width
+        Label {
+          Layout.fillWidth: true
+          text: root.suggestion ? strings.t("suggest.none").arg(root.suggestion.query) : ""
+          textFormat: Text.PlainText
+          wrapMode: Text.Wrap
+          font.pixelSize: Style.font.caption
+          color: root.amber
+        }
+        ActionButton {
+          icon: "󰅖"
+          tone: Commons.Color.popups.text
+          onClicked: { root.suggestion = null; Quickshell.execDetached([root.tool, "music", "clear"]) }
+        }
+      }
+      Label {
+        visible: !!root.suggestion && root.suggestion.close.length > 0
+        text: strings.t("suggest.closest")
+        font.pixelSize: Style.font.caption
+        opacity: 0.6
+      }
+      Repeater {
+        model: root.suggestion ? root.suggestion.close.slice(0, 5) : []
+        delegate: SuggestRow {
+          required property var modelData
+          item: modelData
+          service: root.suggestion.service
+        }
+      }
+      Label {
+        visible: !!root.suggestion && (root.suggestion.pending || root.suggestion.grok.length > 0)
+        text: root.suggestion && root.suggestion.pending ? "✦  " + strings.t("suggest.grokWaiting") : "✦  " + strings.t("suggest.grok")
+        font.family: "Iosevka Nerd Font Propo"
+        font.pixelSize: Style.font.caption
+        color: root.amber
+      }
+      Repeater {
+        model: root.suggestion ? root.suggestion.grok : []
+        delegate: SuggestRow {
+          required property var modelData
+          item: modelData
+          service: root.suggestion.service
+          fromGrok: true
+        }
+      }
+      Flow {
+        width: parent.width
+        spacing: Style.space(6)
+        visible: !!root.suggestion && root.suggestion["try"].length > 0
+        Repeater {
+          model: root.suggestion ? root.suggestion["try"] : []
+          delegate: Chip {
+            required property var modelData
+            text: "󰍉  " + modelData
+            tone: root.amber
+            onClicked: root.trySearch(modelData)
+          }
+        }
       }
     }
     Flow {
