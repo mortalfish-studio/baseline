@@ -11,6 +11,7 @@ Rectangle {
   property string title: ""
   property string detail: ""
   property bool checked: false
+  property bool wrap: false        // let the detail run onto more lines
   property color amber: Commons.Color.accent
   property color teal: Commons.Color.foreground
   signal toggled()
@@ -47,6 +48,7 @@ Rectangle {
         Layout.fillWidth: true
         visible: tile.detail !== ""
         text: tile.detail
+        wrapMode: tile.wrap ? Text.Wrap : Text.NoWrap
         font.pixelSize: Style.font.caption
         opacity: 0.55
       }

@@ -4108,6 +4108,8 @@ def deck_sonos_sync_once():
     room = deck_where_room(deck)
     if not room or not deck["playing"] or not deck.get("now"):
         return
+    if (deck.get("voiceUntil") or 0) > time.time():
+        return                              # saying a dedication: the room isn't on its queue; deck_say syncs after
     ip, sn = room["ip"], sonos_apple_sn()
     if not sn:
         return
@@ -4129,7 +4131,16 @@ def deck_sonos_sync_once():
     for uid in add:
         if deck_sonos_add(ip, by_uid[uid], sn):
             pushed.append(uid)
-    deck_update(lambda d: d.update(pushed=pushed, pushedFrom=current))
+    def record(d):
+        # Only if nothing restarted the room's queue meanwhile (a skip, a new
+        # room): then this pass is stale, and the next one puts it right.
+        if (d.get("now") or {}).get("uid") == deck["now"]["uid"] and d.get("pushed") == deck["pushed"] \
+                and d.get("pushedFrom") == deck.get("pushedFrom"):
+            d.update(pushed=pushed, pushedFrom=current)
+            return True
+        return False
+    if not deck_update(record):
+        DECK.with_name("deck-sonos.again").touch()
 
 
 def deck_sonos_soon():
@@ -4375,6 +4386,16 @@ def deck_tick(last):
                 d["played"] = (d["played"] + [{**x, "playedAt": int(time.time())} for x in ordered[:at]])[-DECK_HISTORY:]
                 d["now"], d["set"] = ordered[at], ordered[at + 1:]
             deck_update(advance)
+        # The next song has a dedication: as this one ends, the room says it
+        # first and then goes straight into the song.
+        left = status.get("length", 0) - status.get("time", 0)
+        if status.get("playing") and status.get("length") and 0 < left <= 3.5 and 0 <= index < len(pushed) - 1:
+            coming = next((s for s in deck["set"][:1] if s["uid"] == pushed[index + 1]), None)
+            if coming and deck_voice_due({**deck, "now": coming}):
+                rid = coming["rid"]
+                deck_update(lambda d: d.update(spoken=((d.get("spoken") or []) + [rid])[-200:]))
+                subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "say", coming["uid"], "--before"], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         # Near the end of what the room was given: give it the next songs.
         if pushed and index >= len(pushed) - 3 and len(deck["set"]) > len(pushed) - 1 - max(index, 0):
             deck_sonos_soon()
@@ -5204,6 +5225,9 @@ def deck_guests_on():
     fresh = time.time() - (was.get("since") or 0) < DECK_GUESTS_HOURS * 3600
     token = old if fresh and re.fullmatch(r"[A-Za-z0-9_-]{8,40}", old) else secrets.token_urlsafe(9)
     url = f"http://{ip}:{DECK_GUESTS_PORT}/{token}"
+    for clip in VOICE_DIR.glob("*.*") if VOICE_DIR.is_dir() else []:
+        if time.time() - clip.stat().st_mtime > 2 * 86400:
+            clip.unlink(missing_ok=True)        # spoken dedications from earlier nights
     proc = subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "guests", "serve", token], stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     try:
@@ -5218,13 +5242,31 @@ def deck_guests_on():
     return url
 
 
+def deck_guests_alive(guests):
+    pid = (guests or {}).get("pid")
+    try:
+        return isinstance(pid, int) and pid > 1 and "deck guests serve" in \
+            Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="ignore")
+    except OSError:
+        return False
+
+
+def deck_guests_heal(deck):
+    """Requests are open but their server has gone (a crash, a restart): start
+    it again, at the same link. Not after the night's 8 hours."""
+    guests = deck.get("guests") or {}
+    if guests and not deck_guests_alive(guests) and time.time() - (guests.get("since") or 0) < DECK_GUESTS_HOURS * 3600:
+        subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "guests", "on"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        return True
+    return False
+
+
 def deck_guests_off():
     guests = deck_read().get("guests") or {}
-    pid = guests.get("pid")
-    if isinstance(pid, int) and pid > 1:
+    if deck_guests_alive(guests):
         try:
-            if "deck guests serve" in Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="ignore"):
-                os.kill(pid, 15)
+            os.kill(guests["pid"], 15)
         except OSError:
             pass
     if guests:
@@ -5691,13 +5733,17 @@ def clip_seconds(wav):
         return w.getnframes() / float(w.getframerate() or 1)
 
 
-def deck_say(uid):
-    """Say the dedication for the song now playing (uid), once it's under way."""
+def deck_say(uid, before=False):
+    """Say the dedication for the song now playing (uid), once it's under way;
+    before: for the song coming next in a Sonos room, as the one playing ends,
+    so the room goes from the clip straight into it."""
     deck = deck_read()
-    song = deck.get("now") or {}
+    song = (deck["set"][0] if before and deck["set"] else deck.get("now")) or {}
     if song.get("uid") != uid or not deck.get("voice", True):
         return False
     room = deck_where_room(deck)
+    if before and not room:
+        return False
     wav = deck_voice_clip(song, mp3=bool(room))
     if not wav:
         return False
@@ -5710,6 +5756,7 @@ def deck_say(uid):
         track = int((sonos_call(ip, "AVTransport", "GetPositionInfo", {"InstanceID": 0}) or {}).get("Track") or 0)
         if not track:
             return False
+        track += 1 if before else 0
         deck_update(lambda d: d.update(voiceUntil=time.time() + length + 8))
         try:
             sonos_call(ip, "AVTransport", "SetAVTransportURI", {"InstanceID": 0, "CurrentURI": f"{url}/voice/{wav.name}",
@@ -5724,16 +5771,21 @@ def deck_say(uid):
                 sonos_call(ip, "AVTransport", "SetCrossfadeMode", {"InstanceID": 0, "CrossfadeMode": 1})
             sonos_call(ip, "AVTransport", "Play", {"InstanceID": 0, "Speed": 1})
             deck_update(lambda d: d.update(voiceUntil=0))
+            deck_sonos_soon()
         return True
     time.sleep(2.5)             # let the song get going: the voice talks over its intro
     was = deck_app_volume(song)
+    def ramp(start, end, seconds, steps=6):
+        for i in range(1, steps + 1):
+            deck_app_volume(song, round(start + (end - start) * i / steps, 3))
+            time.sleep(seconds / steps)
     if was:
-        deck_app_volume(song, round(was * VOICE_DUCK, 3))
+        ramp(was, was * VOICE_DUCK, 0.6)
     try:
         subprocess.run(["pw-play", str(wav)], stdin=subprocess.DEVNULL, timeout=length + 15)
     finally:
         if was:
-            deck_app_volume(song, was)
+            ramp(was * VOICE_DUCK, was, 1.5)
     return True
 
 
@@ -5776,6 +5828,7 @@ def deck_command(settings, args):
         deck["rooms"] = [{"id": r["id"], "name": r["name"]} for r in sonos_rooms()]
         stack = read_list(DECK_UNDO)
         deck["undo"] = len(stack) if isinstance(stack, list) else 0
+        deck_guests_heal(deck)
         deck["people"] = deck_people(deck) if deck.get("guests") or deck.get("requests") else []
         deck["voiceReady"] = voice_ready()
         print(json.dumps(deck_with_details(deck)))
@@ -5870,7 +5923,8 @@ def deck_command(settings, args):
         DECK_GUESTS_PEOPLE.unlink(missing_ok=True)
         DECK_GUESTS_ASKS.unlink(missing_ok=True)
         shutil.rmtree(DECK_GUESTS_PHOTOS, ignore_errors=True)
-        print("forgot every guest and their photos")
+        shutil.rmtree(VOICE_DIR, ignore_errors=True)
+        print("forgot every guest, their photos and spoken dedications")
     elif action == "guests" and len(args) == 3 and args[1] == "serve" and re.fullmatch(r"[A-Za-z0-9_-]{8,40}", args[2]):
         deck_guests_serve(args[2])
     elif action == "request" and len(args) >= 2 and args[1] == "settle":
@@ -5910,8 +5964,8 @@ def deck_command(settings, args):
         deck = deck_read()
         song = next((s for s in [deck.get("now") or {}] + deck["set"] if s.get("rid") == args[2]), None)
         print(deck_voice_clip(song, mp3=bool(deck_where_room(deck))) if song else "")
-    elif action == "say" and len(args) == 2:
-        print("said" if deck_say(args[1]) else "nothing to say")
+    elif action == "say" and len(args) in (2, 3) and args[2:] in ([], ["--before"]):
+        print("said" if deck_say(args[1], before=args[2:] == ["--before"]) else "nothing to say")
     elif action == "lock" and len(args) == 2 and args[1] in {"on", "off"}:
         deck_update(lambda d: d.update(lock=args[1] == "on"))
     elif action == "autodj" and len(args) == 2 and args[1] in {"on", "off"}:

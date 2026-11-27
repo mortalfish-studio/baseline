@@ -15,6 +15,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -879,6 +880,28 @@ class DeckTests(TempCase):
         self.assertFalse(al.deck_voice_due({**deck, "voice": False}))              # turned off
         self.assertFalse(al.deck_voice_due({**deck, "now": {**song, "note": ""}}))  # nothing to say
         self.assertIsNone(al.deck_voice_clip({**song, "rid": "../x"}))             # only real request ids name files
+
+    def test_a_sonos_room_says_the_next_dedication_as_the_song_ends(self):
+        self.patch("voice_ready", lambda: True)
+        room = {"id": "RINCON_X", "ip": "10.0.0.9", "name": "Quiet Room"}
+        self.patch("deck_where_room", lambda deck: room)
+        self.patch("deck_sonos_soon", lambda: None)
+        spawned = []
+        self.patch("subprocess", type("S", (), {"Popen": staticmethod(lambda argv, **kw: spawned.append(argv[1:])),
+                                                 "DEVNULL": None}))
+        now = {"uid": "u1", "service": "applemusic", "id": "1", "title": "One", "artist": "A"}
+        asked = {"uid": "u2", "service": "applemusic", "id": "2", "title": "Two", "artist": "B", "rid": "0a1b2c3d",
+                 "by": "Sam", "note": "Hi"}
+        al.deck_update(lambda d: d.update(now=now, set=[asked], playing=True, pushed=["u1", "u2"], pushedFrom=1))
+        self.patch("deck_status", lambda deck: {"time": 100, "length": 250, "playing": True, "track": 1})
+        al.deck_tick({"time": 99})
+        self.assertEqual(spawned, [])                                   # not yet: plenty left
+        self.patch("deck_status", lambda deck: {"time": 248, "length": 250, "playing": True, "track": 1})
+        al.deck_tick({"time": 247})
+        self.assertEqual(spawned, [["deck", "say", "u2", "--before"]])
+        self.assertEqual(al.deck_read()["spoken"], ["0a1b2c3d"])        # and never again when it starts
+        al.deck_update(lambda d: d.update(voiceUntil=time.time() + 30))
+        self.assertEqual(al.deck_tick({"time": 1}), {"time": 1})        # mid-clip: the room isn't followed
 
     def test_beatport_is_quieted_with_its_own_pause_button(self):
         sent, keys = [], []

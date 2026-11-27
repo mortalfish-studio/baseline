@@ -644,6 +644,13 @@ Item {
   // requests from their phones, and a lock so guests can't undo the night.
   property bool stageOn: false
   property bool guestsOpen: false
+  property bool guestsAll: false
+  onGuestsOpenChanged: if (!guestsOpen) guestsAll = false
+  function view(name) {
+    stageOn = name === "stage"
+    guestsOpen = name === "requests"
+    qrBig = false
+  }
   property bool qrBig: false
   readonly property bool showQr: !!guests && (guests.qr || "") !== ""
   readonly property bool locked: !!deck.lock
@@ -2662,7 +2669,7 @@ Item {
             id: spotlight
             z: 2
             readonly property bool on: !!root.now && (root.now.by || "") !== ""
-            readonly property real size: Math.round(stageView.big * 0.46)
+            readonly property real size: Math.round(stageView.big * 0.36)
             readonly property real beat: {
               const l = stageViz.levels || []
               if (!l.length || !root.deck.playing) return 0
@@ -2672,8 +2679,9 @@ Item {
               return Math.min(1, sum / n * 1.3)
             }
             width: size; height: size
-            x: stageCoverShadow.width - size * 0.6
-            y: stageCoverShadow.height - size * 0.6
+            // Overhangs the cover's bottom, but not into the words beside it.
+            x: stageCoverShadow.width - size * 0.88
+            y: stageCoverShadow.height - size * 0.62
             visible: on && opacity > 0
             opacity: 0
             property string uid: on ? root.now.uid : ""
@@ -2939,42 +2947,34 @@ Item {
             text: root.guests ? root.guests.url.replace(/\/[^\/]*$/, "/…") : ""
             font.pixelSize: Style.font.caption; opacity: 0.5
           }
-          // The buttons wrap onto a second line rather than push the card wider.
-          Flow {
-            Layout.fillWidth: true
-            spacing: 8
-            ActionButton {
-              icon: root.guests ? "󰅖" : "󰐲"
-              text: root.guests ? strings.t("deck.guestsStop") : strings.t("deck.guestsStart")
-              tone: root.guests ? root.teal : root.amber
-              onClicked: root.run(["deck", "guests", root.guests ? "off" : "on"])
-            }
-            ActionButton {
-              icon: root.deck.requestsAuto ? "󰄬" : "󰄱"
-              text: strings.t("deck.requestsAuto")
-              tone: root.deck.requestsAuto ? root.amber : root.teal
-              onClicked: root.run(["deck", "requests", "auto", root.deck.requestsAuto ? "off" : "on"])
-            }
-            ActionButton {
-              visible: !!root.deck.voiceReady
-              icon: root.deck.voice !== false ? "󰄬" : "󰄱"
-              text: strings.t("deck.voice")
-              tone: root.deck.voice !== false ? root.amber : root.teal
-              onClicked: root.run(["deck", "voice", root.deck.voice !== false ? "off" : "on"])
-            }
+          ActionButton {
+            Layout.alignment: Qt.AlignHCenter
+            icon: root.guests ? "󰅖" : "󰐲"
+            text: root.guests ? strings.t("deck.guestsStop") : strings.t("deck.guestsStart")
+            tone: root.guests ? root.teal : root.amber
+            onClicked: root.run(["deck", "guests", root.guests ? "off" : "on"])
           }
-          Label {
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            text: root.deck.requestsAuto ? strings.t("deck.requestsAutoOn") : strings.t("deck.requestsAutoOff")
-            font.pixelSize: Style.font.caption; opacity: 0.55
+          // How requests go in: switches, each saying what it does.
+          OptionTile {
+            Layout.fillWidth: true; Layout.topMargin: 4
+            wrap: true
+            amber: root.amber; teal: root.teal
+            icon: "󰒺"
+            title: strings.t("deck.requestsAuto")
+            detail: root.deck.requestsAuto ? strings.t("deck.requestsAutoOn") : strings.t("deck.requestsAutoOff")
+            checked: !!root.deck.requestsAuto
+            onToggled: root.run(["deck", "requests", "auto", root.deck.requestsAuto ? "off" : "on"])
           }
-          Label {
+          OptionTile {
             visible: !!root.deck.voiceReady
             Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            text: root.deck.voice !== false ? strings.t("deck.voiceOn") : strings.t("deck.voiceOff")
-            font.pixelSize: Style.font.caption; opacity: 0.55
+            wrap: true
+            amber: root.amber; teal: root.teal
+            icon: "󰔊"
+            title: strings.t("deck.voice")
+            detail: root.deck.voice !== false ? strings.t("deck.voiceOn") : strings.t("deck.voiceOff")
+            checked: root.deck.voice !== false
+            onToggled: root.run(["deck", "voice", root.deck.voice !== false ? "off" : "on"])
           }
           // Last call: requests close in a while (the phones say when), or now.
           RowLayout {
@@ -3005,19 +3005,21 @@ Item {
             Layout.fillWidth: true
             spacing: 10
             Repeater {
-              model: root.people.slice(0, 12)
+              // Two rows; the rest behind a +N (tap it to see everyone).
+              model: root.people.length > 8 && !root.guestsAll ? root.people.slice(0, 7) : root.people.slice(0, 24)
               delegate: Column {
                 id: guest
                 required property var modelData
                 required property int index
+                readonly property bool leader: (modelData.played || 0) > 0 && modelData.played === (root.people[0].played || 0)
                 width: 68
                 spacing: 3
                 Rectangle {
                   anchors.horizontalCenter: parent.horizontalCenter
                   width: 48; height: 48; radius: 24
                   color: root.ground
-                  border.width: guest.index === 0 && guest.modelData.played > 0 ? 3 : 2
-                  border.color: guest.index === 0 && guest.modelData.played > 0 ? root.amber : root.teal
+                  border.width: guest.leader ? 3 : 2
+                  border.color: guest.leader ? root.amber : root.teal
                   Image {
                     id: guestFace
                     anchors.fill: parent; anchors.margins: 3
@@ -3036,6 +3038,19 @@ Item {
                   text: strings.t("deck.personCounts").arg(guest.modelData.asked).arg(guest.modelData.played)
                   font.pixelSize: Style.font.caption - 1; opacity: 0.55
                 }
+              }
+            }
+            Item {
+              visible: root.people.length > 8 && !root.guestsAll
+              width: 68; height: 48
+              Rectangle {
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: 48; height: 48; radius: 24
+                color: moreHover.hovered ? Util.alpha(root.teal, 0.14) : "transparent"
+                border.width: 1; border.color: Util.alpha(root.teal, 0.6)
+                Label { anchors.centerIn: parent; text: "+" + (root.people.length - 7); font.bold: true; color: root.teal }
+                HoverHandler { id: moreHover; cursorShape: Qt.PointingHandCursor }
+                TapHandler { onTapped: root.guestsAll = true }
               }
             }
           }
