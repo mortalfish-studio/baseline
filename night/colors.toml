@@ -1,0 +1,37 @@
+mode = "dark"
+
+# Afterlight 2049 Night: the same city after the lights go down. True black
+# ground, the amber and teal pulled back to embers so nothing glares at night.
+accent = "#b87a45"
+selection = "#2a1f16"
+muted = "#4f565e"
+
+background = "#000000"
+dark_background = "#000000"
+darker_background = "#000000"
+lighter_background = "#0e1012"
+
+foreground = "#b8ada1"
+dark_foreground = "#6f757b"
+light_foreground = "#c9bdb0"
+bright_foreground = "#d8ccbf"
+
+red = "#b0574f"
+yellow = "#b09050"
+orange = "#ad6a40"
+green = "#74876f"
+cyan = "#5a8c8f"
+blue = "#67809f"
+magenta = "#9e6b97"
+brown = "#7a5c49"
+
+bright_red = "#c4736a"
+bright_yellow = "#c4a66b"
+bright_green = "#8ca186"
+bright_cyan = "#75a5a8"
+bright_blue = "#859cba"
+bright_magenta = "#b585ae"
+
+# Window borders: the amber-to-teal gradient, dimmed to embers.
+hyprland_active_border = "rgba(b87a45cc) rgba(5a8c8fcc) 45deg"
+hyprland_inactive_border = "rgba(16191daa)"

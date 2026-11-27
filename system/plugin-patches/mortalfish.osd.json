@@ -1,0 +1,12 @@
+{
+  "source": "omarchy.osd",
+  "files": [
+    "Osd.qml",
+    "OsdModel.js"
+  ],
+  "base": {
+    "Osd.qml": "7ae5b2a17a3da502fb51d09a6113e77efbf3216d61d722969d9dd81367afb676",
+    "OsdModel.js": "07ef57284ec7af574a5320450a52b231845adfbe2b3ce18d5c0dbabca8f3ed9d"
+  },
+  "saved": "2026-11-27"
+}

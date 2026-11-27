@@ -1,0 +1,31 @@
+-- Home workspaces. Each core app always opens on its own workspace, whether it
+-- starts at login, from a key, or after being closed:
+--   1 term · 2 web · 3 code · 4 chat · 5 video · 6 music
+-- Workspaces 3 and 4 belong to your coding and chat apps, chosen in Baseline >
+-- Setup > Apps (`afterlight apps`), which writes hypr/baseline_apps.lua.
+-- The bar names these slots (mortalfish.workspaces); Super+1..6 go to them.
+
+local homes = {
+  { "1", { class = "^foot$" } },                                   -- term: the terminal
+  { "2", { class = "^(google-chrome|chrome-outlook[.]office[.]com__mail_-Default)$" } }, -- web: browser and email
+  { "5", { class = "^chrome-youtube[.]com__-Default$" } },          -- video: YouTube
+  { "6", { class = "^(chrome-jopilafkghibglefecikcmpaoolnpcjg-Default|chrome-cinhimbnkkaeohfgghhklpknlkffjgod-Default|chrome-music[.]youtube[.]com__-Default)$" } }, -- music: Beatport, YouTube Music
+}
+
+for _, home in ipairs(homes) do
+  o.window(home[2], { workspace = home[1] })
+end
+
+-- Start the six at login, each landing on its home via the rules above.
+o.launch_on_start("omarchy-launch-terminal")
+o.launch_on_start("omarchy-launch-browser")
+o.launch_on_start("omarchy-launch-webapp https://youtube.com/")
+o.launch_on_start("google-chrome-stable --profile-directory=Default --app-id=jopilafkghibglefecikcmpaoolnpcjg")
+
+pcall(require, "hypr.baseline_apps")
+
+-- The Razer mouse's side buttons and wheel tilt, written by `afterlight mouse` (Baseline > System > Mouse).
+pcall(require, "hypr.mouse")
+
+-- Baseline Studio (the picture library and look maker): a centred float.
+o.window({ title = "^Baseline Studio$" }, { float = true, center = true, size = { 1240, 840 } })

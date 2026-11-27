@@ -1,0 +1,33 @@
+mode = "dark"
+
+# Ultraviolet Night: written by `afterlight look build ultraviolet`
+# from the Day palette; edit that and build again.
+
+accent = "#836cc2"
+selection = "#201938"
+muted = "#56536c"
+background = "#000000"
+dark_background = "#000000"
+darker_background = "#000000"
+lighter_background = "#0d0b15"
+foreground = "#b3afc3"
+dark_foreground = "#7b778f"
+light_foreground = "#bbb7c9"
+bright_foreground = "#c3c0c9"
+red = "#b65570"
+yellow = "#af9659"
+orange = "#b67556"
+green = "#659d81"
+cyan = "#4c9ac2"
+blue = "#667dc2"
+magenta = "#a265b8"
+brown = "#6a5675"
+bright_red = "#c27087"
+bright_yellow = "#baa571"
+bright_green = "#7fac94"
+bright_cyan = "#6ca7c2"
+bright_blue = "#8191c2"
+bright_magenta = "#ae80bc"
+
+hyprland_active_border = "rgba(836cc2cc) rgba(4c9ac2cc) 45deg"
+hyprland_inactive_border = "rgba(0f0d19aa)"

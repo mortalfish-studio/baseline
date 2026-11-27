@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "mortalfish.baseline",
+  "name": "Baseline",
+  "version": "2.0.0",
+  "author": "mortalfish",
+  "description": "Afterlight 2049 control: live baseline readout, mini player, wallpapers, and Day/Night/Saver theme tweaks",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "ui/BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Baseline",
+    "description": "System baseline, player, wallpapers and theme settings for Afterlight 2049",
+    "category": "Tools",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

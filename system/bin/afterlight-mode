@@ -1,0 +1,4 @@
+#!/bin/bash
+# Kept for the menu entry, timer and boot hook: `afterlight mode` does the work.
+#   afterlight-mode [toggle|day|night|saver|status|auto]
+exec "$HOME/.local/bin/afterlight" mode "${1:-toggle}"

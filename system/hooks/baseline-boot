@@ -1,0 +1,39 @@
+#!/bin/bash
+# Baseline boot: while one of its looks is active, start each session on a
+# day or night wallpaper, and greet with a status line once a day.
+
+[[ $(omarchy-theme-current 2>/dev/null) == "Afterlight "* ]] || exit 0
+
+# Start in the mode that fits the clock (night 20:00-07:00), then on a
+# wallpaper that fits the time of day.
+"$HOME/.local/bin/afterlight-mode" auto >/dev/null 2>&1
+"$HOME/.local/bin/afterlight-wallpaper" >/dev/null 2>&1
+
+greetings=(
+  "Baseline restored. Systems nominal."
+  "Cells interlinked. Within cells interlinked."
+  "Constant. All systems within baseline."
+  "Welcome back. The city is quiet tonight."
+)
+# Greet only on the first boot of the day.
+stamp="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/afterlight-greeted"
+today=$(date +%F)
+if [[ $(cat "$stamp" 2>/dev/null) != "$today" ]]; then
+  mkdir -p "$(dirname "$stamp")" && echo "$today" >"$stamp"
+  # Baseline readout under the greeting: memory, hottest CPU zone, free
+  # storage and battery, read the same way as the bar's baseline widget.
+  mem=$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{if (t) printf "%d", 100*(t-a)/t}' /proc/meminfo)
+  temp=$(for z in /sys/class/thermal/thermal_zone*; do
+    case $(cat "$z/type" 2>/dev/null) in cpu* | x86_pkg_temp* | soc_thermal*) cat "$z/temp" 2>/dev/null ;; esac
+  done | sort -n | tail -1)
+  disk=$(df -Pk "$HOME" | awk 'NR==2 {printf "%d", 100*$4/$2}')
+  status="MEM ${mem}% · DISK ${disk}% free"
+  [[ -n $temp ]] && status="$status · TEMP $((temp / 1000))°C"
+  for b in /sys/class/power_supply/*; do
+    [[ $(cat "$b/type" 2>/dev/null) == Battery ]] || continue
+    status="$status · BAT $(cat "$b/capacity")%"
+    break
+  done
+  omarchy-notification-send --app-name Baseline -u low "BASELINE" "${greetings[RANDOM % ${#greetings[@]}]}
+$status"
+fi

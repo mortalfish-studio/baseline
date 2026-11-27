@@ -1,0 +1,33 @@
+mode = "dark"
+
+# Cobalt Rain Saver: written by `afterlight look build tidal`
+# from the Day palette; edit that and build again.
+
+accent = "#3f6da8"
+selection = "#0e1b30"
+muted = "#455366"
+background = "#000000"
+dark_background = "#000000"
+darker_background = "#000000"
+lighter_background = "#0a101b"
+foreground = "#9aa2ab"
+dark_foreground = "#677382"
+light_foreground = "#a2a8af"
+bright_foreground = "#abaeb2"
+red = "#ad5b60"
+yellow = "#a38d59"
+orange = "#ab7551"
+green = "#5c9176"
+cyan = "#3e8e97"
+blue = "#5a78b8"
+magenta = "#776cae"
+brown = "#535d6c"
+bright_red = "#b87377"
+bright_yellow = "#ae9b6f"
+bright_green = "#749e88"
+bright_cyan = "#5f9ca3"
+bright_blue = "#768bb8"
+bright_magenta = "#8c84b2"
+
+hyprland_active_border = "rgba(3f6da8aa) rgba(3e8e97aa) 45deg"
+hyprland_inactive_border = "rgba(0c1220aa)"

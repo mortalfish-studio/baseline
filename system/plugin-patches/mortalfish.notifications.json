@@ -1,0 +1,28 @@
+{
+  "source": "omarchy.notifications",
+  "files": [
+    "DeedButton.qml",
+    "Delivery.js",
+    "Detect.js",
+    "Icons.js",
+    "Layout.js",
+    "Markup.js",
+    "Security.js",
+    "Service.qml",
+    "Store.js",
+    "Toast.qml"
+  ],
+  "base": {
+    "DeedButton.qml": "fea9d71bcb6cc6bb474a570a83cbf9f1017f552072b4f9cc074091640816b10a",
+    "Delivery.js": "f4f266e7bcf603ab9f34b276cfc1bf3a6eace6c0489189f09f21cc6d3cf43e5c",
+    "Detect.js": "5a1a8deff025aac1de2a7efca6c2ed1ff774f2c9f13abc6b194fea759fe3868c",
+    "Icons.js": "4ab1f9a82b831c6d101cb0361d9447e8e85a1f8a3ecbdcd7a4d4c227d82fcc38",
+    "Layout.js": "1e2d8090f8c02025f1a0ef087cb063b32bff9668aa03d6434f984b818bffa939",
+    "Markup.js": "97e37eb6e188a59df744aa135814c8cbb0257b01fa8c0ecb929f7c557aa77951",
+    "Security.js": "a36017c79810820a985dad06e38a2c9e547e8e650dec413b2f2cbecd063e5c95",
+    "Service.qml": "eb662534b41c18e92dec3b6f443450ff47d340af4ab13df0df405f6429a18698",
+    "Store.js": "228588461120e207f990506be11237b6b5db624bef963fa2bfaf30131aa90c1e",
+    "Toast.qml": "2708615eaec695825fd56b8b659c379e32c75ccca5b8325a32a7f2c7d476f7fe"
+  },
+  "saved": "2026-11-27"
+}

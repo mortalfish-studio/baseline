@@ -1,0 +1,10 @@
+{
+  "source": "omarchy.workspaces",
+  "files": [
+    "Workspaces.qml"
+  ],
+  "base": {
+    "Workspaces.qml": "308d2f2c7a236f752145a92e300039ccbee33a30c54df08ba0ef765102ace435"
+  },
+  "saved": "2026-11-27"
+}

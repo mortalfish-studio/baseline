@@ -1,0 +1,23 @@
+--- a/Delivery.js
++++ b/Delivery.js
+@@ -42,7 +42,20 @@
+ 
+ // "silenced", or "" when the row shows. A verification code always passes: it
+ // was asked for a moment ago and expires in minutes.
++// This machine shows only these senders (26 Nov 2026); everything else goes
++// quietly to the history (Super+Shift+Alt+comma) without a card.
++var SHOWN_APPS = ["Grok Bot", "T3 Code", "Baseline"]
++// Also shown whoever sends them: the low-battery warning, and anything critical.
++var SHOWN_SUMMARIES = ["Time to recharge!"]
++
++function shownAnyway(row) {
++  if (Number(row && row.urgency) === CRITICAL) return true
++  return SHOWN_SUMMARIES.indexOf(String((row && row.summary) || "")) >= 0
++}
++
+ function quietReason(row, doNotDisturb) {
++  var app = String((row && row.app) || "")
++  if (SHOWN_APPS.indexOf(app) < 0 && !shownAnyway(row)) return "silenced"
+   if (!doNotDisturb) return ""
+   if (bypassesQuiet(row)) return ""
+   if (String((row && row.code) || "")) return ""

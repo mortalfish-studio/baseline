@@ -1,0 +1,3 @@
+#!/bin/bash
+# Kept for the boot hook: a random wallpaper from the current mode's selection.
+exec "$HOME/.local/bin/afterlight" wallpaper shuffle

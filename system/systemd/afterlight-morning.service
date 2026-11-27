@@ -1,0 +1,6 @@
+[Unit]
+Description=Baseline morning check (update, GitHub, agent limits)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/afterlight morning

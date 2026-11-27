@@ -1,0 +1,51 @@
+{
+  "bar": {
+    "layout": {
+      "center": [],
+      "centerBegin": [
+        {
+          "id": "omarchy.indicators",
+          "items": [
+            "ScreenRecording",
+            "PasswordlessSudo",
+            "RemoteSession"
+          ]
+        }
+      ],
+      "centerEnd": [],
+      "left": [
+        {
+          "id": "omarchy.menu"
+        },
+        {
+          "id": "mortalfish.workspaces"
+        }
+      ],
+      "right": [
+        {
+          "id": "mortalfish.baseline"
+        },
+        {
+          "id": "omarchy.mv7plus"
+        }
+      ],
+      "tray": []
+    },
+    "position": "bottom"
+  },
+  "plugins": [
+    {
+      "id": "mortalfish.voice-navigation"
+    },
+    {
+      "id": "mortalfish.notifications"
+    },
+    {
+      "id": "mortalfish.osd"
+    }
+  ],
+  "disabledPlugins": [
+    "omarchy.notifications",
+    "omarchy.osd"
+  ]
+}

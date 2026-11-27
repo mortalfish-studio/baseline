@@ -1,0 +1,51 @@
+--- a/Workspaces.qml
++++ b/Workspaces.qml
+@@ -4,6 +4,7 @@
+ import Quickshell.Hyprland
+ import Quickshell.Io
+ import qs.Commons
++import qs.Commons as Commons
+ import qs.Ui
+ 
+ BarWidget {
+@@ -135,6 +136,20 @@
+   property string activeMode: "dwindle"
+   property bool modeStale: false
+ 
++  // Names for the first six slots; the rest keep their numbers.
++  readonly property var slotNames: ["term", "web", "code", "chat", "video", "music"]
++
++  function slotLabel(slot) {
++    if (slot === root.slots) return "0"
++    const name = slot >= 1 && slot <= slotNames.length ? slotNames[slot - 1] : String(slot)
++    // A side bar is too narrow for words: the first letter stands in.
++    return root.vertical && name.length > 1 && isNaN(Number(name)) ? name.charAt(0).toUpperCase() : name
++  }
++
++  function modeName(mode) {
++    return mode === "scrolling" || mode === "floating" ? mode : "tiling"
++  }
++
+   function modeGlyph(mode) {
+     if (mode === "scrolling") return "󰝥"
+     if (mode === "floating") return "󰔶"
+@@ -270,11 +285,17 @@
+         Layout.topMargin: firstGuest && root.vertical ? Style.space(6) : 0
+ 
+         bar: root.bar
+-        text: shown ? root.modeGlyph(root.activeMode) : (slot === root.slots ? "0" : String(slot))
++        // The shown workspace keeps its layout glyph beside its name, in the
++        // accent colour; a click on it still cycles the layout.
++        text: shown && !root.vertical ? root.modeGlyph(root.activeMode) + " " + root.slotLabel(slot)
++          : shown ? root.modeGlyph(root.activeMode) : root.slotLabel(slot)
++        active: shown
++        activeColor: Commons.Color.accent
++        tooltipText: shown ? "Layout: " + root.modeName(root.activeMode) + " · click to switch" : ""
+         opacity: occupied || shown ? 1 : 0.5
+         horizontalMargin: 6
+         verticalPadding: 6
+-        fixedWidth: root.vertical ? root.barSize : Style.space(20)
++        fixedWidth: root.vertical ? root.barSize : -1
+         fixedHeight: root.barSize
+         onPressed: function() {
+           if (shown) root.cycleLayout()

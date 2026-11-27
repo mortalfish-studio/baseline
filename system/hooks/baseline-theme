@@ -1,0 +1,4 @@
+#!/bin/bash
+# theme-set hook: carry a Baseline look's colours into T3 Code (a neon layer)
+# and the starship prompt. Linked in by `afterlight repair`.
+"$HOME/.local/bin/afterlight" t3-neon "${1:-}" >/dev/null 2>&1 || true

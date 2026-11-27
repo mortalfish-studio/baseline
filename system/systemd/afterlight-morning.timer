@@ -1,0 +1,9 @@
+[Unit]
+Description=Baseline morning check at 08:30 (or at first login after)
+
+[Timer]
+OnCalendar=*-*-* 08:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

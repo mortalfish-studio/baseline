@@ -1,0 +1,33 @@
+mode = "dark"
+
+# Neon Rose Saver: written by `afterlight look build rose`
+# from the Day palette; edit that and build again.
+
+accent = "#a84673"
+selection = "#251020"
+muted = "#5e4b59"
+background = "#000000"
+dark_background = "#000000"
+darker_background = "#000000"
+lighter_background = "#110b13"
+foreground = "#a99ca3"
+dark_foreground = "#796b75"
+light_foreground = "#aea4a9"
+bright_foreground = "#b2acaf"
+red = "#b85757"
+yellow = "#ab9058"
+orange = "#b07155"
+green = "#619178"
+cyan = "#5288b8"
+blue = "#6373b8"
+magenta = "#a260a8"
+brown = "#6a535c"
+bright_red = "#b87070"
+bright_yellow = "#b29c6f"
+bright_green = "#799e8a"
+bright_cyan = "#7097b8"
+bright_blue = "#7c87b8"
+bright_magenta = "#aa79ae"
+
+hyprland_active_border = "rgba(a84673aa) rgba(5288b8aa) 45deg"
+hyprland_inactive_border = "rgba(140d16aa)"

@@ -1,0 +1,5 @@
+#!/bin/bash
+# post-update hook: after `omarchy update`, check every part of Baseline and put
+# back what the update knocked out (plugin copies, bar, links, hooks, services).
+# Notifies only if something was put back or still needs you.
+"$HOME/.local/bin/afterlight" repair --quiet >/dev/null 2>&1 || true

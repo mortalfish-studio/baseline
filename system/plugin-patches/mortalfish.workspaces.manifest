@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "mortalfish.workspaces",
+  "name": "My Workspaces",
+  "version": "1.0.0",
+  "author": "mortalfish",
+  "description": "Named workspace indicators (term, web, code, chat, video, music)",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Workspaces.qml"
+  },
+  "barWidget": {
+    "displayName": "My Workspaces",
+    "description": "Named workspace indicators (term, web, code, chat, video, music)",
+    "category": "Compositor",
+    "allowMultiple": false
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.workspaces"
+  }
+}

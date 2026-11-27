@@ -1,0 +1,3 @@
+# Let the logged-in user's afterlight set the Surface battery charge limit
+# (Baseline > System > Charge limit) without sudo.
+SUBSYSTEM=="power_supply", KERNEL=="qcom-battmgr-bat", RUN+="/bin/chmod 0666 /sys%p/charge_control_end_threshold /sys%p/charge_control_start_threshold"

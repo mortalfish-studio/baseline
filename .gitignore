@@ -1,0 +1,12 @@
+# Local backups from edits
+.backups/
+*.bak.*
+__pycache__/
+
+# Pictures are never published: the built-in looks fetch theirs from the
+# links in pictures.json (`afterlight pictures`), and Afterlight's own stills
+# stay on the machine they were added on.
+/backgrounds/
+looks/*/backgrounds/
+# Written per machine by `afterlight repair` (it holds your checkout's path).
+chrome/native/*.json

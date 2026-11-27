@@ -1,0 +1,47 @@
+context.properties = { core.daemon = false }
+context.spa-libs = {
+    audio.convert.* = audioconvert/libspa-audioconvert
+    support.* = support/libspa-support
+}
+context.modules = [
+    { name = libpipewire-module-rt flags = [ ifexists nofail ] }
+    { name = libpipewire-module-protocol-native }
+    { name = libpipewire-module-client-node }
+    { name = libpipewire-module-adapter }
+    { name = libpipewire-module-filter-chain
+      args = {
+        node.description = "Surface speaker EQ"
+        filter.graph = {
+          nodes = [
+            { type = builtin name = low_cut label = bq_highpass
+              control = { Freq = 115.0 Q = 0.707 } }
+            { type = builtin name = low_mid label = bq_peaking
+              control = { Freq = 480.0 Q = 0.9 Gain = -3.5 } }
+            { type = builtin name = upper_mid label = bq_peaking
+              control = { Freq = 3100.0 Q = 1.1 Gain = -3.0 } }
+          ]
+          links = [
+            { output = "low_cut:Out" input = "low_mid:In" }
+            { output = "low_mid:Out" input = "upper_mid:In" }
+          ]
+        }
+        audio.channels = 2
+        audio.position = [ FL FR ]
+        capture.props = {
+          node.name = "mortalfish.surface-speaker-eq"
+          media.class = Audio/Sink
+          filter.smart = true
+          filter.smart.targetable = true
+          filter.smart.target = @TARGET@
+        }
+        playback.props = {
+          node.name = "mortalfish.surface-speaker-eq.playback"
+          media.class = Stream/Output/Audio
+          node.passive = true
+          node.dont-fallback = true
+          node.dont-move = true
+          target.object = @SPEAKER@
+        }
+      }
+    }
+]

@@ -1,0 +1,6 @@
+[Unit]
+Description=Baseline: switch the look between Day and Night by the clock
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/afterlight-mode auto

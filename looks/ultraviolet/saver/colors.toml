@@ -1,0 +1,33 @@
+mode = "dark"
+
+# Ultraviolet Saver: written by `afterlight look build ultraviolet`
+# from the Day palette; edit that and build again.
+
+accent = "#7360a8"
+selection = "#1b142f"
+muted = "#4e4b60"
+background = "#000000"
+dark_background = "#000000"
+darker_background = "#000000"
+lighter_background = "#0d0b15"
+foreground = "#a09cad"
+dark_foreground = "#6e6b7f"
+light_foreground = "#a7a3b2"
+bright_foreground = "#adabb2"
+red = "#ad526c"
+yellow = "#a68f56"
+orange = "#ac7053"
+green = "#61957a"
+cyan = "#4a93b8"
+blue = "#6277b8"
+magenta = "#9a62ae"
+brown = "#65526f"
+bright_red = "#b86c81"
+bright_yellow = "#b09c6c"
+bright_green = "#79a38d"
+bright_cyan = "#699eb8"
+bright_blue = "#7b8ab8"
+bright_magenta = "#a57ab3"
+
+hyprland_active_border = "rgba(7360a8aa) rgba(4a93b8aa) 45deg"
+hyprland_inactive_border = "rgba(0f0d19aa)"

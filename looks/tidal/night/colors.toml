@@ -1,0 +1,33 @@
+mode = "dark"
+
+# Cobalt Rain Night: written by `afterlight look build tidal`
+# from the Day palette; edit that and build again.
+
+accent = "#457cc2"
+selection = "#11213a"
+muted = "#4c5c73"
+background = "#000000"
+dark_background = "#000000"
+darker_background = "#000000"
+lighter_background = "#0a101b"
+foreground = "#adb6c2"
+dark_foreground = "#738193"
+light_foreground = "#b6bdc6"
+bright_foreground = "#c0c4c9"
+red = "#b65e64"
+yellow = "#ad945c"
+orange = "#b57a53"
+green = "#60997c"
+cyan = "#3f96a0"
+blue = "#5d7dc2"
+magenta = "#7c71b8"
+brown = "#576272"
+bright_red = "#c2787c"
+bright_yellow = "#b8a374"
+bright_green = "#79a78f"
+bright_cyan = "#63a5ac"
+bright_blue = "#7a92c2"
+bright_magenta = "#928abc"
+
+hyprland_active_border = "rgba(457cc2cc) rgba(3f96a0cc) 45deg"
+hyprland_inactive_border = "rgba(0c1220aa)"

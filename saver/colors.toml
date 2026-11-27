@@ -1,0 +1,37 @@
+mode = "dark"
+
+# Afterlight 2049 Saver: the city on emergency power. True black, the
+# night palette dimmed again, so the panel draws as little light as it can.
+accent = "#a06c3f"
+selection = "#2a1f16"
+muted = "#4f565e"
+
+background = "#000000"
+dark_background = "#000000"
+darker_background = "#000000"
+lighter_background = "#0e1012"
+
+foreground = "#a2988d"
+dark_foreground = "#6f757b"
+light_foreground = "#b0a599"
+bright_foreground = "#bfb3a6"
+
+red = "#b0574f"
+yellow = "#b09050"
+orange = "#ad6a40"
+green = "#74876f"
+cyan = "#5a8c8f"
+blue = "#67809f"
+magenta = "#9e6b97"
+brown = "#7a5c49"
+
+bright_red = "#c4736a"
+bright_yellow = "#c4a66b"
+bright_green = "#8ca186"
+bright_cyan = "#75a5a8"
+bright_blue = "#859cba"
+bright_magenta = "#b585ae"
+
+# Window borders: the last embers of the gradient.
+hyprland_active_border = "rgba(9a6a40aa) rgba(4c7577aa) 45deg"
+hyprland_inactive_border = "rgba(101214aa)"

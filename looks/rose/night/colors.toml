@@ -1,0 +1,33 @@
+mode = "dark"
+
+# Neon Rose Night: written by `afterlight look build rose`
+# from the Day palette; edit that and build again.
+
+accent = "#c24e83"
+selection = "#2c1426"
+muted = "#6a5365"
+background = "#000000"
+dark_background = "#000000"
+darker_background = "#000000"
+lighter_background = "#110b13"
+foreground = "#bfafb8"
+dark_foreground = "#897883"
+light_foreground = "#c4b8be"
+bright_foreground = "#c9c1c5"
+red = "#c25a5a"
+yellow = "#b5985b"
+orange = "#ba7658"
+green = "#659a7e"
+cyan = "#548fc2"
+blue = "#6678c2"
+magenta = "#ab64b2"
+brown = "#705761"
+bright_red = "#c27474"
+bright_yellow = "#bca574"
+bright_green = "#7fa791"
+bright_cyan = "#749ec2"
+bright_blue = "#818dc2"
+bright_magenta = "#b47fb8"
+
+hyprland_active_border = "rgba(c24e83cc) rgba(548fc2cc) 45deg"
+hyprland_inactive_border = "rgba(140d16aa)"
