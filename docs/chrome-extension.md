@@ -64,6 +64,7 @@ Baseline panel / mouse ──► afterlight beatport … ──► socket ($XDG_
 
 Sites change their pages, and you may want other music sites.
 
+- **A Beatport track page** has two Plays: the track's own at the top and one for its Recommendations, which plays something else. The Deck waits for the track's own part to be drawn before pressing, then checks the player bar's track link is that track, and presses the track's own Play again if not.
 - **Beatport's player bar** is found as the controls pinned along the bottom of the window. When the Beatport window shares its workspace and is short, the page keeps a minimum height and the bar sits just below what shows; it still counts, so Baseline can still tell Beatport is playing (before, it pressed Play again, pausing the song, and said Beatport needed a click).
 - **A button stopped working** (Beatport or YouTube changed their page): the selectors are in `bridge.js` and `autoplay.js`. Open the page and inspect the element in Chrome's DevTools (F12), update the match, then reload the add-on.
   - To test a single page action without the panel, run `afterlight beatport page '<json op>'`, e.g. `'{"type":"probe"}'`.

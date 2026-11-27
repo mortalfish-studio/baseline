@@ -694,6 +694,27 @@ Item {
   readonly property string alertText: deck.silent && !deck.playing ? strings.t("deck.silent").arg(deck.silent.why)
     : batteryLow ? strings.t("deck.batteryLow").arg(battery.level) : ""
   readonly property string alertGlyph: deck.silent && !deck.playing ? "󰝛" : "󰂃"
+  // Does a song mix with the one before it? Keys: the same, one step round
+  // the Camelot wheel, or its relative. Tempo: within 8%, counting half and
+  // double time. (The same rules Auto-DJ and Shape use.)
+  function keysFit(a, b) {
+    if (!a || !b || a === b) return true
+    const na = parseInt(a), nb = parseInt(b)
+    const d = ((na - nb) % 12 + 12) % 12
+    return (a.slice(-1) === b.slice(-1) && (d === 1 || d === 11)) || na === nb
+  }
+  function tempoStep(from, to) {
+    // The change in BPM from one song to the next, by the nearest of half,
+    // same and double time; null when either isn't known.
+    if (!from || !to) return null
+    let best = to - from
+    for (const f of [2, 0.5]) if (Math.abs(to - from * f) < Math.abs(best)) best = to - from * f
+    return Math.round(best)
+  }
+  function keyTempo(song) {
+    if (!song) return ""
+    return [song.key || "", song.bpm > 0 ? Math.round(song.bpm) + " BPM" : ""].filter(x => x !== "").join(" · ")
+  }
   // The set ran out: the song that played last (for the stage's goodbye).
   readonly property var lastPlayed: (deck.played || []).length ? deck.played[deck.played.length - 1] : null
   readonly property bool setDone: !now && (deck.set || []).length === 0 && !!lastPlayed
@@ -1571,7 +1592,8 @@ Item {
                       Layout.fillWidth: true
                       text: root.now ? (root.whereId === "laptop" ? "󰌢  " + strings.t(root.deck.playing ? "hover.playingOn" : "deck.pausedOn").arg(root.whereName)
                                                                 : "󰓃  " + strings.t(root.deck.playing ? "hover.playingIn" : "deck.pausedIn").arg(root.whereName))
-                                        + " · " + root.serviceName(root.now.service) : ""
+                                        + " · " + root.serviceName(root.now.service)
+                                        + (root.keyTempo(root.now) !== "" ? "  ·  " + root.keyTempo(root.now) : "") : ""
                       font.family: "Iosevka Nerd Font Propo"
                       font.pixelSize: Style.font.caption
                       color: root.teal
@@ -2240,10 +2262,30 @@ Item {
                       Cover { url: root.now ? root.now.thumb || "" : ""; size: 32 }
                       Label {
                         Layout.fillWidth: true
+                        Layout.maximumWidth: implicitWidth
                         text: root.now ? root.now.title + "  ·  " + root.now.artist : ""
                         font.bold: true
                         font.pixelSize: Style.font.caption
+                        elide: Text.ElideRight
                       }
+                      // What's playing: its key and tempo, to read the next ones against.
+                      Rectangle {
+                        visible: root.keyTempo(root.now) !== ""
+                        implicitWidth: nowKt.implicitWidth + 10
+                        implicitHeight: nowKt.implicitHeight + 2
+                        radius: Style.cornerRadius > 0 ? 3 : 0
+                        color: Util.alpha(root.amber, 0.1)
+                        border.width: 1
+                        border.color: Util.alpha(root.amber, 0.6)
+                        Label {
+                          id: nowKt
+                          anchors.centerIn: parent
+                          text: root.keyTempo(root.now)
+                          font.pixelSize: Style.font.caption - 1
+                          color: root.amber
+                        }
+                      }
+                      Item { Layout.fillWidth: true }
                       Equalizer { visible: root.deck.playing; on: root.deck.playing }
                       Label {
                         text: "−" + root.clock(root.nowLeft)
@@ -2425,20 +2467,51 @@ Item {
                           spacing: 8
                           Label { Layout.fillWidth: true; Layout.maximumWidth: implicitWidth; text: slot.title; font.bold: true }
                           // Key and tempo, from Beatport.
+                          // Read against the song before it (the playing one, for the next):
+                          // the key teal when it mixes, amber when it clashes; the tempo's step.
                           Rectangle {
+                            id: ktChip
+                            readonly property var before: slot.index === 0 ? root.now
+                                                        : (slot.index - 1 < setModel.count ? setModel.get(slot.index - 1) : null)
+                            readonly property bool keyOk: !before || root.keysFit(before.key || "", slot.key)
+                            readonly property var step: before ? root.tempoStep(before.bpm || 0, slot.bpm) : null
                             visible: slot.key !== "" || slot.bpm > 0
-                            implicitWidth: kt.implicitWidth + 10
-                            implicitHeight: kt.implicitHeight + 2
+                            implicitWidth: ktRow.implicitWidth + 10
+                            implicitHeight: ktRow.implicitHeight + 2
                             radius: Style.cornerRadius > 0 ? 3 : 0
                             color: "transparent"
                             border.width: 1
-                            border.color: Util.alpha(root.teal, 0.35)
-                            Label {
-                              id: kt
+                            border.color: Util.alpha(keyOk ? root.teal : Commons.Color.warning, 0.4)
+                            Row {
+                              id: ktRow
                               anchors.centerIn: parent
-                              text: [slot.key, slot.bpm > 0 ? Math.round(slot.bpm) : ""].filter(x => x !== "").join(" · ")
-                              font.pixelSize: Style.font.caption - 1
-                              color: root.teal
+                              spacing: 0
+                              Label {
+                                visible: slot.key !== ""
+                                text: slot.key
+                                font.pixelSize: Style.font.caption - 1
+                                color: ktChip.keyOk ? root.teal : Commons.Color.warning
+                              }
+                              Label {
+                                visible: slot.key !== "" && slot.bpm > 0
+                                text: " · "
+                                font.pixelSize: Style.font.caption - 1
+                                color: root.teal; opacity: 0.6
+                              }
+                              Label {
+                                visible: slot.bpm > 0
+                                text: Math.round(slot.bpm)
+                                font.pixelSize: Style.font.caption - 1
+                                color: root.teal
+                              }
+                              Label {
+                                visible: slot.bpm > 0 && ktChip.step !== null && ktChip.step !== 0
+                                text: ktChip.step === null ? "" : " " + (ktChip.step > 0 ? "+" : "−") + Math.abs(ktChip.step)
+                                font.pixelSize: Style.font.caption - 2
+                                color: ktChip.step !== null && Math.abs(ktChip.step) > (ktChip.before.bpm || 120) * 0.08
+                                       ? Commons.Color.warning : root.teal
+                                opacity: 0.75
+                              }
                             }
                           }
                           // Something doesn't sit well with the song before: a quiet mark; hover says what.

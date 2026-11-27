@@ -671,6 +671,30 @@ class DeckTests(TempCase):
         self.assertTrue(d["autodj"])
         self.assertEqual([s["title"] for s in d["set"]], ["Seed", "Other", "Song 0", "Song 1"])   # same artist skipped
 
+    def test_autodj_songs_that_land_after_its_turned_off_or_a_new_set_dont_go_in(self):
+        self.patch("deck_watch", lambda: None)
+        self.patch("toast", lambda *a, **k: None)
+        self.deck("add", "applemusic", json.dumps(self.apple(1)))
+        meanwhile = {"do": None}
+        def ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False):
+            meanwhile["do"]()                      # what happens while Grok thinks
+            return {"songs": [{"t": "Late", "a": "Elsewhere", "w": ""}], "q": []}
+        self.patch("grok_ideas", ideas)
+        self.patch("find_songs", lambda service, wanted: [(i, self.apple(n + 9, i["t"], i["a"])) for n, i in enumerate(wanted)])
+        al.deck_update(lambda d: d.update(autodj=True))
+        with mock.patch("shutil.which", return_value="/usr/bin/grok"):
+            meanwhile["do"] = lambda: al.deck_command({}, ["autodj", "off"])
+            al.deck_fill_now({"music": {"service": "applemusic"}}, auto=True)
+            self.assertNotIn("Late", [s["title"] for s in al.deck_read()["set"]])
+            al.deck_update(lambda d: d.update(autodj=True))
+            meanwhile["do"] = lambda: al.deck_command({}, ["clear"])
+            al.deck_fill_now({"music": {"service": "applemusic"}}, auto=True)
+            self.assertEqual(al.deck_read()["set"], [])
+            meanwhile["do"] = lambda: None
+            self.deck("add", "applemusic", json.dumps(self.apple(2)))
+            al.deck_fill_now({"music": {"service": "applemusic"}}, auto=True)          # still on, same set: it lands
+        self.assertIn("Late", [s["title"] for s in al.deck_read()["set"]])
+
     def test_an_opened_playlist_lists_its_songs_to_pick_from(self):
         self.patch("deck_expand_songs", lambda service, item: [al.deck_item(service, self.apple(3, "Picked", "Them"))])
         out = io.StringIO()

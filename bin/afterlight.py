@@ -2850,20 +2850,34 @@ def beatport_press_play(url, wait=20, first=False):
     chart's or playlist's, data-testid play-button) and check music started.
     Presses again only while nothing plays, so it never pauses by mistake."""
     target = url.split("#")[0].split("?")[0].rstrip("/")
+    track = re.search(r"/track/[^/]+/(\d+)", target)
     deadline = time.time() + wait
     time.sleep(1.5)   # let the old page go
+    def right_track():
+        # A track page: the player bar's track link names this track. (Its
+        # Recommendations have a Play of their own, which plays something else.)
+        if not track:
+            return True
+        bar = beatport_bridge({"type": "page", "op": {"type": "probe", "region": "bar", "filter": "^/track/"}}, timeout=3) or {}
+        return any(re.search(rf"/track/[^/]+/{track.group(1)}$", str(i.get("href", ""))) for i in bar.get("items", []))
     while time.time() < deadline:
-        reply = beatport_bridge({"type": "page", "op": {"type": "probe", "region": "page", "filter": "^play-button$"}}, timeout=3) or {}
+        reply = beatport_bridge({"type": "page", "op": {"type": "probe", "region": "page", "filter": "^play-button$|^/release/"}}, timeout=3) or {}
         here = str(reply.get("url", "")).split("#")[0].split("?")[0].rstrip("/")
-        if here == target and any(i.get("testid") == "play-button" for i in reply.get("items", [])):
-            if beatport_player_playing():
+        items = reply.get("items", [])
+        # On a track page, wait for the track's own part (its "Track …" row)
+        # to be drawn, so the first Play is the track's, not Recommendations'.
+        drawn = not track or any(str(i.get("row", "")).startswith("Track ") for i in items)
+        if here == target and drawn and any(i.get("testid") == "play-button" for i in items):
+            if beatport_player_playing() and right_track():
                 return True
             beatport_bridge({"type": "page", "op": {"type": "click", "testid": "^play-button$", "region": "page",
                                                     **({"first": True} if first else {})}}, timeout=3)
             for _ in range(8):
                 time.sleep(0.5)
                 if beatport_player_playing():
-                    return True
+                    if right_track():
+                        return True
+                    break               # something else started: press the track's own Play again
         else:
             time.sleep(0.5)
     return False
@@ -3949,7 +3963,7 @@ DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kin
               "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": "",
               "micViz": False, "speaking": None, "asks": [], "awoke": False, "phoneSeen": 0, "ready": None,
               "recapAt": 0, "closedAt": 0, "skipped": [], "direction": "", "toward": None,
-              "autoTidy": True, "autodjSettle": None, "autodjBusy": None, "softSkip": True, "unplayable": None, "silent": None, "batteryWarned": 0}
+              "autoTidy": True, "autodjSettle": None, "autodjBusy": None, "softSkip": True, "unplayable": None, "silent": None, "batteryWarned": 0, "setGen": 0}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -5077,6 +5091,7 @@ def deck_load_set(name, replace=False):
     def load(d):
         if replace:
             d["set"], d["pinned"] = songs, []
+            d["setGen"] = d.get("setGen", 0) + 1
         else:
             d["set"] = d["set"] + songs
     deck_edit(load)
@@ -6791,7 +6806,8 @@ def deck_command(settings, args):
     elif action == "lock" and len(args) == 2 and args[1] in {"on", "off"}:
         deck_update(lambda d: d.update(lock=args[1] == "on"))
     elif action == "autodj" and len(args) == 2 and args[1] in {"on", "off"}:
-        deck_update(lambda d: d.update(autodj=args[1] == "on", autodjAt=0, **({} if args[1] == "on" else {"direction": "", "toward": None})))
+        deck_update(lambda d: d.update(autodj=args[1] == "on", autodjAt=0,
+                                       **({} if args[1] == "on" else {"direction": "", "toward": None, "autodjBusy": None})))
         if args[1] == "on":
             deck_watch()
     elif action == "autodj" and len(args) == 3 and args[1] == "direction" and (args[2] in DIRECTIONS or args[2] == "none"):
@@ -6848,7 +6864,7 @@ def deck_command(settings, args):
         deck_edit(shuffle)
         deck_after_edit()
     elif action == "clear":
-        deck_edit(lambda d: d.update(set=[], pinned=[]))
+        deck_edit(lambda d: d.update(set=[], pinned=[], setGen=d.get("setGen", 0) + 1))
         deck_after_edit()
     elif action == "play":
         uid = args[1] if len(args) > 1 else ""
@@ -7063,6 +7079,7 @@ def deck_fill_now(settings, count=5, auto=False, seed=None):
         return
     if not shutil.which("grok"):
         sys.exit("Filling the Deck needs the Grok agent (grok).")
+    gen = deck.get("setGen", 0)       # the set these are for (see place)
     anchor = None
     if seed or auto:
         if seed:
@@ -7099,7 +7116,14 @@ def deck_fill_now(settings, count=5, auto=False, seed=None):
     elif anchor:
         # Near the song they follow in tempo, in an order that mixes, the way the shape points.
         found = deck_mix_pick(picks, anchor, count, deck.get("direction") or "")
+    landed = {"ok": True}
     def place(d):
+        # Auto-DJ's search takes a minute or two. If it was turned off
+        # meanwhile, or the set was replaced (built, cleared, a saved one
+        # loaded over it), they no longer fit: they don't go in.
+        if auto and not seed and (not d.get("autodj") or d.get("setGen", 0) != gen):
+            landed["ok"] = False
+            return
         heading = (d.get("toward") or {}).get("brief") and d["toward"].get("done", 0) < d["toward"].get("steps", 6)
         if (auto or seed) and found and not heading:
             # Tidied once their real tempos are in (Grok's guesses can be off).
@@ -7113,6 +7137,8 @@ def deck_fill_now(settings, count=5, auto=False, seed=None):
         else:
             d["set"].extend(found)
     deck_edit(place)
+    if not landed["ok"]:
+        return
     deck_after_edit()
     toast((f"Auto-DJ added {len(found)} songs" if auto or seed else f"Grok added {len(found)} songs") if found else "Grok couldn't find songs that fit",
           ", ".join(s["title"] for s in found[:3]) + ("…" if len(found) > 3 else ""), glyph="✦")
@@ -7322,6 +7348,7 @@ def deck_build(settings, minutes, brief, start="", replace=False, seed=None):
         return
     def place(d):
         d["set"] = found + ([] if replace else d["set"])
+        d["setGen"] = d.get("setGen", 0) + 1         # a new set: Auto-DJ's searches from before don't land
         if replace:
             d["pinned"] = []
     deck_edit(place)
