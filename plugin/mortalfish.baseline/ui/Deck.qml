@@ -711,6 +711,14 @@ Item {
     for (const f of [2, 0.5]) if (Math.abs(to - from * f) < Math.abs(best)) best = to - from * f
     return Math.round(best)
   }
+  // The set's columns, the same on every row and the Now row.
+  readonly property int keyColumn: 40
+  readonly property int bpmColumn: 48
+  readonly property int timeColumn: 66
+  readonly property int actionsColumn: 84
+  function serviceGlyph(service) {
+    return service === "applemusic" ? "" : service === "ytmusic" ? "󰗃" : service === "beatport" ? "󰎆" : "󰝚"
+  }
   function keyTempo(song) {
     if (!song) return ""
     return [song.key || "", song.bpm > 0 ? Math.round(song.bpm) + " BPM" : ""].filter(x => x !== "").join(" · ")
@@ -2256,41 +2264,43 @@ Item {
                     Rectangle { width: 3; height: parent.height; color: root.amber }
                     RowLayout {
                       anchors.fill: parent
-                      anchors.leftMargin: 12; anchors.rightMargin: 12
+                      anchors.leftMargin: 12; anchors.rightMargin: 6
                       spacing: 12
                       Label { text: strings.t("deck.nowShort").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 3; color: root.amber; Layout.preferredWidth: 34 }
                       Cover { url: root.now ? root.now.thumb || "" : ""; size: 32 }
                       Label {
                         Layout.fillWidth: true
-                        Layout.maximumWidth: implicitWidth
                         text: root.now ? root.now.title + "  ·  " + root.now.artist : ""
                         font.bold: true
                         font.pixelSize: Style.font.caption
                         elide: Text.ElideRight
                       }
-                      // What's playing: its key and tempo, to read the next ones against.
-                      Rectangle {
-                        visible: root.keyTempo(root.now) !== ""
-                        implicitWidth: nowKt.implicitWidth + 10
-                        implicitHeight: nowKt.implicitHeight + 2
-                        radius: Style.cornerRadius > 0 ? 3 : 0
-                        color: Util.alpha(root.amber, 0.1)
-                        border.width: 1
-                        border.color: Util.alpha(root.amber, 0.6)
-                        Label {
-                          id: nowKt
-                          anchors.centerIn: parent
-                          text: root.keyTempo(root.now)
-                          font.pixelSize: Style.font.caption - 1
-                          color: root.amber
-                        }
-                      }
-                      Item { Layout.fillWidth: true }
-                      Equalizer { visible: root.deck.playing; on: root.deck.playing }
+                      // What's playing: its key and tempo, in the same columns as the songs below.
                       Label {
+                        Layout.preferredWidth: root.keyColumn
+                        horizontalAlignment: Text.AlignHCenter
+                        text: root.now && root.now.key ? root.now.key : "–"
+                        font.pixelSize: Style.font.caption; font.bold: true; color: root.amber
+                        opacity: root.now && root.now.key ? 1 : 0.3
+                      }
+                      Label {
+                        Layout.preferredWidth: root.bpmColumn
+                        horizontalAlignment: Text.AlignHCenter
+                        text: root.now && root.now.bpm > 0 ? Math.round(root.now.bpm) : "–"
+                        font.pixelSize: Style.font.caption; color: root.amber
+                        opacity: root.now && root.now.bpm > 0 ? 1 : 0.3
+                      }
+                      Label {
+                        Layout.preferredWidth: root.timeColumn
+                        horizontalAlignment: Text.AlignRight
                         text: "−" + root.clock(root.nowLeft)
                         font.pixelSize: Style.font.caption
                         color: root.teal
+                      }
+                      Item {
+                        Layout.preferredWidth: root.actionsColumn
+                        implicitHeight: 20
+                        Equalizer { anchors.centerIn: parent; visible: root.deck.playing; on: root.deck.playing }
                       }
                     }
                     Rectangle {
@@ -2326,7 +2336,7 @@ Item {
                   readonly property bool isFolded: heading && !!root.folded[uid]
                   readonly property bool shown: root.matches(title, artist) && !root.hiddenAt(index) && !isFolded
                   width: setList.width
-                  height: (heading ? 36 : 0) + (shown ? 66 : 0)
+                  height: (heading ? 36 : 0) + (shown ? 56 : 0)
                   visible: height > 0
                   clip: true
 
@@ -2419,7 +2429,7 @@ Item {
                     y: slot.heading ? 36 : 0
                     visible: slot.shown
                     width: parent.width
-                    height: 62
+                    height: 52
                     radius: Style.cornerRadius > 0 ? 5 : 0
                     color: picked ? Util.alpha(root.amber, 0.13)
                          : rowHover.hovered || rowDrop.containsDrag ? Util.alpha(root.ink, 0.06) : Util.alpha(root.ink, 0.025)
@@ -2458,100 +2468,89 @@ Item {
                           TapHandler { onTapped: root.newChapter(slot.uid) }
                         }
                       }
-                      Cover { url: slot.thumb; size: 48 }
+                      Cover { url: slot.thumb; size: 42 }
+                      // The song: title, then who and why (where it came from, and
+                      // anything that doesn't sit well, on hover). Long names stop
+                      // short, so the columns after them never move.
                       ColumnLayout {
                         Layout.fillWidth: true
-                        spacing: 3
-                        RowLayout {
-                          Layout.fillWidth: true
-                          spacing: 8
-                          Label { Layout.fillWidth: true; Layout.maximumWidth: implicitWidth; text: slot.title; font.bold: true }
-                          // Key and tempo, from Beatport.
-                          // Read against the song before it (the playing one, for the next):
-                          // the key teal when it mixes, amber when it clashes; the tempo's step.
-                          Rectangle {
-                            id: ktChip
-                            readonly property var before: slot.index === 0 ? root.now
-                                                        : (slot.index - 1 < setModel.count ? setModel.get(slot.index - 1) : null)
-                            readonly property bool keyOk: !before || root.keysFit(before.key || "", slot.key)
-                            readonly property var step: before ? root.tempoStep(before.bpm || 0, slot.bpm) : null
-                            visible: slot.key !== "" || slot.bpm > 0
-                            implicitWidth: ktRow.implicitWidth + 10
-                            implicitHeight: ktRow.implicitHeight + 2
-                            radius: Style.cornerRadius > 0 ? 3 : 0
-                            color: "transparent"
-                            border.width: 1
-                            border.color: Util.alpha(keyOk ? root.teal : Commons.Color.warning, 0.4)
-                            Row {
-                              id: ktRow
-                              anchors.centerIn: parent
-                              spacing: 0
-                              Label {
-                                visible: slot.key !== ""
-                                text: slot.key
-                                font.pixelSize: Style.font.caption - 1
-                                color: ktChip.keyOk ? root.teal : Commons.Color.warning
-                              }
-                              Label {
-                                visible: slot.key !== "" && slot.bpm > 0
-                                text: " · "
-                                font.pixelSize: Style.font.caption - 1
-                                color: root.teal; opacity: 0.6
-                              }
-                              Label {
-                                visible: slot.bpm > 0
-                                text: Math.round(slot.bpm)
-                                font.pixelSize: Style.font.caption - 1
-                                color: root.teal
-                              }
-                              Label {
-                                visible: slot.bpm > 0 && ktChip.step !== null && ktChip.step !== 0
-                                text: ktChip.step === null ? "" : " " + (ktChip.step > 0 ? "+" : "−") + Math.abs(ktChip.step)
-                                font.pixelSize: Style.font.caption - 2
-                                color: ktChip.step !== null && Math.abs(ktChip.step) > (ktChip.before.bpm || 120) * 0.08
-                                       ? Commons.Color.warning : root.teal
-                                opacity: 0.75
-                              }
-                            }
-                          }
-                          // Something doesn't sit well with the song before: a quiet mark; hover says what.
-                          Label {
-                            visible: row.warns.length > 0
-                            text: "◆"
-                            font.pixelSize: Style.font.caption - 1
-                            color: Commons.Color.warning
-                            opacity: rowHover.hovered ? 1 : 0.7
-                          }
-                          Item { Layout.fillWidth: true }
-                        }
+                        spacing: 2
+                        Label { Layout.fillWidth: true; text: slot.title; font.bold: true; elide: Text.ElideRight }
                         Label {
                           Layout.fillWidth: true
-                          text: slot.artist + "  ·  " + root.serviceName(slot.service) + (slot.from !== "" ? "  ·  " + slot.from : "")
+                          readonly property string reasons: row.warns.map(w => strings.t("deck.warn." + w)).join("  ·  ")
+                          text: root.serviceGlyph(slot.service) + "  " + slot.artist
+                                + (rowHover.hovered ? (reasons !== "" ? "  ·  ◆ " + reasons : slot.from !== "" ? "  ·  " + slot.from : "")
+                                                    : slot.why !== "" ? "  ·  ✦ " + slot.why : "")
+                          font.family: "Iosevka Nerd Font Propo"
                           font.pixelSize: Style.font.caption
+                          color: rowHover.hovered && reasons !== "" ? Commons.Color.warning : root.ink
                           opacity: 0.6
+                          elide: Text.ElideRight
                         }
+                      }
+                      // Key, read against the song before it (the playing one, for the
+                      // next): teal when it mixes, amber when it clashes.
+                      Item {
+                        id: ktChip
+                        readonly property var before: slot.index === 0 ? root.now
+                                                    : (slot.index - 1 < setModel.count ? setModel.get(slot.index - 1) : null)
+                        readonly property bool keyOk: !before || root.keysFit(before.key || "", slot.key)
+                        readonly property var step: before ? root.tempoStep(before.bpm || 0, slot.bpm) : null
+                        readonly property bool jump: step !== null && Math.abs(step) > (before.bpm || 120) * 0.08
+                        Layout.preferredWidth: root.keyColumn
+                        Layout.fillHeight: true
                         Label {
-                          Layout.fillWidth: true
-                          readonly property bool warning: row.warns.length > 0 && (rowHover.hovered || slot.why === "")
-                          visible: slot.why !== "" || (row.warns.length > 0 && rowHover.hovered)
-                          text: warning
-                                ? "◆ " + row.warns.map(w => strings.t("deck.warn." + w)).join("  ·  ")
-                                : "✦ " + slot.why
+                          anchors.centerIn: parent
+                          text: slot.key !== "" ? slot.key : "–"
                           font.pixelSize: Style.font.caption
-                          color: warning ? Commons.Color.warning : root.amber
-                          opacity: 0.85
+                          font.bold: slot.key !== ""
+                          color: !ktChip.keyOk ? Commons.Color.warning : root.teal
+                          opacity: slot.key !== "" ? 1 : 0.3
+                        }
+                      }
+                      // Tempo, and its step from the song before (amber past 8%).
+                      Item {
+                        Layout.preferredWidth: root.bpmColumn
+                        Layout.fillHeight: true
+                        Column {
+                          anchors.centerIn: parent
+                          spacing: 0
+                          Label {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: slot.bpm > 0 ? Math.round(slot.bpm) : "–"
+                            font.pixelSize: Style.font.caption
+                            color: ktChip.jump ? Commons.Color.warning : root.teal
+                            opacity: slot.bpm > 0 ? 1 : 0.3
+                          }
+                          Label {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            visible: slot.bpm > 0 && ktChip.step !== null && ktChip.step !== 0
+                            text: ktChip.step === null ? "" : (ktChip.step > 0 ? "+" : "−") + Math.abs(ktChip.step)
+                            font.pixelSize: Style.font.caption - 2
+                            color: ktChip.jump ? Commons.Color.warning : root.teal
+                            opacity: 0.6
+                          }
                         }
                       }
                       // When it starts.
                       Label {
+                        Layout.preferredWidth: root.timeColumn
+                        horizontalAlignment: Text.AlignRight
                         text: root.clockAt(root.startsAt[slot.index] || 0)
                         font.pixelSize: Style.font.caption
                         color: root.teal
                         opacity: 0.75
                       }
-                      RoundButton { glyph: "󰐊"; tip: strings.t("deck.playNow"); onClicked: root.run(["deck", "play", slot.uid]) }
-                      RoundButton { glyph: row.isPinned ? "󰐃" : "󰤰"; tip: row.isPinned ? strings.t("deck.unpin") : strings.t("deck.pin"); on: row.isPinned; onClicked: root.run(["deck", "pin", slot.uid]) }
-                      RoundButton { visible: !root.locked; glyph: "󰅖"; tip: strings.t("deck.remove"); onClicked: root.run(["deck", "remove", slot.uid]) }
+                      // Play, pin, remove: there on hover (a pin stays lit), their room kept.
+                      Row {
+                        Layout.preferredWidth: root.actionsColumn
+                        spacing: 0
+                        RoundButton { glyph: "󰐊"; tip: strings.t("deck.playNow"); opacity: rowHover.hovered ? 1 : 0; onClicked: root.run(["deck", "play", slot.uid]) }
+                        RoundButton { glyph: row.isPinned ? "󰐃" : "󰤰"; tip: row.isPinned ? strings.t("deck.unpin") : strings.t("deck.pin"); on: row.isPinned
+                                      opacity: rowHover.hovered || row.isPinned ? 1 : 0; onClicked: root.run(["deck", "pin", slot.uid]) }
+                        RoundButton { visible: !root.locked; glyph: "󰅖"; tip: strings.t("deck.remove"); opacity: rowHover.hovered ? 1 : 0; onClicked: root.run(["deck", "remove", slot.uid]) }
+                      }
                     }
                     HoverHandler { id: rowHover; cursorShape: root.dragging ? Qt.ClosedHandCursor : Qt.OpenHandCursor }
                     TapHandler {
