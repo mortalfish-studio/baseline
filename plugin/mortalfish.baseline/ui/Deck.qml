@@ -1353,8 +1353,8 @@ Item {
                     }
                     Label {
                       Layout.fillWidth: true
-                      text: root.now ? (root.whereId === "laptop" ? "󰓃  " + strings.t("hover.playingOn").arg(root.whereName)
-                                                                : "󰜟  " + strings.t("hover.playingIn").arg(root.whereName))
+                      text: root.now ? (root.whereId === "laptop" ? "󰌢  " + strings.t(root.deck.playing ? "hover.playingOn" : "deck.pausedOn").arg(root.whereName)
+                                                                : "󰓃  " + strings.t(root.deck.playing ? "hover.playingIn" : "deck.pausedIn").arg(root.whereName))
                                         + " · " + root.serviceName(root.now.service) : ""
                       font.family: "Iosevka Nerd Font Propo"
                       font.pixelSize: Style.font.caption

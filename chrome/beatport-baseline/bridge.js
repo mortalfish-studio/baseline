@@ -66,7 +66,9 @@
       // control itself rather than a list that holds it.
       const offscreen = (el) => { const r = el.getBoundingClientRect(); return r.bottom < 0 || r.top > window.innerHeight ? 1 : 0; };
       const area = (el) => el.getBoundingClientRect().width * el.getBoundingClientRect().height;
-      found.sort((a, b) => offscreen(a) - offscreen(b) || area(a) - area(b));
+      // first: the first on the page instead (a track page's own Play, above
+      // the recommendations, even when scrolled away from it).
+      if (!op.first) found.sort((a, b) => offscreen(a) - offscreen(b) || area(a) - area(b));
       const el = found[op.nth || 0];
       if (el) {
         const d = describe(el, 0);
@@ -159,6 +161,12 @@
     if (op.type === "ytm-export" && location.hostname === "music.youtube.com") return ytmExport(op);
     if (op.type === "bp-export" && location.hostname === "www.beatport.com") return beatportExport(op);
     if (op.type === "volume") return volume(op);
+    if (op.type === "pause-media") {
+      // Pause this page's own players (not another tab's); dry only says it can.
+      const media = [...document.querySelectorAll("audio, video")];
+      if (!op.dry) for (const el of media) el.pause();
+      return { ok: true, count: media.length };
+    }
     if (op.type === "steps") {
       const done = [];
       for (const step of (op.steps || []).slice(0, 8)) {

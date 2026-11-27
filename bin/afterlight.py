@@ -2844,7 +2844,7 @@ def beatport_player_playing():
     return any(i.get("label") == "Pause" for i in reply.get("items", []))
 
 
-def beatport_press_play(url, wait=20):
+def beatport_press_play(url, wait=20, first=False):
     """Once the Beatport tab shows url, press the page's Play button (the
     chart's or playlist's, data-testid play-button) and check music started.
     Presses again only while nothing plays, so it never pauses by mistake."""
@@ -2857,7 +2857,8 @@ def beatport_press_play(url, wait=20):
         if here == target and any(i.get("testid") == "play-button" for i in reply.get("items", [])):
             if beatport_player_playing():
                 return True
-            beatport_bridge({"type": "page", "op": {"type": "click", "testid": "^play-button$", "region": "page"}}, timeout=3)
+            beatport_bridge({"type": "page", "op": {"type": "click", "testid": "^play-button$", "region": "page",
+                                                    **({"first": True} if first else {})}}, timeout=3)
             for _ in range(8):
                 time.sleep(0.5)
                 if beatport_player_playing():
@@ -3907,6 +3908,8 @@ def deck_item(service, item):
             "artist": clean_text(str(item.get("artist") or subtitle[0]), 120),
             "album": clean_text(str(item.get("album_name") or (subtitle[1] if len(subtitle) > 1 else "")), 120),
             "thumb": str(item.get("thumb", "")) if str(item.get("thumb", "")).startswith("https://") else ""}
+    if re.fullmatch(r"\d{1,2}(:\d{2}){1,2}", song["album"]):
+        song["album"] = ""                  # YouTube Music's search puts the length where the album goes
     if item.get("from"):                    # picked out of a playlist or album you opened
         song["from"] = clean_text(str(item["from"]), 80)
     if service == "applemusic":
@@ -4128,7 +4131,12 @@ def deck_where_room(deck):
 def deck_play_laptop(song, start_at=0):
     """Start one song in its app on the laptop."""
     if song["service"] == "beatport":
-        beatport_open(beatport_track_url(song), play=True)
+        # Load the track's page now; press its Play in the background, so the
+        # Deck isn't held up while the page loads.
+        url = beatport_track_url(song)
+        beatport_open(url)
+        subprocess.Popen([str(REPO / "bin/afterlight"), "beatport", "press", url], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         return
     if song["service"] == "applemusic":
         reply = None
@@ -4217,19 +4225,41 @@ def deck_start(deck, song=None, start_at=0):
             toast(f"{song['title']} isn't on Apple Music", "Sonos plays the Deck from Apple Music; skipped it", glyph="󰀦")
         toast(f"Playing in {room['name']}", f"{song['title']} · {song['artist']}", art=sonos_now(room)["track"].get("art", ""))
     else:
-        if was and was.get("service") != song.get("service") and was_playing:
-            deck_quiet(was)         # one app at a time: the one that played before stops
-        deck_play_laptop(song, start_at)
+        # One app at a time: the one that played before stops. When it can be
+        # paused on its own, the new song starts first (no silence between);
+        # otherwise it's paused first, so the pause can't catch the new one.
+        other = was and was.get("service") != song.get("service") and was_playing
+        if other and deck_can_quiet(was):
+            deck_play_laptop(song, start_at)
+            deck_quiet(was)
+        else:
+            if other:
+                deck_quiet(was)
+            deck_play_laptop(song, start_at)
     deck["expect"] = {"uid": song["uid"], "since": time.time()}
     deck_watch()
     return True
+
+
+def deck_page(song, op):
+    """An op for the page a song plays in (YouTube Music or Beatport)."""
+    request = {"type": "page", "op": op}
+    if song.get("service") == "ytmusic":
+        request["site"] = "ytmusic"
+    return beatport_bridge(request, timeout=3) or {}
+
+
+def deck_can_quiet(song):
+    """Can the app a song plays in be paused on its own, without touching any
+    other tab? (Apple Music always; the others with add-on 1.12.)"""
+    return song.get("service") == "applemusic" or bool(deck_page(song, {"type": "pause-media", "dry": True}).get("ok"))
 
 
 def deck_quiet(song):
     """Pause the app a song played in (switching to another app mid-song)."""
     if song.get("service") == "applemusic":
         am_bridge({"action": "pause"}, timeout=4)
-    else:
+    elif not deck_page(song, {"type": "pause-media"}).get("ok"):
         media_command("pause")
 
 
@@ -4307,7 +4337,7 @@ def deck_tick(last):
             and (d.get("expect") or {}).get("since") == started
     # Nearly over, with more to come: fade it out, then the next one.
     left = status.get("length", 0) - status.get("time", 0)
-    if status.get("playing") and status.get("length", 0) > 40 and 0 < left <= 6 and deck["set"] \
+    if status.get("playing") and status.get("length", 0) > 40 and 0 < left <= 8 and deck["set"] \
             and deck.get("handoff") != song["uid"] and not (deck.get("sleep") or {}).get("song"):
         deck_update(lambda d: d.update(handoff=song["uid"]))
         was = deck_handoff(song, left)
@@ -4329,7 +4359,10 @@ def deck_tick(last):
     if ran_out or stopped or not last.get("length"):
         deck_update(lambda d: deck_start(d) if same(d) else None)        # the song finished: next
     else:
-        deck_update(lambda d: d.update(playing=False, paused=False) if same(d) else None)   # you played something else
+        # You played something else; or nothing plays at all (a Beatport page
+        # Chrome wouldn't start), when the Deck counts as paused, so Play tries again.
+        quiet = not status.get("playing")
+        deck_update(lambda d: d.update(playing=False, paused=quiet) if same(d) else None)
     return None
 
 
@@ -4956,16 +4989,21 @@ def deck_app_volume(song, level=None):
     return value if isinstance(value, (int, float)) else None
 
 
+HANDOFF_LEAD = 2.5           # seconds before the end the next song is started (it takes a moment to load)
+
+
 def deck_handoff(song, left):
-    """Fade the playing song out over what's left of it (about five seconds).
-    Returns the volume to put back afterwards, or None when it couldn't fade."""
+    """Fade the playing song down over what's left of it, until a couple of
+    seconds before the end, when the next one is started and the two overlap
+    a little. Returns the volume to put back afterwards, or None when it
+    couldn't fade."""
     was = deck_app_volume(song)
     if not was:
         return None
     steps = 10
     for i in range(1, steps + 1):
-        deck_app_volume(song, round(was * (1 - i / steps) ** 2, 3))
-        time.sleep(max(0.2, (left - 1) / steps))
+        deck_app_volume(song, round(was * max(0.08, (1 - i / steps) ** 2), 3))
+        time.sleep(max(0.15, (left - HANDOFF_LEAD) / steps))
     return was
 
 
@@ -5315,7 +5353,7 @@ def deck_fill(settings, count=5, auto=False, seed=None):
         toast("Grok is picking songs…", "That fit " + ", ".join(s["title"] for s in recent[-3:]), glyph="✦")
         listing = "; ".join(f"{s['title']} by {s['artist']}" for s in recent[-8:])
         ideas = grok_ideas("", ask="Suggest songs to follow this DJ set, in the same mood and flow, none already in it: "
-                               + listing.replace("»", "")[:900] + ".")
+                               + listing.replace("»", "")[:900] + ".", count=count + 4)
     service = (settings.get("music") or {}).get("service", "ytmusic")
     have = {song_key(s["title"]) for s in recent + deck["played"]}
     recent_artists = (deck_artists(seed) if seed else
@@ -5406,13 +5444,22 @@ def deck_build(settings, minutes, brief, start="", replace=False, seed=None):
 
 
 def deck_resume(deck):
+    """Carry on with the Deck's song where it was paused. On the laptop the
+    app may have moved on to something else meanwhile (the Deck played in a
+    room, or you played something): then the Deck's song starts again from
+    where it was, rather than whatever the app had."""
     room = deck_where_room(deck)
+    song = deck["now"]
     if room:
         sonos_call(room["ip"], "AVTransport", "Play", {"InstanceID": 0, "Speed": 1})
-    elif deck["now"].get("service") == "applemusic":
+    elif song.get("service") == "applemusic" and \
+            str(((am_now() or {}).get("item") or {}).get("id", "")) == str(song.get("id")):
         am_bridge({"action": "play"}, timeout=4)
-    else:
+    elif song.get("service") == "ytmusic" and song_key((laptop_track() or {}).get("title", "")) == song_key(song["title"]):
         media_command("play")
+    else:
+        mark = read_json(DECK_NOW, {})
+        deck_play_laptop(song, start_at=mark.get("time", 0) if mark.get("uid") == song["uid"] else 0)
     deck["expect"] = {"uid": deck["now"]["uid"], "since": time.time()}
     deck_watch()
 
@@ -6918,6 +6965,12 @@ def main(argv):
             action = args[0] if args else ""
             if action in {"open", "play"} and len(args) == 2:
                 beatport_open(args[1], play=action == "play")
+            elif action == "press" and len(args) == 2 and BEATPORT_URL.match(args[1]):
+                # The Deck's Beatport song: press its page's own Play. Chrome only
+                # lets a page start sound after a real click in it since it loaded.
+                if not beatport_press_play(args[1], wait=10, first="/track/" in args[1]):
+                    toast("Beatport needs a click", "Press Play in the Beatport window once; Chrome won't let it start on its own until you do",
+                          glyph="󰀦")
             elif action == "resume":
                 if not beatport_resume():
                     run("omarchy-osd", "-i", "󰀦", "-m", "Nothing to play yet: pick a chart or playlist")

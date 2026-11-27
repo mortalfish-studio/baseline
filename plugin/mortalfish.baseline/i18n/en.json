@@ -537,6 +537,8 @@
   "deck.dropToLeave": "Drop outside to take it out",
   "deck.busy": "In use",
   "deck.paused": "Paused",
+  "deck.pausedOn": "Paused on %1",
+  "deck.pausedIn": "Paused in %1",
   "deck.sendHome": "Back to Deck",
   "deck.yourPlaylist": "Your playlist",
   "deck.playlist": "Playlist",

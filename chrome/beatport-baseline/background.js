@@ -127,9 +127,17 @@ async function appleMusic(op, tab) {
                              duration: Math.floor(kit.currentPlaybackDuration || 0), item: now() });
       if (op.action === "now") return state();
       if (op.action === "volume") {
-        const was = kit.volume;
-        if (op.level !== null) kit.volume = op.level;
-        return { ok: true, level: was };
+        // MusicKit's own volume, or its audio element's when that isn't there.
+        try {
+          const media = [...document.querySelectorAll("audio, video")];
+          const kitLevel = typeof kit.volume === "number" ? kit.volume : null;
+          const was = kitLevel !== null ? kitLevel : (media[0] ? media[0].volume : null);
+          if (op.level !== null) {
+            if (kitLevel !== null) kit.volume = op.level;
+            for (const el of media) el.volume = op.level;
+          }
+          return { ok: was !== null, level: was };
+        } catch (error) { return { ok: false, error: String(error).slice(0, 120) }; }
       }
       if (op.action === "export") {
         if (!kit.isAuthorized) return { ok: false, error: "signed out" };
