@@ -3904,7 +3904,7 @@ DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kin
               "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": "",
               "micViz": False, "speaking": None, "asks": [], "awoke": False, "phoneSeen": 0, "ready": None,
               "recapAt": 0, "closedAt": 0, "skipped": [], "direction": "", "toward": None,
-              "autoTidy": True, "autodjSettle": None, "autodjBusy": None}
+              "autoTidy": True, "autodjSettle": None, "autodjBusy": None, "softSkip": True}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -6269,6 +6269,49 @@ def deck_handoff(song, left):
     return was
 
 
+SOFT_SKIP_OUT = 1.6          # seconds Next takes to bring the song down
+SOFT_SKIP_IN = 1.2           # and to bring the next one up, in the same app
+
+
+def deck_soft_next(deck):
+    """Next, gently, on the laptop: the song fades down over a second or
+    two, the next starts low, then comes up (when both play in the same app;
+    another app starts at its own level). A Sonos room, Beatport (no volume
+    Baseline can reach), a voice clip speaking or a paused Deck: straight on."""
+    song = deck.get("now") or {}
+    lock = open(DECK.with_name("deck-skip.lock"), "a")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        # Pressed again mid-fade: straight on (the first press puts the volume back).
+        lock.close()
+        deck_update(lambda d: deck_start(d))
+        return
+    was = None
+    if deck.get("playing") and not deck_where_room(deck) and song.get("service") in {"applemusic", "ytmusic"} \
+            and not DECK_DUCK.exists():
+        was = deck_app_volume(song)
+    if not was:
+        lock.close()
+        deck_update(lambda d: deck_start(d))
+        return
+    steps = 8
+    try:
+        for i in range(1, steps + 1):
+            deck_app_volume(song, round(was * max(0.05, (1 - i / steps) ** 2), 3))
+            time.sleep(SOFT_SKIP_OUT / steps)
+        deck_update(lambda d: deck_start(d))
+        after = deck_read().get("now") or {}
+        if after.get("service") == song["service"] and after.get("uid") != song.get("uid"):
+            time.sleep(0.15)                     # let it begin before it rises
+            for i in range(1, steps + 1):
+                deck_app_volume(song, round(was * max(0.05, (i / steps) ** 1.5), 3))
+                time.sleep(SOFT_SKIP_IN / steps)
+    finally:
+        deck_app_volume(song, was)
+        lock.close()
+
+
 def deck_autodj_due(deck):
     """Auto-DJ: with three songs or fewer left, Grok adds more that fit (at
     most every three minutes)."""
@@ -6546,7 +6589,9 @@ def deck_command(settings, args):
             if 3 < at < DECK_SKIP_SECONDS:      # skipped straight away: Auto-DJ hears "not that"
                 gone = {k: deck["now"].get(k, "") for k in ("title", "artist")}
                 deck_update(lambda d: d.update(skipped=((d.get("skipped") or []) + [gone])[-20:]))
-        deck_update(lambda d: deck_start(d))
+        deck_soft_next(deck) if deck.get("softSkip", True) else deck_update(lambda d: deck_start(d))
+    elif action == "soft-skip" and len(args) == 2 and args[1] in {"on", "off"}:
+        deck_update(lambda d: d.update(softSkip=args[1] == "on"))
     elif action == "previous":
         deck_update(deck_previous)
     elif action == "where" and len(args) == 2:
@@ -6636,7 +6681,7 @@ def deck_command(settings, args):
     else:
         sys.exit("Usage: afterlight deck [state|add <ytmusic|applemusic> <item json> [--next|--play|--at <n>|--scatter]|move <uid> <index>|"
                  "remove <uid>…|place <now|next|end> <uid>…|chapter <uid> [name]|move-chapter <uid> <index>|undo|"
-                 "save <name> [--played|--all]|sets|load <name> [--replace]|grab [--next]|find-add <words> [--next]|build-from-playing [minutes]|next-up|songs <service> <album or playlist json>|forget <name>|shape <tempo|smooth|energy|arc|harmonic|bumps>|autodj <on|off>|autodj from <service> <item json>|export <service> <name> [--played|--all|--saved]|crossfade <on|off>|sleep <minutes|song|off>|guests <on|off|forget>|request <take|drop> <id> [--next|--mix]|requests <clear|auto on|auto off|lastcall <minutes|off>>|lock <on|off>|details|"
+                 "save <name> [--played|--all]|sets|load <name> [--replace]|grab [--next]|find-add <words> [--next]|build-from-playing [minutes]|next-up|songs <service> <album or playlist json>|forget <name>|shape <tempo|smooth|energy|arc|harmonic|bumps>|autodj <on|off>|autodj from <service> <item json>|export <service> <name> [--played|--all|--saved]|crossfade <on|off>|soft-skip <on|off>|sleep <minutes|song|off>|guests <on|off|forget>|request <take|drop> <id> [--next|--mix]|requests <clear|auto on|auto off|lastcall <minutes|off>>|lock <on|off>|details|"
                  "pin <uid>|shuffle|clear|play [uid]|pause|next|previous|where <laptop|room id>|rooms|join <room id>|"
                  "leave <room id>|everywhere|volume <room id> <0-100>|search <service> <words>|mine <service>|fill [--service <s>]|"
                  "build <minutes> [what it's for] [--start <song>|--seed <item json>] [--replace] [--service <s>]|run]")

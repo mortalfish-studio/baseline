@@ -1829,6 +1829,42 @@ class UnplayableTest(unittest.TestCase):
         self.assertEqual(bridge.call_count, 3)
 
 
+class SoftSkipTest(unittest.TestCase):
+    def test_next_fades_down_then_brings_the_next_up(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        song = lambda uid: {"uid": uid, "title": uid, "artist": "A", "service": "applemusic", "id": "1"}
+        state = {"now": song("a"), "playing": True, "played": [], "set": [song("b")]}
+        levels = []
+        def volume(s, level=None):
+            if level is not None:
+                levels.append(level)
+            return 0.8
+        with mock.patch.object(al, "DECK", Path(tmp.name) / "deck.json"), \
+             mock.patch.object(al, "DECK_DUCK", Path(tmp.name) / "duck.json"), \
+             mock.patch.object(al, "deck_where_room", return_value=None), \
+             mock.patch.object(al, "deck_app_volume", side_effect=volume), \
+             mock.patch.object(al, "deck_update", side_effect=lambda f: f(state)), \
+             mock.patch.object(al, "deck_read", side_effect=lambda: state), \
+             mock.patch.object(al, "deck_play_laptop", return_value=True), \
+             mock.patch.object(al, "deck_watch"), mock.patch.object(al.time, "sleep"):
+            al.deck_soft_next(copy.deepcopy(state))
+        self.assertEqual(state["now"]["uid"], "b")
+        low = levels.index(min(levels))
+        self.assertTrue(all(x >= y for x, y in zip(levels[:low], levels[1:low + 1])))   # down...
+        self.assertLess(min(levels), 0.1)
+        self.assertEqual(levels[-1], 0.8)                                               # ...and back up
+
+    def test_a_sonos_room_skips_straight_on(self):
+        state = {"now": {"uid": "a", "service": "applemusic"}, "playing": True}
+        with mock.patch.object(al, "DECK", Path(tempfile.mkdtemp()) / "deck.json"), \
+             mock.patch.object(al, "deck_where_room", return_value={"ip": "x"}), \
+             mock.patch.object(al, "deck_app_volume") as volume, mock.patch.object(al, "deck_update") as update:
+            al.deck_soft_next(state)
+        volume.assert_not_called()
+        update.assert_called_once()
+
+
 class AutoDJTowardTest(unittest.TestCase):
     def test_ask_bridges_to_the_destination_then_stays(self):
         deck = {"played": [], "now": {"uid": "n", "title": "Now", "artist": "B"}, "set": [], "votes": {}, "skipped": [],
