@@ -107,6 +107,23 @@ The Player tab drives three services in Chrome, through the [Chrome add-on](docs
 
 **Nothing plays on a guess.** "Play …" starts something only when the best match is clearly what you asked for: the title you said, and the artist when you said one. A mood or anything vaguer ("a sunset playlist for the kitchen") plays nothing and opens the Player tab on suggestions: the closest matches straight away, then about ten seconds later ideas from Grok's fast model (`grok-4.7-build-fast`, all tools off), each found on the same service so a tap plays it, plus searches to try. *Ask Grok for ideas* under the search box does the same for anything you type.
 
+### What it needs
+
+Baseline's music side is built around one setup (Chrome, Apple Music, Sonos, Grok), but the pieces stand apart: without one, the parts that need it say so and the rest carries on. To build on it with other services, these are the places to swap:
+
+| Part | Needs | Without it |
+|---|---|---|
+| The Deck: the set, soft changes, the stage, the minimap, saving sets, the recap | Chrome with the [add-on](docs/chrome-extension.md), and YouTube Music or Apple Music signed in (Beatport too, if you like) | nothing plays; the add-on is the only way in |
+| Apple Music on the laptop | an Apple Music subscription, signed in at music.apple.com | use YouTube Music; songs play in the same set |
+| Guests' requests | Apple Music (guests search Apple's public catalogue), `qrencode` for the QR code | no requests; without `qrencode` the link shows instead of a code |
+| Build a set, Fill, Auto-DJ, songs' energy | the [Grok](https://x.ai) CLI (`grok`, its fast model) | those say they need Grok; the set is yours to arrange by hand |
+| Tempo and key | the Beatport window open, else Grok searching the web | songs show without them, and shaping by tempo or key has less to go on |
+| Sonos rooms | Sonos speakers on the network, with Apple Music linked in the Sonos app; Send to Sonos also needs the Sonos MCP | the Deck plays on the laptop |
+| Dedications read aloud | `afterlight voice install` (Kokoro, offline, about 350 MB) | dedications show on the stage without a voice |
+| The Skyline equalizer | `cava` | a made-up pulse moves with the music instead |
+
+The swap points in `bin/afterlight.py`: `deck_play_laptop` (starting a song in its app), `deck_status` (where it is), `deck_app_volume` (fades), `am_lookup`/`am_songs` (the catalogue guests and Auto-DJ search), `grok_ideas` and `grok_json` (anything Grok answers), and `sonos_call` (rooms).
+
 ### The Deck
 
 The Deck has a workspace of its own, **7 · deck** (Super+7), where it fills the screen and is always there. *Open the Deck* in the Player tab, **Super+Alt+D** (or `omarchy-shell mortalfish.baseline deck`) pops it up over whatever you're doing instead; Escape, *Back to Deck*, or switching workspace sends it home. `omarchy-shell mortalfish.baseline deckView stage|requests|autodj|set` opens it on the stage, the Requests card, the Auto-DJ panel, or none of them. It's a set of songs you arrange by hand, from YouTube Music, Apple Music and Beatport together. Rather not keep it open: `afterlight set deck.home false`.
