@@ -227,15 +227,14 @@ Item {
       onStreamFinished: {
         try {
           const v = JSON.parse(text)
-          root.results = (Array.isArray(v) ? v : []).filter(i => ["song", "video", "album"].indexOf(i.kind) >= 0
-            && (root.service === "applemusic" || i.kind !== "album"))
+          root.results = (Array.isArray(v) ? v : []).filter(i => ["song", "video", "album", "playlist"].indexOf(i.kind) >= 0)
         } catch (error) { root.results = [] }
       }
     }
   }
   function find(words) {
     if (words.trim() === "" || finder.running) return
-    finder.command = [tool, service, "search", words.trim()]
+    finder.command = [tool, "deck", "search", service, words.trim()]
     finder.running = true
   }
 
@@ -539,20 +538,31 @@ Item {
                   anchors.fill: parent
                   anchors.margins: 5
                   spacing: 10
-                  Cover { url: hit.modelData.thumb || ""; size: 42; glyph: hit.modelData.kind === "album" ? "󰀥" : "󰎈" }
+                  Cover {
+                    url: hit.modelData.thumb || ""; size: 42
+                    glyph: hit.modelData.kind === "album" ? "󰀥" : hit.modelData.kind === "playlist" ? "󰲸" : "󰎈"
+                  }
                   ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 0
                     Label { Layout.fillWidth: true; text: hit.modelData.title; font.bold: true; font.pixelSize: Style.font.caption }
                     Label {
                       Layout.fillWidth: true
-                      text: (hit.modelData.kind === "album" ? strings.t("ytmusic.kind.album") + " · " : "") + (hit.modelData.subtitle || "")
+                      text: hit.modelData.mine ? "󰲸  " + strings.t("deck.yourPlaylist")
+                        : (hit.modelData.kind === "album" ? strings.t("ytmusic.kind.album") + " · "
+                           : hit.modelData.kind === "playlist" ? strings.t("deck.playlist") + " · " : "") + (hit.modelData.subtitle || "")
+                      font.family: "Iosevka Nerd Font Propo"
+                      color: hit.modelData.mine ? root.amber : root.ink
                       font.pixelSize: Style.font.caption
                       opacity: 0.6
                     }
                   }
                   RoundButton { glyph: "󰐊"; tip: strings.t("deck.playNow"); onClicked: root.run(["deck", "add", root.service, JSON.stringify(hit.modelData), "--play"]) }
-                  RoundButton { glyph: "󰐕"; tip: strings.t("deck.add"); onClicked: root.run(["deck", "add", root.service, JSON.stringify(hit.modelData)]) }
+                  RoundButton {
+                    glyph: hit.modelData.kind === "playlist" || hit.modelData.kind === "album" ? "󰐒" : "󰐕"
+                    tip: strings.t("deck.add")
+                    onClicked: root.run(["deck", "add", root.service, JSON.stringify(hit.modelData)])
+                  }
                 }
                 HoverHandler { id: hitHover; cursorShape: root.dragging ? Qt.ClosedHandCursor : Qt.OpenHandCursor }
                 DragHandler {

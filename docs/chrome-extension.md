@@ -10,7 +10,7 @@ A small add-on, **Baseline for Beatport**, lets Baseline work those pages. It ca
 - start them playing
 - list your Beatport playlists in the panel
 - add tracks to your likes (♥)
-- play Apple Music search results through Apple's own player in the page (MusicKit): a song within its album, an album, or an artist's top songs; and read what it's playing, where it is and how long it is (so the [Deck](../README.md#the-deck) knows when a song ends)
+- play Apple Music search results through Apple's own player in the page (MusicKit): a song within its album, an album, or an artist's top songs; and read what it's playing, where it is and how long it is (so the [Deck](../README.md#the-deck) knows when a song ends); find playlists (yours in your library, and Apple's) and read a playlist's songs, for the Deck. Reading only: it never changes your library
 - keep only one thing playing at a time
 
 None of this is required. Without the add-on, Baseline still opens these pages and the media keys still work. You just lose playing them in place and the playlist list.
@@ -51,7 +51,7 @@ Baseline panel / mouse ──► afterlight beatport … ──► socket ($XDG_
 | `manifest.json` | permissions: native messaging, tabs, scripting; only `beatport.com`, `youtube.com`, `music.youtube.com` |
 | `background.js` | connects to the native host and handles each request: `open`, `check`, `page`, `fetch`, `scratch`, `media`, `tabs`; passes playlists back |
 | `bridge.js` | runs inside the page: finds and clicks things (`click`, `steps`), browses YouTube Music (`ytm-browse`) |
-| `background.js` → `appleMusic()` | one fixed function run in the Apple Music page's own world (Apple's player lives there): `now`, `queue` (checked catalogue ids only), `play`, `pause`, `toggle`, `next`, `previous`, `seek` |
+| `background.js` → `appleMusic()` | one fixed function run in the Apple Music page's own world (Apple's player lives there): `now`, `queue` (checked catalogue ids only), `play`, `pause`, `toggle`, `next`, `previous`, `seek`, and, reading only, `playlists` (a search of your library playlists and Apple's) and `tracks` (a checked playlist id's songs) |
 | `autoplay.js` | presses a Beatport page's own Play button when Baseline opens it with `#baseline-play` |
 | `report.js` | reads your playlists from Beatport's sidebar |
 | `../native/beatport-host.py` | Chrome starts it; it saves playlists to `~/.local/state/afterlight/beatport.json` and relays requests from the socket |

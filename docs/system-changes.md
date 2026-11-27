@@ -106,6 +106,7 @@ Chrome's colour follows the look through Omarchy's own browser policy (`/etc/opt
 | the Deck: *Build a set* and *Fill* | Grok's fast model, as above, gets your brief (or the titles and artists already in the set) and the length; the songs it names are searched on YouTube Music or Apple Music |
 | the Deck, playing in a Sonos room | writes the set into that room's queue (replacing what was queued there) and plays it, over the local network; YouTube Music songs are searched on Apple Music first |
 | the Deck's rooms, while you can see it (on workspace 7 or popped up) | asks each Sonos speaker for its group, volume and whether it's playing, every 5 seconds, on the local network. Adding or taking out a room regroups the speakers (and may lower a joining room's volume); *Everywhere* never touches a room that's playing something else |
+| searching for playlists in the Deck | YouTube Music's own search (signed out) and, for a playlist's songs, its web API; your private ones are read through the open YouTube Music window. Apple Music playlists and their songs through Apple's player in the Apple Music window, as you (your library playlists are only read, never changed) |
 | searching Apple Music (Player tab, Deck, or "play … on Apple Music") | Apple's public catalogue search (`itunes.apple.com`), no account; the words searched and your region's storefront are sent |
 
 Nothing is sent anywhere else, and nothing personal goes into shared looks: commits use your GitHub no-reply address and an author handle you choose.

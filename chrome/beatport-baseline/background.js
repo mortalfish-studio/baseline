@@ -62,10 +62,12 @@ async function appleMusicTab() {
 // there: it reads what's playing, queues a catalog album, playlist or songs
 // by id, and plays, pauses, skips or seeks. Only checked ids and actions go in.
 const AM_ID = /^(\d{1,15}|pl\.[A-Za-z0-9.-]{1,80})$/;
+// A catalogue playlist (pl.…) or one of yours in your library (p.…).
+const AM_PLAYLIST = /^(pl\.[A-Za-z0-9.-]{1,80}|p\.[A-Za-z0-9]{1,40})$/;
 async function appleMusic(op, tab) {
   tab = tab || await appleMusicTab();
   if (!tab) return { ok: false, error: "no Apple Music tab" };
-  const actions = ["now", "queue", "play", "pause", "toggle", "next", "previous", "seek"];
+  const actions = ["now", "queue", "play", "pause", "toggle", "next", "previous", "seek", "playlists", "tracks"];
   if (!op || !actions.includes(op.action)) return { ok: false };
   const clean = { action: op.action };
   if (op.action === "queue") {
@@ -82,6 +84,14 @@ async function appleMusic(op, tab) {
       if (!AM_ID.test(String(op.start))) return { ok: false };
       clean.start = String(op.start);
     }
+  }
+  if (op.action === "playlists") {
+    clean.term = String(op.term || "").slice(0, 100);
+    if (!clean.term.trim()) return { ok: false };
+  }
+  if (op.action === "tracks") {
+    if (!AM_PLAYLIST.test(String(op.id))) return { ok: false };
+    clean.id = String(op.id);
   }
   if (op.action === "seek") {
     clean.seconds = Number(op.seconds);
@@ -106,6 +116,57 @@ async function appleMusic(op, tab) {
                              time: Math.floor(kit.currentPlaybackTime || 0),
                              duration: Math.floor(kit.currentPlaybackDuration || 0), item: now() });
       if (op.action === "now") return state();
+      // Reading only: playlists for a search (yours, then the catalogue's),
+      // and a playlist's songs as catalogue songs (what Sonos can play).
+      const art = (a) => (a && a.url ? String(a.url).replace("{w}", "300").replace("{h}", "300") : "");
+      const api = async (path, query) => ((await kit.api.music(path, query)) || {}).data || {};
+      const sf = kit.storefrontId || "us";
+      if (op.action === "playlists") {
+        const items = [];
+        const words = op.term.toLowerCase().split(/\s+/).filter(Boolean);
+        if (kit.isAuthorized) {
+          try {
+            let next = "/v1/me/library/playlists", pages = 0;
+            while (next && pages++ < 4) {
+              const page = await api(next, next.includes("?") ? {} : { limit: 100 });
+              for (const p of page.data || []) {
+                const name = String((p.attributes || {}).name || "");
+                if (words.every((w) => name.toLowerCase().includes(w)))
+                  items.push({ id: p.id, name, curator: "Your playlist", art: art((p.attributes || {}).artwork), library: true });
+              }
+              next = page.next || "";
+            }
+          } catch (error) { /* library not available */ }
+        }
+        try {
+          const found = await api(`/v1/catalog/${sf}/search`, { term: op.term, types: "playlists", limit: 12 });
+          for (const p of ((found.results || {}).playlists || {}).data || []) {
+            const a = p.attributes || {};
+            items.push({ id: p.id, name: a.name || "", curator: a.curatorName || "Apple Music", art: art(a.artwork), library: false });
+          }
+        } catch (error) { /* search failed */ }
+        return { ok: true, items: items.slice(0, 30) };
+      }
+      if (op.action === "tracks") {
+        const mine = op.id.startsWith("p.");
+        if (mine && !kit.isAuthorized) return { ok: false, error: "signed out" };
+        const items = [];
+        let next = mine ? `/v1/me/library/playlists/${op.id}/tracks` : `/v1/catalog/${sf}/playlists/${op.id}/tracks`;
+        let pages = 0;
+        try {
+          while (next && pages++ < 4 && items.length < 300) {
+            const page = await api(next, next.includes("?") ? {} : { limit: 100 });
+            for (const t of page.data || []) {
+              const a = t.attributes || {};
+              const id = mine ? String((a.playParams || {}).catalogId || "") : String(t.id || "");
+              if (/^\d{1,15}$/.test(id))
+                items.push({ id, title: a.name || "", artist: a.artistName || "", album: a.albumName || "", art: art(a.artwork) });
+            }
+            next = page.next || "";
+          }
+        } catch (error) { if (!items.length) return { ok: false, error: String(error) }; }
+        return { ok: true, items };
+      }
       if (op.action === "queue") {
         if (!kit.isAuthorized) return { ok: false, error: "signed out" };
         const what = op.kind === "songs" ? { songs: op.ids } : { [op.kind]: op.id };

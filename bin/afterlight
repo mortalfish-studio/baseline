@@ -3297,6 +3297,81 @@ def ytm_search(query):
     return items[:40]
 
 
+def ytm_rows(data):
+    rows, stack = [], [data]
+    while stack:
+        o = stack.pop(0)
+        if isinstance(o, dict):
+            if isinstance(o.get("musicResponsiveListItemRenderer"), dict):
+                rows.append(o["musicResponsiveListItemRenderer"])
+                continue
+            stack.extend(o.values())
+        elif isinstance(o, list):
+            stack.extend(o)
+    return rows
+
+
+def ytm_video_title(title, uploader):
+    """An uploaded video's 'Artist - Song (Official Video) (1999)' as song and
+    artist; anything else stays as it is, with the uploader as the artist."""
+    title = re.sub(r"\s*[\(\[][^)\]]*\b(official|video|audio|lyrics?|visuali[sz]er|hd|hq|remaster(ed)?|\d{4})\b[^)\]]*[\)\]]",
+                   "", title, flags=re.I).strip()
+    if " - " in title:
+        artist, song = (part.strip() for part in title.split(" - ", 1))
+        if artist and song:
+            return song, artist
+    return title, uploader
+
+
+def ytm_tracks(item, limit=200):
+    """The songs of a YouTube Music playlist or album, in order:
+    [{video, title, artist, album, thumb}]. Public ones are read signed out;
+    your own private ones through the open YouTube Music window."""
+    kind = item.get("kind")
+    if kind == "playlist" and YTM_ID.match(str(item.get("playlist", ""))):
+        browse = "VL" + item["playlist"]
+    elif kind == "album" and re.fullmatch(r"MPRE[\w-]{4,60}", str(item.get("browse", ""))):
+        browse = item["browse"]
+    else:
+        return []
+    by = str(item.get("subtitle", "")).split(" • ")[0] if kind == "album" else ""
+    tracks, seen = [], set()
+    def take(data):
+        for r in ytm_rows(data):
+            video = (r.get("playlistItemData") or {}).get("videoId") or ""
+            cols = r.get("flexColumns", [])
+            col = lambda n: _runs(cols[n]["musicResponsiveListItemFlexColumnRenderer"]["text"]) if len(cols) > n else ""
+            if not YTM_ID.match(video) or video in seen or not col(0):
+                continue
+            seen.add(video)
+            thumbs = _find(r.get("thumbnail") or {}, "thumbnails") or []
+            thumb = thumbs[-1]["url"] if thumbs and str(thumbs[-1].get("url", "")).startswith("https://") else item.get("thumb", "")
+            title, artist = col(0), col(1) or by
+            if kind == "playlist" and not col(2):
+                title, artist = ytm_video_title(title, artist)
+            tracks.append({"video": video, "title": title[:120], "artist": artist[:120],
+                           "album": (item["title"] if kind == "album" else col(2))[:120], "thumb": thumb})
+    try:
+        data = ytm_call("browse", {"browseId": browse})
+        take(data)
+        for _ in range(6):          # the next pages of a long playlist
+            token = (_find(data, "continuationCommand") or {}).get("token") or ""
+            if len(tracks) >= limit or not token:
+                break
+            data = ytm_call("browse", {"continuation": token})
+            take(data)
+    except (OSError, ValueError):
+        pass
+    if not tracks:                  # private: ask the signed-in window
+        reply = beatport_bridge({"type": "page", "site": "ytmusic", "op": {"type": "ytm-browse", "browseId": browse}},
+                                timeout=15) or {}
+        try:
+            take(json.loads(reply.get("text") or ""))
+        except ValueError:
+            pass
+    return tracks[:limit]
+
+
 def ytm_url(item):
     kind = item.get("kind")
     for key in ("video", "playlist", "browse"):
@@ -3545,6 +3620,40 @@ def am_bridge(op, timeout=8):
     return beatport_bridge({"type": "applemusic", "op": op}, timeout=timeout)
 
 
+AM_PLAYLIST = re.compile(r"^(pl\.[A-Za-z0-9.-]{1,80}|p\.[A-Za-z0-9]{1,40})$")
+
+
+def am_playlists(query):
+    """Apple Music playlists for a query: yours first (library), then Apple's
+    and curators' (catalogue). Through Apple's own player in the page, so the
+    Apple Music window has to be open and signed in."""
+    reply = am_bridge({"action": "playlists", "term": query[:100]}, timeout=12) or {}
+    out = []
+    for p in reply.get("items") or []:
+        if not isinstance(p, dict) or not AM_PLAYLIST.match(str(p.get("id", ""))):
+            continue
+        art = str(p.get("art", ""))
+        out.append({"kind": "playlist", "id": str(p["id"]), "title": clean_text(str(p.get("name", "")), 100),
+                    "subtitle": clean_text(str(p.get("curator", "")), 100), "mine": bool(p.get("library")),
+                    "thumb": art if art.startswith("https://") else ""})
+    return out[:20]
+
+
+def am_playlist_tracks(playlist_id):
+    """A playlist's songs, as catalogue songs (library songs not in the
+    catalogue are left out: Sonos and the Deck can't play them)."""
+    if not AM_PLAYLIST.match(str(playlist_id)):
+        return []
+    reply = am_bridge({"action": "tracks", "id": playlist_id}, timeout=25) or {}
+    out = []
+    for t in reply.get("items") or []:
+        if isinstance(t, dict) and re.fullmatch(r"\d{1,15}", str(t.get("id", ""))):
+            art = str(t.get("art", ""))
+            out.append({"id": str(t["id"]), "title": str(t.get("title", "")), "artist": str(t.get("artist", "")),
+                        "album_name": str(t.get("album", "")), "thumb": art if art.startswith("https://") else ""})
+    return out[:300]
+
+
 def am_now():
     """What the Apple Music app is playing, from its player: item, time,
     signed in. None when the app or add-on isn't there."""
@@ -3744,6 +3853,7 @@ DECK_RUN_LOCK = STATE.parent / "deck-run.lock"
 DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kind": "laptop"}, "playing": False,
               "pushed": [], "updated": 0}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
+SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
 DECK_SERVICES = {"applemusic", "ytmusic"}
 
 
@@ -3799,8 +3909,12 @@ def deck_expand(service, item):
         return [deck_item(service, {"id": t["trackId"], "title": t.get("trackName", ""), "artist": t.get("artistName", ""),
                                     "album_name": t.get("collectionName", ""), "thumb": am_art(t.get("artworkUrl100", ""))})
                 for t in tracks]
+    if service == "applemusic" and item.get("kind") == "playlist":
+        return [deck_item(service, t) for t in am_playlist_tracks(item.get("id", ""))]
+    if service == "ytmusic" and item.get("kind") in {"playlist", "album"}:
+        return [deck_item(service, {**t, "album_name": t["album"]}) for t in ytm_tracks(item)]
     if item.get("kind") not in {"song", "video"}:
-        sys.exit("Add songs (or an Apple Music album) to the Deck.")
+        sys.exit("Add songs, albums or playlists to the Deck.")
     return [deck_item(service, item)]
 
 
@@ -3859,7 +3973,7 @@ def deck_sonos_push(room, songs, sn, start_at=0):
     ip = room["ip"]
     sonos_call(ip, "AVTransport", "RemoveAllTracksFromQueue", {"InstanceID": 0}, timeout=5)
     pushed = []
-    for song in songs:
+    for song in songs[:SONOS_AHEAD + 1]:
         apple = deck_apple_id(song)
         if not apple:
             continue
@@ -3891,7 +4005,7 @@ def deck_sonos_resync(deck, room):
                                                                    "StartingIndex": current + 1,
                                                                    "NumberOfTracks": total - current}, timeout=5)
     pushed = [deck["now"]["uid"]] if deck.get("now") else []
-    for song in deck["set"]:
+    for song in deck["set"][:SONOS_AHEAD]:
         apple = deck_apple_id(song)
         if not apple or not sn:
             continue
@@ -4029,6 +4143,9 @@ def deck_tick(last):
                 d["played"] = (d["played"] + ordered[:at])[-40:]
                 d["now"], d["set"] = ordered[at], ordered[at + 1:]
             deck_update(advance)
+        # Near the end of what the room was given: give it the next songs.
+        if pushed and index >= len(pushed) - 3 and len(deck["set"]) > len(pushed) - 1 - max(index, 0):
+            deck_update(lambda d: deck_sonos_resync(d, room) if d["playing"] else None)
         return status
     if last is None or time.time() - (deck.get("expect") or {}).get("since", 0) < 6:
         return status       # give a song a moment to start
@@ -4065,6 +4182,40 @@ def deck_run():
             idle = idle + 1 if status is None else 0
             last = status
             time.sleep(1.5 if deck_where_room(deck_read()) is None else 2.5)
+
+
+def deck_search(service, query):
+    """What the Deck's search shows: your own playlists that match first,
+    then songs, albums and playlists from the service."""
+    query = query.strip()[:200]
+    if service == "applemusic":
+        try:
+            found = [i for i in am_search(query) if i["kind"] in {"song", "album"}]
+        except (OSError, ValueError):
+            found = []
+        lists = am_playlists(query)
+        mine = [p for p in lists if p["mine"]]
+        return mine + found[:16] + [p for p in lists if not p["mine"]][:8]
+    words = set(song_key(query).split())
+    mine = [{"kind": "playlist", "title": p["name"], "subtitle": "Your playlist", "playlist": p["playlist"],
+             "video": "", "browse": "VL" + p["playlist"], "thumb": "", "mine": True}
+            for p in ytm_playlists() if words and words <= set(song_key(p["name"]).split())]
+    # Plain searches rarely bring up playlists: ask for them as well, at once.
+    from concurrent.futures import ThreadPoolExecutor
+    def look(words):
+        try:
+            return ytm_search(words)
+        except (OSError, ValueError):
+            return []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        found, lists = pool.map(look, [query, query + " playlist"])
+    found = [i for i in found if i["kind"] in {"song", "video", "album", "playlist"}]
+    have = {i.get("playlist") for i in found if i["kind"] == "playlist"} | {m["playlist"] for m in mine}
+    said = words - set(FILLER)
+    extra = [i for i in lists if i["kind"] == "playlist" and i.get("playlist") not in have
+             and said & set(song_key(i["title"]).split())][:6]
+    found = [i for i in found if not (i["kind"] == "playlist" and i.get("playlist") in {m["playlist"] for m in mine})]
+    return mine + found[:16] + extra
 
 
 def deck_command(settings, args):
@@ -4158,6 +4309,8 @@ def deck_command(settings, args):
         deck_where(args[1])
     elif action == "rooms":
         print(json.dumps(deck_rooms()))
+    elif action == "search" and len(args) >= 3 and args[1] in DECK_SERVICES:
+        print(json.dumps(deck_search(args[1], " ".join(args[2:]))))
     elif action == "join" and len(args) == 2:
         deck_join(args[1])
     elif action == "leave" and len(args) == 2:
@@ -4178,7 +4331,7 @@ def deck_command(settings, args):
     else:
         sys.exit("Usage: afterlight deck [state|add <ytmusic|applemusic> <item json> [--next]|move <uid> <index>|"
                  "remove <uid>|pin <uid>|shuffle|clear|play [uid]|pause|next|where <laptop|room id>|rooms|join <room id>|"
-                 "leave <room id>|everywhere|volume <room id> <0-100>|fill|"
+                 "leave <room id>|everywhere|volume <room id> <0-100>|search <service> <words>|fill|"
                  "build <minutes> <what it's for> [--start <song>] [--replace]|run]")
 
 

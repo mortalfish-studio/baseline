@@ -714,6 +714,85 @@ class DeckRoomTests(TempCase):
         self.assertEqual(rooms["Kitchen"]["volume"], 60)
 
 
+class DeckPlaylistTests(TempCase):
+    """Playlists and albums in the Deck: found, read song by song, queued on
+    Sonos a few dozen at a time."""
+
+    def row(self, video, title, artist, album=""):
+        col = lambda text: {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": text}]}}}
+        return {"musicResponsiveListItemRenderer": {"playlistItemData": {"videoId": video},
+                                                    "flexColumns": [col(title), col(artist), col(album)]}}
+
+    def test_video_titles_become_song_and_artist(self):
+        self.assertEqual(al.ytm_video_title("Stardust - Music Sounds Better With You (Official Video)", "someone"),
+                         ("Music Sounds Better With You", "Stardust"))
+        self.assertEqual(al.ytm_video_title("The Buffalo Bunch - Take It To The Street (1999)", "x"),
+                         ("Take It To The Street", "The Buffalo Bunch"))
+        self.assertEqual(al.ytm_video_title("Lady (Hear Me Tonight)", "Modjo"), ("Lady (Hear Me Tonight)", "Modjo"))
+
+    def test_youtube_playlist_read_in_order_across_pages(self):
+        pages = {"VLPLabcdefghij": {"contents": [self.row("aaaaaaaaaaa", "Lady", "Modjo", "Lady"),
+                                                 self.row("bbbbbbbbbbb", "Cassius - 1999 (Official Video)", "uploader"),
+                                                 self.row("bad id!", "Nope", "x")],
+                                    "continuationCommand": {"token": "T1"}},
+                 "T1": {"contents": [self.row("ccccccccccc", "Flat Beat", "Mr. Oizo", "Analog Worms Attack"),
+                                     self.row("aaaaaaaaaaa", "Lady", "Modjo", "Lady")]}}
+        self.patch("ytm_call", lambda endpoint, body: pages[body.get("browseId") or body.get("continuation")])
+        tracks = al.ytm_tracks({"kind": "playlist", "playlist": "PLabcdefghij", "title": "Mix"})
+        self.assertEqual([(t["video"], t["title"], t["artist"]) for t in tracks],
+                         [("aaaaaaaaaaa", "Lady", "Modjo"), ("bbbbbbbbbbb", "1999", "Cassius"),
+                          ("ccccccccccc", "Flat Beat", "Mr. Oizo")])
+
+    def test_album_songs_take_the_albums_artist_and_cover(self):
+        self.patch("ytm_call", lambda endpoint, body: {"contents": [self.row("aaaaaaaaaaa", "One More Time", "")]})
+        [song] = al.deck_expand("ytmusic", {"kind": "album", "browse": "MPREb_7ltM34kr0mH", "title": "Discovery",
+                                            "subtitle": "Daft Punk • 2001", "thumb": "https://example.com/d.jpg"})
+        self.assertEqual((song["title"], song["artist"], song["album"], song["thumb"]),
+                         ("One More Time", "Daft Punk", "Discovery", "https://example.com/d.jpg"))
+
+    def test_apple_playlists_only_checked_ids_and_catalogue_songs(self):
+        replies = {"playlists": {"ok": True, "items": [{"id": "p.AbC123", "name": "Halloween", "library": True, "art": "https://a"},
+                                                       {"id": "pl.123abc", "name": "Essentials", "curator": "Apple"},
+                                                       {"id": "javascript:alert(1)", "name": "bad"}]},
+                   "tracks": {"ok": True, "items": [{"id": "1090981930", "title": "1999", "artist": "Cassius"},
+                                                    {"id": "i.libraryonly", "title": "Not in the catalogue"}]}}
+        self.patch("am_bridge", lambda op, timeout=8: replies[op["action"]])
+        found = al.am_playlists("halloween")
+        self.assertEqual([(p["id"], p["mine"]) for p in found], [("p.AbC123", True), ("pl.123abc", False)])
+        songs = al.deck_expand("applemusic", {"kind": "playlist", "id": "p.AbC123"})
+        self.assertEqual([(s["id"], s["title"]) for s in songs], [("1090981930", "1999")])
+        self.assertEqual(al.am_playlist_tracks("../../etc"), [])
+
+    def test_search_puts_your_playlists_first(self):
+        self.patch("ytm_playlists", lambda refresh=False: [{"name": "French House Classics", "playlist": "PLmineminemine"},
+                                                           {"name": "Gym", "playlist": "PLgymgymgymgym"}])
+        def search(words):
+            if words.endswith(" playlist"):
+                return [{"kind": "playlist", "title": "Best French House", "playlist": "PLotherother1"},
+                        {"kind": "playlist", "title": "PHONK TRENDING", "playlist": "PLphonkphonk1"}]
+            return [{"kind": "song", "title": "Lady", "video": "aaaaaaaaaaa"},
+                    {"kind": "artist", "title": "Modjo"},
+                    {"kind": "playlist", "title": "French House Classics", "playlist": "PLmineminemine"}]
+        self.patch("ytm_search", search)
+        found = al.deck_search("ytmusic", "french house")
+        self.assertEqual([(i["kind"], i["title"], bool(i.get("mine"))) for i in found],
+                         [("playlist", "French House Classics", True), ("song", "Lady", False),
+                          ("playlist", "Best French House", False)])
+
+    def test_sonos_gets_the_next_songs_not_the_whole_playlist(self):
+        added = []
+        def call(ip, service, action, args=None, timeout=2.5):
+            if action == "AddURIToQueue":
+                added.append(args["EnqueuedURI"])
+                return {"FirstTrackNumberEnqueued": str(len(added))}
+            return {}
+        self.patch("sonos_call", call)
+        songs = [{"uid": f"u{n}", "service": "applemusic", "id": str(100 + n)} for n in range(80)]
+        pushed = al.deck_sonos_push({"ip": "192.168.1.10", "id": "RINCON_000E58BC46FC01400"}, songs, "13")
+        self.assertEqual(len(pushed), al.SONOS_AHEAD + 1)
+        self.assertEqual(len(added), al.SONOS_AHEAD + 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 
