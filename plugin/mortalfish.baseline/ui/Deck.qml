@@ -694,6 +694,11 @@ Item {
   readonly property string alertText: deck.silent && !deck.playing ? strings.t("deck.silent").arg(deck.silent.why)
     : batteryLow ? strings.t("deck.batteryLow").arg(battery.level) : ""
   readonly property string alertGlyph: deck.silent && !deck.playing ? "󰝛" : "󰂃"
+  // The set ran out: the song that played last (for the stage's goodbye).
+  readonly property var lastPlayed: (deck.played || []).length ? deck.played[deck.played.length - 1] : null
+  readonly property bool setDone: !now && (deck.set || []).length === 0 && !!lastPlayed
+  // Two songs or fewer left and nobody topping it up.
+  readonly property bool runningLow: !!now && !deck.autodj && (deck.set || []).length <= 2 && !djBusy
   // Seconds left in the playing song (for the stage's countdown).
   readonly property real songLeft: (pos.length || 0) > 0 ? Math.max(0, pos.length - shownTime) : -1
   property bool readyAsked: false
@@ -2102,6 +2107,26 @@ Item {
                     }
                   }
                   Rectangle {
+                    visible: root.runningLow
+                    width: parent.width - 16
+                    height: 46
+                    radius: Style.cornerRadius > 0 ? 6 : 0
+                    color: Util.alpha(root.amber, 0.05)
+                    border.width: 1
+                    border.color: Util.alpha(root.amber, 0.3)
+                    Row {
+                      anchors.centerIn: parent
+                      spacing: 14
+                      Label {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: strings.tn("deck.runningLow", (root.deck.set || []).length).arg((root.deck.set || []).length)
+                        font.pixelSize: Style.font.caption; color: root.amber
+                      }
+                      HeadLink { anchors.verticalCenter: parent.verticalCenter; glyph: "✦"; text: strings.t("deck.fill"); on: true; onTapped: root.run(["deck", "fill"]) }
+                      HeadLink { anchors.verticalCenter: parent.verticalCenter; glyph: "∞"; text: strings.t("deck.autodjTurnOn"); on: true; onTapped: root.run(["deck", "autodj", "on"]) }
+                    }
+                  }
+                  Rectangle {
                     visible: !!root.deck.autodj
                     width: parent.width - 16
                     height: 52
@@ -3067,7 +3092,10 @@ Item {
               shadowScale: 1.02 + stageView.bass * 0.03
               autoPaddingEnabled: true
             }
-            CrossCover { anchors.fill: parent; size: stageView.big; radius: stageCoverShadow.radius; url: root.now ? root.now.thumb || "" : ""; live: stageView.visible }
+            CrossCover { anchors.fill: parent; size: stageView.big; radius: stageCoverShadow.radius; live: stageView.visible
+                         url: root.now ? root.now.thumb || "" : root.setDone ? root.lastPlayed.thumb || "" : ""
+                         opacity: root.now ? 1 : 0.55
+                         Behavior on opacity { NumberAnimation { duration: Style.duration(400); easing.type: Easing.OutCubic } } }
           }
           // A guest's request playing: their face, big, on the cover's corner,
           // glowing a little and moving with the music.
@@ -3158,7 +3186,32 @@ Item {
                 NumberAnimation { target: stageWords; property: "anchors.leftMargin"; from: 96; to: 56; duration: Style.duration(260); easing.type: Easing.OutCubic }
               }
             }
-            Label { text: (root.deck.playing ? strings.t("deck.nowPlaying") : strings.t("deck.paused")).toUpperCase(); font.pixelSize: Style.font.subtitle; font.letterSpacing: 6; color: root.teal }
+            Label { text: (root.setDone ? strings.t("deck.setDoneTag") : root.deck.playing ? strings.t("deck.nowPlaying") : strings.t("deck.paused")).toUpperCase(); font.pixelSize: Style.font.subtitle; font.letterSpacing: 6; color: root.teal }
+            // The set ran out: say so, what played last, and how to carry on.
+            ColumnLayout {
+              visible: root.setDone
+              spacing: 12
+              Label {
+                text: strings.t("deck.setDone")
+                font.pixelSize: Math.max(34, Math.min(76, stageView.width / 20)); font.bold: true; color: root.amber
+              }
+              Label {
+                Layout.maximumWidth: stageView.width * 0.45
+                textFormat: Text.PlainText
+                text: root.lastPlayed ? strings.t("deck.setDoneLast").arg(root.lastPlayed.title).arg(root.lastPlayed.artist) : ""
+                font.pixelSize: Math.max(18, Math.min(28, stageView.width / 50)); opacity: 0.75
+                elide: Text.ElideRight
+              }
+              RowLayout {
+                Layout.topMargin: 14
+                spacing: 12
+                // Each finds songs from tonight (about a minute), then plays on.
+                ActionButton { icon: "✦"; text: root.djBusy ? strings.t("deck.autodjWorking") : strings.t("deck.fill")
+                               onClicked: if (!root.djBusy) { root.run(["deck", "fill"]); root.run(["deck", "play"]) } }
+                ActionButton { icon: "∞"; text: strings.t("deck.autodj"); tone: root.deck.autodj ? root.amber : root.teal
+                               onClicked: if (!root.djBusy) { root.run(["deck", "autodj", "on"]); root.run(["deck", "fill", "--auto"]); root.run(["deck", "play"]) } }
+              }
+            }
             // A guest's request playing: a shout-out, with their face.
             RowLayout {
               visible: !!root.now && (root.now.by || "") !== ""
@@ -3216,8 +3269,9 @@ Item {
               font.pixelSize: Math.max(22, Math.min(40, stageView.width / 36))
               elide: Text.ElideRight
             }
-            Item { implicitHeight: 14 }
+            Item { implicitHeight: 14; visible: !!root.now }
             Rectangle {
+              visible: !!root.now
               Layout.fillWidth: true
               height: 4; radius: 2
               color: Util.alpha(root.ink, 0.12)
@@ -3228,6 +3282,7 @@ Item {
               }
             }
             RowLayout {
+              visible: !!root.now
               Layout.fillWidth: true
               Label { text: root.clock(root.shownTime); font.pixelSize: Style.font.subtitle; opacity: 0.6 }
               Item { Layout.fillWidth: true }

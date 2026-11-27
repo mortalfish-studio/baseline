@@ -50,6 +50,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 HOME = Path.home()
@@ -3544,6 +3545,35 @@ AM_SAID = re.compile(r"\b(?:on|from|in|with|using)\s+(?:apple music|apple|i ?tun
 AM_STOREFRONT = STATE.parent / "applemusic-storefront"
 
 
+AM_CLASS = "chrome-music.apple.com__-Default"
+
+
+def am_open_quietly(wait=25):
+    """Open the Apple Music window on its own workspace without taking you
+    there: whatever you were looking at stays in front."""
+    def active():
+        try:
+            return json.loads(quiet_out("hyprctl", "activeworkspace", "-j") or "{}").get("id")
+        except ValueError:
+            return None
+    def there():
+        try:
+            return any(c.get("class") == AM_CLASS for c in json.loads(quiet_out("hyprctl", "clients", "-j") or "[]"))
+        except ValueError:
+            return False
+    if there():
+        return True
+    before = active()
+    subprocess.Popen(["omarchy-launch-webapp", AM + "/"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+    give_up = time.time() + wait
+    while time.time() < give_up and not there():
+        time.sleep(0.3)
+    if before is not None and active() != before:
+        quiet_out("hyprctl", "dispatch", f'hl.dsp.focus({{ workspace = "{int(before)}" }})')
+    return there()
+
+
 def am_country():
     """The catalogue to search: your Apple Music account's own storefront (the
     player says which; a song from another country's catalogue may not play),
@@ -4212,8 +4242,7 @@ def deck_play_laptop(song, start_at=0):
             if refused >= 3:
                 break
             if attempt == 0 and (not reply or reply.get("error") == "no Apple Music tab"):
-                subprocess.Popen(["omarchy-launch-webapp", AM + "/"], stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, start_new_session=True)
+                threading.Thread(target=am_open_quietly, daemon=True).start()
                 give_up = time.time() + 40          # the window has to open first
             time.sleep(0.5)
         if not (reply and reply.get("ok")) and refused:
@@ -4766,7 +4795,8 @@ def deck_with_details(deck):
     details = deck_details_read()
     def fill(song):
         d = details.get(deck_song_key(song), {})
-        return {**song, **{k: d[k] for k in ("length", "bpm", "key", "energy") if d.get(k)}}
+        return {**song, **{k: d[k] for k in ("length", "bpm", "key", "energy") if d.get(k)},
+                **({"thumb": d["art"]} if not song.get("thumb") and d.get("art") else {})}
     deck["now"] = fill(deck["now"]) if deck.get("now") else None
     deck["set"] = [fill(s) for s in deck["set"]]
     deck["played"] = [fill(s) for s in deck["played"]]
@@ -4793,7 +4823,8 @@ def deck_details_wanted(deck, details=None):
         key = deck_song_key(song)
         d = details.get(key, {})
         unknown = not all(f in d for f in ("length", "bpm", "energy")) \
-            or (not d.get("bpm") and not d.get("web") and song.get("service") != "beatport")   # Grok on the web next
+            or (not d.get("bpm") and not d.get("web") and song.get("service") != "beatport") \
+            or (not song.get("thumb") and "art" not in d)                                      # no cover: Apple's
         if key and key not in seen and time.time() - d.get("looked", 0) > 3600 and unknown:
             seen.add(key)
             songs.append(song)
@@ -4850,6 +4881,14 @@ def deck_details_fill():
             for song, length in pool.map(yt_length, [s for s in wanting("length") if s["service"] == "ytmusic"][:60]):
                 if length is not None:
                     deck_details_note(song, length=length)
+        # Covers: a song that came without one gets Apple's, by title and artist.
+        for song in [s for s in songs if not s.get("thumb")][:30]:
+            try:
+                found = am_songs(f"{re.sub(r'[(\[][^)\]]*[)\]]', '', song['title']).strip()} {song.get('artist', '')}", limit=5)
+            except (OSError, ValueError):
+                continue
+            match = next((i for i in found if song_key(i["title"]) == song_key(song["title"])), found[0] if found else None)
+            deck_details_note(song, art=(match or {}).get("thumb", ""))
         # Energy: Grok, every song in one question.
         need = wanting("energy")[:80]
         if need:
@@ -6384,6 +6423,30 @@ def deck_soft_resume(deck, resume):
         deck_fade_mark(None)
 
 
+DECK_WARM = STATE.parent / "deck-warm"
+DECK_WARM_EVERY = 600         # seconds between tries
+
+
+def deck_warm_soon(deck):
+    """The Deck is open with Apple Music songs to come and nothing playing:
+    have the Apple Music window ready in the background, so the first song
+    starts at once (at most every ten minutes; never over a Sonos room)."""
+    if deck.get("playing") or deck_where_room(deck):
+        return
+    coming = ([deck["now"]] if deck.get("now") else []) + deck["set"][:1]
+    if not any(s.get("service") == "applemusic" for s in coming):
+        return
+    try:
+        if time.time() - DECK_WARM.stat().st_mtime < DECK_WARM_EVERY:
+            return
+    except OSError:
+        pass
+    DECK_WARM.parent.mkdir(parents=True, exist_ok=True)
+    DECK_WARM.touch()
+    subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "warm"], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
 DECK_FADE = STATE.parent / "deck-fade.json"
 DECK_FADE_STALE = 20         # seconds: no fade runs longer, so one older was cut off
 
@@ -6548,6 +6611,7 @@ def deck_command(settings, args):
         else:
             deck["laptopOut"] = deck_laptop_out()
         deck["battery"] = deck_battery()
+        deck_warm_soon(deck)
         deck["voiceReady"] = voice_ready()
         deck["voiceName"] = deck_voice_name(deck)
         if deck.get("recapAt") and time.time() - deck["recapAt"] < RECAP_MINUTES * 60:
@@ -6814,6 +6878,11 @@ def deck_command(settings, args):
                 gone = {k: deck["now"].get(k, "") for k in ("title", "artist")}
                 deck_update(lambda d: d.update(skipped=((d.get("skipped") or []) + [gone])[-20:]))
         deck_soft_next(deck)
+    elif action == "warm":
+        # The Apple Music window, open and ready in the background.
+        reply = am_bridge({"action": "now"}, timeout=4)
+        if not reply or reply.get("error") == "no Apple Music tab":
+            am_open_quietly()
     elif action == "soft-skip" and len(args) == 2 and args[1] in {"on", "off"}:
         deck_update(lambda d: d.update(softSkip=args[1] == "on"))
     elif action == "previous":

@@ -2010,6 +2010,42 @@ class PartySafetyTest(unittest.TestCase):
         self.assertEqual(state["batteryWarned"], 10)
 
 
+class PolishTest(unittest.TestCase):
+    def test_apple_music_opens_without_taking_you_there(self):
+        clients = {"n": 0}
+        def out(*argv, timeout=4):
+            if argv[1] == "activeworkspace":
+                return json.dumps({"id": 6 if clients["n"] > 1 else 7})
+            if argv[1] == "clients":
+                clients["n"] += 1
+                return json.dumps([{"class": al.AM_CLASS}] if clients["n"] > 1 else [])
+            return ""
+        with mock.patch.object(al, "quiet_out", side_effect=out) as q, mock.patch.object(al.subprocess, "Popen"), \
+             mock.patch.object(al.time, "sleep"):
+            self.assertTrue(al.am_open_quietly())
+        self.assertIn(("hyprctl", "dispatch", 'hl.dsp.focus({ workspace = "7" })'), [c.args for c in q.call_args_list])
+
+    def test_warm_only_with_apple_music_to_come_and_nothing_playing(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        am = {"service": "applemusic"}
+        with mock.patch.object(al, "DECK_WARM", Path(tmp.name) / "warm"), \
+             mock.patch.object(al, "deck_where_room", return_value=None), mock.patch.object(al.subprocess, "Popen") as run:
+            al.deck_warm_soon({"playing": True, "now": am, "set": []})
+            al.deck_warm_soon({"playing": False, "now": None, "set": [{"service": "ytmusic"}]})
+            self.assertFalse(run.called)
+            al.deck_warm_soon({"playing": False, "now": None, "set": [am]})
+            al.deck_warm_soon({"playing": False, "now": None, "set": [am]})      # not again so soon
+        self.assertEqual(run.call_count, 1)
+
+    def test_a_song_without_a_cover_shows_apples(self):
+        song = {"uid": "a", "title": "T", "artist": "A", "service": "ytmusic", "video": "v", "thumb": ""}
+        key = al.deck_song_key(song)
+        with mock.patch.object(al, "deck_details_read", return_value={key: {"art": "https://x/art.jpg"}}):
+            deck = al.deck_with_details({"now": song, "set": [], "played": []})
+        self.assertEqual(deck["now"]["thumb"], "https://x/art.jpg")
+
+
 class AutoDJTowardTest(unittest.TestCase):
     def test_ask_bridges_to_the_destination_then_stays(self):
         deck = {"played": [], "now": {"uid": "n", "title": "Now", "artist": "B"}, "set": [], "votes": {}, "skipped": [],
