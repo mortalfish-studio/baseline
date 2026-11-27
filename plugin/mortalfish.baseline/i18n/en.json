@@ -574,5 +574,17 @@
   "deck.nextIn": "Next in %1 s",
   "deck.skipIt": "Skip it",
   "deck.yourSets": "Your sets",
-  "deck.yourPlaylists": "Your playlists"
+  "deck.yourPlaylists": "Your playlists",
+  "deck.shape": "Shape",
+  "deck.shapeHint": "Shape the set (pinned songs stay):",
+  "deck.shapeArc": "Party arc",
+  "deck.shapeHarmonic": "Harmonic mix",
+  "deck.shapeSmooth": "Smooth tempo",
+  "deck.shapeTempo": "Tempo, slow to fast",
+  "deck.shapeEnergy": "Energy, calm to peak",
+  "deck.from": "from %1",
+  "deck.saveNext": "What's to come",
+  "deck.savePlayed": "What's played",
+  "deck.saveAll": "The whole night",
+  "deck.savePlayedShort": "Save what's played"
 }

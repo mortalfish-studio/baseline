@@ -581,7 +581,9 @@ class DeckTests(TempCase):
         with self.assertRaises(SystemExit):
             self.deck("add", "applemusic", json.dumps({**self.apple(5), "id": "1; rm -rf ~"}))
         with self.assertRaises(SystemExit):
-            self.deck("add", "beatport", json.dumps(self.apple(5)))
+            self.deck("add", "spotify", json.dumps(self.apple(5)))
+        with self.assertRaises(SystemExit):
+            self.deck("add", "beatport", json.dumps({**self.apple(5), "id": "../x"}))
         bad_art = self.deck("add", "applemusic", json.dumps({**self.apple(6), "thumb": "file:///etc/passwd"}))
         self.assertEqual(bad_art["set"][-1]["thumb"], "")
 
@@ -750,6 +752,75 @@ class DeckTests(TempCase):
         self.assertTrue(al.deck_sleep_due(d))
         al.deck_sleep(d, "off")
         self.assertIsNone(d["sleep"])
+
+    def test_beatport_tracks_join_the_set_with_their_details(self):
+        track = {"track_id": 22988389, "track_name": "Pump Up The Jam", "mix_name": "Original Mix", "bpm": 126,
+                 "key_name": "C Minor", "length": 278095, "artists": [{"artist_name": "Technotronic"}],
+                 "label": {"label_name": "ARS"}, "release": {"release_image_dynamic_uri": "https://geo-media.beatport.com/image_size/{w}x{h}/a.jpg"}}
+        item = al.beatport_item(track)
+        self.assertEqual((item["title"], item["subtitle"], item["key"], item["length"]),
+                         ("Pump Up The Jam (Original Mix)", "Technotronic • ARS", "5A", 278))
+        self.assertEqual(item["thumb"], "https://geo-media.beatport.com/image_size/300x300/a.jpg")
+        d = self.deck("add", "beatport", json.dumps(item))
+        song = d["set"][0]
+        self.assertEqual(al.beatport_track_url(song), "https://www.beatport.com/track/pump-up-the-jam/22988389")
+        self.assertEqual(al.deck_with_details(d)["set"][0]["bpm"], 126)
+        self.assertEqual(al.deck_song_key(song), "bp:22988389")
+
+    def test_switching_apps_pauses_the_one_before(self):
+        quieted, played = [], []
+        self.patch("deck_where_room", lambda d: None)
+        self.patch("deck_watch", lambda: None)
+        self.patch("deck_quiet", lambda song: quieted.append(song["uid"]))
+        self.patch("deck_play_laptop", lambda song, start_at=0: played.append(song["uid"]))
+        yt = {"uid": "y", "service": "ytmusic", "video": "abcdefghijk", "title": "Y"}
+        bp = {"uid": "b", "service": "beatport", "id": "1", "title": "B"}
+        am = {"uid": "a", "service": "applemusic", "id": "2", "title": "A"}
+        deck = {**al.DECK_EMPTY, "now": yt, "set": [bp, am], "playing": True}
+        al.deck_start(deck)
+        al.deck_start(deck)
+        self.assertEqual((played, quieted), (["b", "a"], ["y", "b"]))
+        deck["playing"] = False                       # paused: nothing to quiet
+        deck["set"] = [{**am, "uid": "a2"}, yt]
+        al.deck_start(deck, yt)
+        self.assertEqual(quieted, ["y", "b"])
+
+    def test_shaping_the_set_by_its_details(self):
+        for n in range(6):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        d = al.deck_read()
+        uids = [s["uid"] for s in d["set"]]
+        for song, (bpm, energy, key) in zip(d["set"], [(128, 8, "8A"), (100, 2, "3B"), (124, 9, "9A"), (110, 4, "3A"), (0, 0, ""), (120, 6, "8B")]):
+            if bpm:
+                al.deck_details_note(song, bpm=bpm, energy=energy, key=key)
+        titles = lambda d: [s["title"] for s in d["set"]]
+        self.assertEqual(titles(self.deck("shape", "tempo")), ["Song 1", "Song 3", "Song 5", "Song 2", "Song 0", "Song 4"])
+        self.assertEqual(titles(self.deck("shape", "energy")), ["Song 1", "Song 3", "Song 5", "Song 0", "Song 2", "Song 4"])
+        arc = titles(self.deck("shape", "arc"))
+        self.assertEqual(arc[-1], "Song 4")                              # no energy known: last
+        self.assertEqual(arc.index("Song 2"), 3)                         # the peak, two thirds in
+        self.deck("move", uids[0], "0")
+        self.deck("pin", uids[0])                                        # Song 0 (8A), first and pinned
+        d = self.deck("shape", "harmonic")
+        self.assertEqual(d["set"][0]["uid"], uids[0])                    # pinned stays put
+        self.assertEqual(titles(d)[1:3], ["Song 2", "Song 5"])           # then 9A, 8B: neighbours on the wheel
+        self.assertEqual(len(self.deck("undo")["set"]), 6)
+
+    def test_songs_remember_where_they_came_from(self):
+        self.patch("am_playlist_tracks", lambda pid: [{"id": "1100", "title": "A", "artist": "X"}, {"id": "1101", "title": "B", "artist": "Y"}])
+        self.deck("add", "applemusic", json.dumps({"kind": "playlist", "id": "pl.u-abc", "title": "Friday Disco"}))
+        self.deck("add", "beatport", json.dumps({"kind": "song", "id": "22988389", "title": "Pump Up The Jam", "subtitle": "Technotronic"}))
+        d = al.deck_read()
+        self.assertEqual([s.get("from", "") for s in d["set"]], ["Friday Disco", "Friday Disco", ""])
+        al.deck_update(lambda d: d.update(played=[{"uid": "p1", "service": "ytmusic", "video": "abcdefghijk", "title": "Earlier", "from": "Warm-up"}]))
+        al.deck_command({}, ["save", "Tonight", "--played"])
+        al.deck_command({}, ["save", "Whole", "night", "--all"])
+        self.assertEqual({s["name"]: s["count"] for s in al.deck_set_list()}, {"Whole night": 4, "Tonight": 1})
+        al.deck_command({}, ["forget", "whole night"])
+        al.deck_command({}, ["forget", "tonight"])
+        al.deck_command({}, ["save", "Mixed"])
+        [saved] = al.deck_set_list()
+        self.assertEqual((saved["services"], saved["from"]), (["Apple Music 2", "Beatport 1"], ["Friday Disco", "search"]))
 
     def test_sonos_queue_entry_for_an_apple_song(self):
         uri, meta = al.sonos_apple_uri("1440833098", "13")

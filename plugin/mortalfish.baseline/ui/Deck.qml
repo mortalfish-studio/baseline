@@ -184,6 +184,7 @@ Item {
     return { uid: song.uid, title: song.title || "", artist: song.artist || "", thumb: song.thumb || "",
              service: song.service || "", why: song.why || "", chapter: song.chapter || "",
              bpm: song.bpm || 0, key: song.key || "", energy: song.energy || 0, length: song.length || 0,
+             from: song.from || "",
              warn: (song.warn || []).join(",") }
   }
   function sameRow(a, b) {
@@ -238,6 +239,7 @@ Item {
     ? host.afterState.settings.music.service || "ytmusic" : "ytmusic"
   property string pickedService: ""
   readonly property string service: pickedService !== "" ? pickedService : savedService
+  function serviceName(id) { return id === "applemusic" ? "Apple Music" : id === "beatport" ? "Beatport" : "YouTube Music" }
   property var results: []
   property bool searching: finder.running
   Process {
@@ -544,6 +546,14 @@ Item {
   // A cover wall instead of the list.
   property bool wall: false
   property bool filterOpen: false
+  property bool shapeOpen: false
+  readonly property var shapes: [
+    { key: "arc", glyph: "󱗿", label: strings.t("deck.shapeArc") },
+    { key: "harmonic", glyph: "󰽰", label: strings.t("deck.shapeHarmonic") },
+    { key: "smooth", glyph: "󰾆", label: strings.t("deck.shapeSmooth") },
+    { key: "tempo", glyph: "󰓅", label: strings.t("deck.shapeTempo") },
+    { key: "energy", glyph: "󱐋", label: strings.t("deck.shapeEnergy") }
+  ]
   property bool playedOpen: false
 
   // Saved sets, and your own playlists, for the crate before you search.
@@ -566,6 +576,15 @@ Item {
   onServiceChanged: if (seen) readShelf()
   onSeenChanged: if (seen) readShelf()
   property bool saving: false
+  property string savePart: "next"          // what's to come, what's played, or the whole night
+  function saveAs(name) {
+    if (name.trim() === "") return
+    run(["deck", "save", name.trim()].concat(savePart === "next" ? [] : ["--" + savePart]))
+    saving = false
+    savePart = "next"
+    shelfAgain.start()
+  }
+  Timer { id: shelfAgain; interval: 800; onTriggered: root.readShelf() }
 
   // Sleep: off, 15, 30, 60 minutes, the end of this song.
   readonly property var sleep: deck.sleep || null
@@ -821,7 +840,7 @@ Item {
                     text: strings.t("deck.buildGo")
                     enabled: brief.text.trim() !== ""
                     onClicked: {
-                      const args = ["deck", "build", String(build.minutes), brief.text.trim()]
+                      const args = ["deck", "build", String(build.minutes), brief.text.trim(), "--service", root.service]
                       if (root.now) args.push("--start", root.now.title + " by " + root.now.artist)
                       if ((root.deck.set || []).length === 0) args.push("--replace")
                       root.runLong(args)
@@ -843,7 +862,8 @@ Item {
               Layout.fillWidth: true
               spacing: 6
               Repeater {
-                model: [{ id: "ytmusic", name: "YouTube Music", icon: "󰗃" }, { id: "applemusic", name: "Apple Music", icon: "󰀵" }]
+                model: [{ id: "ytmusic", name: "YouTube Music", icon: "󰗃" }, { id: "applemusic", name: "Apple Music", icon: "󰀵" },
+                        { id: "beatport", name: "Beatport", icon: "󰋋" }]
                 delegate: Rectangle {
                   required property var modelData
                   readonly property bool on: root.service === modelData.id
@@ -930,7 +950,7 @@ Item {
                     id: saved
                     required property var modelData
                     width: found.width
-                    height: 52
+                    height: 66
                     radius: Style.cornerRadius > 0 ? 4 : 0
                     color: savedHover.hovered ? Util.alpha(root.ink, 0.05) : "transparent"
                     RowLayout {
@@ -954,8 +974,18 @@ Item {
                           Layout.fillWidth: true
                           text: strings.tn("deck.count", saved.modelData.count).arg(saved.modelData.count)
                                 + (saved.modelData.minutes > 0 ? "  ·  " + root.span(saved.modelData.minutes * 60) : "")
+                                + "  ·  " + new Date(saved.modelData.saved * 1000).toLocaleDateString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat)
                           font.pixelSize: Style.font.caption
                           opacity: 0.6
+                        }
+                        // Where it came from: its services, and the playlists, albums or brief behind it.
+                        Label {
+                          Layout.fillWidth: true
+                          text: (saved.modelData.services || []).join(" · ")
+                                + ((saved.modelData.from || []).length ? "  ·  " + strings.t("deck.from").arg((saved.modelData.from || []).join(", ")) : "")
+                          font.pixelSize: Style.font.caption
+                          color: root.teal
+                          opacity: 0.8
                         }
                       }
                       RoundButton { visible: savedHover.hovered; glyph: "󰆴"; onClicked: { root.run(["deck", "forget", saved.modelData.name]); forgetDone.start() } }
@@ -1127,7 +1157,7 @@ Item {
                       Layout.fillWidth: true
                       text: root.now ? (root.whereId === "laptop" ? "󰓃  " + strings.t("hover.playingOn").arg(root.whereName)
                                                                 : "󰜟  " + strings.t("hover.playingIn").arg(root.whereName))
-                                        + " · " + (root.now.service === "applemusic" ? "Apple Music" : "YouTube Music") : ""
+                                        + " · " + root.serviceName(root.now.service) : ""
                       font.family: "Iosevka Nerd Font Propo"
                       font.pixelSize: Style.font.caption
                       color: root.teal
@@ -1195,7 +1225,14 @@ Item {
                   }
                   ActionButton { icon: "󰒭"; text: strings.t("deck.next"); tone: root.teal; enabled: (root.deck.set || []).length > 0; onClicked: root.run(["deck", "next"]) }
                   ActionButton { icon: "󰒝"; text: strings.t("deck.shuffle"); tone: root.teal; enabled: (root.deck.set || []).length > 1; onClicked: root.run(["deck", "shuffle"]) }
-                  ActionButton { icon: "✦"; text: strings.t("deck.fill"); onClicked: root.runLong(["deck", "fill"]) }
+                  ActionButton { icon: "✦"; text: strings.t("deck.fill"); onClicked: root.runLong(["deck", "fill", "--service", root.service]) }
+                  ActionButton {
+                    icon: "󰘶"
+                    text: strings.t("deck.shape")
+                    tone: root.shapeOpen ? root.amber : root.teal
+                    enabled: (root.deck.set || []).length > 2
+                    onClicked: { root.shapeOpen = !root.shapeOpen; root.saving = false; root.filterOpen = false }
+                  }
                   // Sleep: off, 15, 30, 60 minutes, the end of this song.
                   ActionButton {
                     icon: "󰒲"
@@ -1266,6 +1303,34 @@ Item {
                 glyph: "󰆴"; text: strings.t("deck.clear"); onTapped: root.run(["deck", "clear"])
               }
             }
+            // Shape the set: reorder it by tempo, key and energy (pinned songs stay).
+            Flow {
+              Layout.fillWidth: true
+              visible: root.shapeOpen
+              spacing: 8
+              Label { text: strings.t("deck.shapeHint"); font.pixelSize: Style.font.caption; opacity: 0.6; height: 30; verticalAlignment: Text.AlignVCenter }
+              Repeater {
+                model: root.shapes
+                delegate: Rectangle {
+                  required property var modelData
+                  implicitWidth: chipRow.implicitWidth + 18
+                  implicitHeight: 30
+                  radius: 15
+                  color: chipHover.hovered ? Util.alpha(root.amber, 0.18) : Util.alpha(root.amber, 0.06)
+                  border.width: 1
+                  border.color: Util.alpha(root.amber, chipHover.hovered ? 0.9 : 0.45)
+                  Row {
+                    id: chipRow
+                    anchors.centerIn: parent
+                    spacing: 6
+                    Label { text: modelData.glyph; font.family: "Iosevka Nerd Font Propo"; color: root.amber }
+                    Label { text: modelData.label; font.pixelSize: Style.font.caption; color: root.ink }
+                  }
+                  HoverHandler { id: chipHover; cursorShape: Qt.PointingHandCursor }
+                  TapHandler { onTapped: { root.run(["deck", "shape", modelData.key]); root.shapeOpen = false } }
+                }
+              }
+            }
             // Naming a set to save, or finding a song in this one.
             Rectangle {
               Layout.fillWidth: true
@@ -1293,7 +1358,7 @@ Item {
                   }
                   onTextChanged: if (root.filterOpen && !root.saving) root.filter = text
                   onAccepted: {
-                    if (root.saving && text.trim() !== "") { root.run(["deck", "save", text.trim()]); root.saving = false; saveDone.start() }
+                    if (root.saving && text.trim() !== "") root.saveAs(text)
                     else stage.forceActiveFocus()
                   }
                   Keys.onEscapePressed: { root.saving = false; root.filterOpen = false; root.filter = ""; stage.forceActiveFocus() }
@@ -1303,14 +1368,25 @@ Item {
                     opacity: 0.4
                   }
                 }
+                // What to save: what's to come, what's played, the whole night.
+                Repeater {
+                  model: root.saving ? [{ key: "next", label: strings.t("deck.saveNext") }, { key: "played", label: strings.t("deck.savePlayed") },
+                                        { key: "all", label: strings.t("deck.saveAll") }] : []
+                  delegate: HeadLink {
+                    required property var modelData
+                    glyph: root.savePart === modelData.key ? "󰄵" : "󰄱"
+                    text: modelData.label
+                    on: root.savePart === modelData.key
+                    onTapped: root.savePart = modelData.key
+                  }
+                }
                 ActionButton {
                   visible: root.saving
                   icon: "󰆓"; text: strings.t("deck.save")
-                  onClicked: if (lineInput.text.trim() !== "") { root.run(["deck", "save", lineInput.text.trim()]); root.saving = false; saveDone.start() }
+                  onClicked: root.saveAs(lineInput.text)
                 }
                 RoundButton { glyph: "󰅖"; onClicked: { root.saving = false; root.filterOpen = false; root.filter = ""; stage.forceActiveFocus() } }
               }
-              Timer { id: saveDone; interval: 800; onTriggered: root.readShelf() }
             }
 
             RowLayout {
@@ -1375,6 +1451,12 @@ Item {
                     }
                     HoverHandler { id: playedHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler { onTapped: root.playedOpen = !root.playedOpen }
+                    HeadLink {
+                      anchors.right: parent.right; anchors.rightMargin: 8
+                      anchors.verticalCenter: parent.verticalCenter
+                      glyph: "󰆓"; text: strings.t("deck.savePlayedShort")
+                      onTapped: { root.savePart = "played"; root.filterOpen = false; root.saving = true }
+                    }
                   }
                   Repeater {
                     model: root.playedOpen && root.filter === "" ? (root.deck.played || []) : []
@@ -1456,6 +1538,7 @@ Item {
                   required property string why
                   required property string chapter
                   required property string warn
+                  required property string from
                   required property real bpm
                   required property string key
                   required property real energy
@@ -1625,7 +1708,7 @@ Item {
                         }
                         Label {
                           Layout.fillWidth: true
-                          text: slot.artist + "  ·  " + (slot.service === "applemusic" ? "Apple Music" : "YouTube Music")
+                          text: slot.artist + "  ·  " + root.serviceName(slot.service) + (slot.from !== "" ? "  ·  " + slot.from : "")
                           font.pixelSize: Style.font.caption
                           opacity: 0.6
                         }
@@ -1768,7 +1851,8 @@ Item {
                 z: 5
                 width: Math.min(380, parent.width - 24)
                 height: 64
-                y: 54
+                // Low down, clear of what's playing and the next song's row; the End pill moves up for it.
+                y: parent.height - height - 58
                 x: shown ? parent.width - width - 12 : parent.width + 12
                 opacity: shown ? 1 : 0
                 visible: opacity > 0

@@ -3819,7 +3819,7 @@ def grok_ideas(query, ask=None, count=6, timeout=45, shape=False):
 def find_songs(service, ideas):
     """Each of Grok's ideas looked up on the service at once: [(idea, best song or None)]."""
     from concurrent.futures import ThreadPoolExecutor
-    search = am_songs if service == "applemusic" else ytm_search
+    search = am_songs if service == "applemusic" else beatport_search_tracks if service == "beatport" else ytm_search
     def look(idea):
         try:
             results = [i for i in search(f"{idea['t']} {idea['a']}") if i["kind"] == "song"]
@@ -3830,7 +3830,7 @@ def find_songs(service, ideas):
         by = lambda i: set(song_key(str(i.get("subtitle", "")).split(" • ")[0]).split())
         # The artist Grok named, not a cover or a tribute act.
         return idea, next((i for i in same if artist & by(i)), None) or (same[0] if same and not artist else None)
-    with ThreadPoolExecutor(max_workers=3 if service == "applemusic" else 6) as pool:
+    with ThreadPoolExecutor(max_workers=3 if service in {"applemusic", "beatport"} else 6) as pool:
         return list(pool.map(look, ideas))
 
 
@@ -3870,8 +3870,9 @@ DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kin
               "paused": False, "sleep": None, "crossfade": False,
               "pushed": [], "updated": 0}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
+DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
-DECK_SERVICES = {"applemusic", "ytmusic"}
+DECK_SERVICES = {"applemusic", "ytmusic", "beatport"}
 
 
 def deck_read():
@@ -3880,7 +3881,7 @@ def deck_read():
     if isinstance(value, dict):
         deck.update({k: v for k, v in value.items() if k in DECK_EMPTY})
     deck["set"] = [i for i in deck["set"] if isinstance(i, dict) and i.get("uid")][:300]
-    deck["played"] = [i for i in deck["played"] if isinstance(i, dict) and i.get("uid")][-40:]
+    deck["played"] = [i for i in deck["played"] if isinstance(i, dict) and i.get("uid")][-DECK_HISTORY:]
     return deck
 
 
@@ -3910,6 +3911,16 @@ def deck_item(service, item):
         if not re.fullmatch(r"\d{1,15}", str(item.get("id", ""))):
             sys.exit("Bad Apple Music song.")
         song["id"] = str(item["id"])
+    elif service == "beatport":
+        if not re.fullmatch(r"\d{1,12}", str(item.get("id", ""))):
+            sys.exit("Bad Beatport track.")
+        song["id"] = str(item["id"])
+        song["slug"] = re.sub(r"[^a-z0-9-]+", "", str(item.get("slug", "")).lower())[:120] or "track"
+        known = {k: item[k] for k in ("bpm", "length") if isinstance(item.get(k), (int, float)) and item[k] > 0}
+        if camelot_ok(item.get("key")):
+            known["key"] = item["key"]
+        if known:
+            deck_details_note(song, **known)
     else:
         if not YTM_ID.match(str(item.get("video", ""))):
             sys.exit("Bad YouTube Music song.")
@@ -3918,7 +3929,17 @@ def deck_item(service, item):
 
 
 def deck_expand(service, item):
-    """A song is one song; an Apple Music album is its songs, in order."""
+    """A song is one song; an album or playlist is its songs, in order, each
+    remembering where it came from."""
+    songs = deck_expand_songs(service, item)
+    if item.get("kind") in {"album", "playlist"}:
+        origin = clean_text(str(item.get("title", "")), 60)
+        for song in songs:
+            song["from"] = origin
+    return songs
+
+
+def deck_expand_songs(service, item):
     if service == "applemusic" and item.get("kind") == "album" and re.fullmatch(r"\d{1,15}", str(item.get("id", ""))):
         tracks = [t for t in am_lookup({"id": item["id"], "entity": "song", "limit": 60})
                   if t.get("wrapperType") == "track" and t.get("trackId")]
@@ -3928,6 +3949,8 @@ def deck_expand(service, item):
                 for t in tracks]
     if service == "applemusic" and item.get("kind") == "playlist":
         return [deck_item(service, t) for t in am_playlist_tracks(item.get("id", ""))]
+    if service == "beatport" and item.get("kind") == "playlist":
+        return [deck_item(service, t) for t in beatport_playlist_tracks(str(item.get("url", "")))]
     if service == "ytmusic" and item.get("kind") in {"playlist", "album"}:
         return [deck_item(service, {**t, "album_name": t["album"]}) for t in ytm_tracks(item)]
     if item.get("kind") not in {"song", "video"}:
@@ -3976,7 +3999,7 @@ def deck_apple_id(song):
     if song.get("am") is not None:
         return song["am"]
     try:
-        found = am_songs(f"{song['title']} {song['artist']}")
+        found = am_songs(f"{re.sub(r'[(\[][^)\]]*[)\]]', '', song['title']).strip()} {song['artist']}")
     except (OSError, ValueError):
         return ""
     match = next((i for i in found if song_key(i["title"]) == song_key(song["title"])), None)
@@ -4045,6 +4068,9 @@ def deck_where_room(deck):
 
 def deck_play_laptop(song, start_at=0):
     """Start one song in its app on the laptop."""
+    if song["service"] == "beatport":
+        beatport_open(beatport_track_url(song), play=True)
+        return
     if song["service"] == "applemusic":
         reply = None
         for attempt in range(30):
@@ -4090,13 +4116,15 @@ def deck_status(deck):
 
 def deck_start(deck, song=None, start_at=0):
     """Play song (or the next in the set) wherever the Deck plays."""
+    was = deck.get("now") or deck.pop("was", None)
+    was_playing = deck.get("playing")
     if song is None:
         if not deck["set"]:
             deck["playing"] = False
             return False
         song = deck["set"].pop(0)
     if deck.get("now") and deck["now"]["uid"] != song["uid"]:
-        deck["played"] = (deck["played"] + [deck["now"]])[-40:]
+        deck["played"] = (deck["played"] + [deck["now"]])[-DECK_HISTORY:]
     deck["now"] = song
     deck["set"] = [s for s in deck["set"] if s["uid"] != song["uid"]]
     deck["playing"] = True
@@ -4120,10 +4148,20 @@ def deck_start(deck, song=None, start_at=0):
             quiet_out("busctl", "--user", "call", laptop["player"], "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", "Pause")
         toast(f"Playing in {room['name']}", f"{song['title']} · {song['artist']}", art=sonos_now(room)["track"].get("art", ""))
     else:
+        if was and was.get("service") != song.get("service") and was_playing:
+            deck_quiet(was)         # one app at a time: the one that played before stops
         deck_play_laptop(song, start_at)
     deck["expect"] = {"uid": song["uid"], "since": time.time()}
     deck_watch()
     return True
+
+
+def deck_quiet(song):
+    """Pause the app a song played in (switching to another app mid-song)."""
+    if song.get("service") == "applemusic":
+        am_bridge({"action": "pause"}, timeout=4)
+    else:
+        media_command("pause")
 
 
 def deck_previous(deck):
@@ -4136,6 +4174,7 @@ def deck_previous(deck):
     before = deck["played"].pop()
     if deck.get("now"):
         deck["set"].insert(0, deck["now"])
+        deck["was"] = deck["now"]   # its app stops, if the one before plays elsewhere
         deck["now"] = None          # so it isn't counted as played again
     return deck_start(deck, before)
 
@@ -4178,7 +4217,7 @@ def deck_tick(last):
                 at = next((i for i, s in enumerate(ordered) if s["uid"] == uid), None)
                 if at is None:
                     return
-                d["played"] = (d["played"] + ordered[:at])[-40:]
+                d["played"] = (d["played"] + ordered[:at])[-DECK_HISTORY:]
                 d["now"], d["set"] = ordered[at], ordered[at + 1:]
             deck_update(advance)
         # Near the end of what the room was given: give it the next songs.
@@ -4228,10 +4267,96 @@ def deck_run():
             time.sleep(1.5 if deck_where_room(deck_read()) is None else 2.5)
 
 
+# ---- Beatport in the Deck: tracks found through Beatport's own search, your
+# library playlists read in a background tab, each track's details from its
+# page, played in the Beatport app (on Sonos: the same song from Apple Music).
+
+def beatport_image(release, size=300):
+    for key in ("release_image_dynamic_uri", "image_dynamic_uri", "dynamic_uri"):
+        uri = str((release or {}).get(key) or "")
+        if "{w}x{h}" in uri and uri.startswith("https://"):
+            return uri.replace("{w}x{h}", f"{size}x{size}")
+    image = (release or {}).get("image")
+    if isinstance(image, dict):
+        return beatport_image(image, size)
+    uri = str((release or {}).get("release_image_uri") or "")
+    return uri if uri.startswith("https://") else ""
+
+
+def beatport_item(t):
+    """A Beatport track (from search or its page) as a Deck search result."""
+    name = clean_text(str(t.get("track_name") or t.get("name") or ""), 100)
+    mix = clean_text(str(t.get("mix_name") or ""), 60)
+    artists = ", ".join(clean_text(str(a.get("artist_name") or a.get("name") or ""), 60) for a in t.get("artists") or [] if isinstance(a, dict))
+    label = clean_text(str((t.get("label") or {}).get("label_name") or (t.get("label") or {}).get("name") or ""), 60)
+    length = t.get("length") or t.get("track_length_ms") or t.get("length_ms") or 0
+    key = str(t.get("key_camelot") or "") or camelot(t.get("key_name") or t.get("key") or "")
+    return {"kind": "song", "id": str(t.get("track_id") or t.get("id") or ""), "title": f"{name} ({mix})" if mix else name,
+            "subtitle": f"{artists} • {label}" if label else artists, "thumb": beatport_image(t.get("release") or {}),
+            "slug": re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:80],
+            "bpm": round(t["bpm"]) if isinstance(t.get("bpm"), (int, float)) else 0, "key": key,
+            "length": round(length / 1000) if isinstance(length, int) and length > 1000 else 0}
+
+
+def beatport_next_data(url):
+    reply = beatport_bridge({"type": "fetch", "url": url}, timeout=20) or {}
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', reply.get("text", ""), re.S)
+    try:
+        return json.loads(m.group(1))["props"]["pageProps"] if m else {}
+    except (ValueError, KeyError):
+        return {}
+
+
+def beatport_search_tracks(query):
+    import urllib.parse
+    page = beatport_next_data("https://www.beatport.com/search/tracks?q=" + urllib.parse.quote(query[:200]))
+    try:
+        tracks = next(q["state"]["data"]["data"] for q in page["dehydratedState"]["queries"] if q["queryKey"][0] == "search-tracks")
+    except (KeyError, StopIteration, TypeError):
+        return []
+    return [i for i in (beatport_item(t) for t in tracks[:24] if isinstance(t, dict)) if i["id"].isdigit()]
+
+
+def beatport_my_playlists():
+    known = read_json(BEATPORT_STATE, {}).get("playlists", [])
+    return [{"kind": "playlist", "title": re.sub(r"[\x00-\x1f]", "", str(p.get("name", "")))[:100], "subtitle": "Your playlist",
+             "url": p["url"], "thumb": "", "mine": True}
+            for p in known if isinstance(p, dict) and BEATPORT_URL.match(str(p.get("url", ""))) and "/playlists/" in p["url"]]
+
+
+def beatport_playlist_tracks(url, limit=100):
+    """A Beatport playlist's tracks: the page opened in a background tab (it
+    loads its tracks as you, signed in), then each track's details from its page."""
+    from concurrent.futures import ThreadPoolExecutor
+    if not BEATPORT_URL.match(str(url)) or "/playlists/" not in url:
+        return []
+    links, last = [], -1
+    for _ in range(12):             # until the list has loaded and stopped growing
+        reply = beatport_bridge({"type": "scratch", "url": url, "op": {"type": "probe", "region": "page", "filter": "/track/"}}, timeout=25) or {}
+        links = [i.get("href", "") for i in reply.get("items", []) if re.fullmatch(r"/track/[\w-]+/\d{1,12}", str(i.get("href", "")))]
+        if links and len(links) == last:
+            break
+        last = len(links)
+        time.sleep(1)
+    beatport_bridge({"type": "scratch-close"}, timeout=5)
+    links = list(dict.fromkeys(links))[:limit]
+    def detail(href):
+        track = beatport_next_data("https://www.beatport.com" + href).get("track")
+        return beatport_item(track) if isinstance(track, dict) else None
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        return [i for i in pool.map(detail, links) if i and i["id"].isdigit()]
+
+
+def beatport_track_url(song):
+    return f"https://www.beatport.com/track/{song.get('slug') or 'track'}/{song['id']}"
+
+
 def deck_mine(service):
     """Your own playlists, for the Deck's search before you type."""
     if service == "applemusic":
         return [p for p in am_playlists("*") if p["mine"]]
+    if service == "beatport":
+        return beatport_my_playlists()
     return [{"kind": "playlist", "title": p["name"], "subtitle": "Your playlist", "playlist": p["playlist"],
              "video": "", "browse": "VL" + p["playlist"], "thumb": p.get("thumb", ""), "mine": True}
             for p in ytm_playlists() if p.get("playlist")]
@@ -4241,6 +4366,10 @@ def deck_search(service, query):
     """What the Deck's search shows: your own playlists that match first,
     then songs, albums and playlists from the service."""
     query = query.strip()[:200]
+    if service == "beatport":
+        words = set(song_key(query).split())
+        mine = [p for p in beatport_my_playlists() if words and words <= set(song_key(p["title"]).split())]
+        return mine + beatport_search_tracks(query)
     if service == "applemusic":
         try:
             found = [i for i in am_search(query) if i["kind"] in {"song", "album"}]
@@ -4277,9 +4406,15 @@ def deck_search(service, query):
 # YouTube Music; tempo and key from Beatport through its window, when it's
 # open; energy (1-10) from Grok's fast model, all songs in one question.
 
+def camelot_ok(key):
+    return isinstance(key, str) and re.fullmatch(r"(?:[1-9]|1[0-2])[AB]", key) is not None
+
+
 def deck_song_key(song):
     if song.get("service") == "applemusic" and song.get("id"):
         return "am:" + str(song["id"])
+    if song.get("service") == "beatport" and song.get("id"):
+        return "bp:" + str(song["id"])
     if song.get("service") == "ytmusic" and song.get("video"):
         return "yt:" + str(song["video"])
     return ""
@@ -4438,7 +4573,7 @@ def deck_details_fill():
                     deck_details_note(song, energy=energy if isinstance(energy, int) and 1 <= energy <= 10 else 0)
         # Tempo and key: Beatport, while its window is open.
         if beatport_windows():
-            for song in wanting("bpm")[:25]:
+            for song in [s for s in wanting("bpm") if s["service"] != "beatport"][:25]:
                 title = re.sub(r"\s*\[[^\]]*\]", "", song["title"])
                 artist = sorted(deck_artists(song), key=lambda a: song_key(song["artist"]).find(a))[:1]
                 found = beatport_find({"title": title, "artist": artist[0] if artist else song["artist"]})
@@ -4542,10 +4677,13 @@ def deck_sets():
         if isinstance(value, list) else []
 
 
-def deck_save_set(name):
+def deck_save_set(name, part="next"):
+    """Save what's to come (with what's playing), what's been played (with
+    what's playing), or the whole night, under a name."""
     name = clean_text(name, 60)
     deck = deck_read()
-    songs = ([deck["now"]] if deck.get("now") else []) + deck["set"]
+    now = [deck["now"]] if deck.get("now") else []
+    songs = {"played": deck["played"] + now, "all": deck["played"] + now + deck["set"]}.get(part, now + deck["set"])
     if not name or not songs:
         return False
     saved = [s for s in deck_sets() if s["name"].lower() != name.lower()]
@@ -4569,13 +4707,73 @@ def deck_load_set(name, replace=False):
 
 
 def deck_set_list():
+    """Saved sets, each with what's in it: how long, which services, and
+    where its songs came from (playlists, albums, a brief), most first."""
+    from collections import Counter
     details = deck_details_read()
-    return [{"name": s["name"], "saved": s.get("saved", 0), "count": len(s["songs"]),
-             "minutes": round(sum(details.get(deck_song_key(x), {}).get("length", 0) for x in s["songs"]) / 60),
-             "thumbs": [x.get("thumb", "") for x in s["songs"][:4]]} for s in deck_sets()]
+    names = {"applemusic": "Apple Music", "ytmusic": "YouTube Music", "beatport": "Beatport"}
+    out = []
+    for s in deck_sets():
+        services = Counter(names.get(x.get("service"), "") for x in s["songs"])
+        origins = Counter(x.get("from") or "" for x in s["songs"])
+        out.append({"name": s["name"], "saved": s.get("saved", 0), "count": len(s["songs"]),
+                    "minutes": round(sum(details.get(deck_song_key(x), {}).get("length", 0) for x in s["songs"]) / 60),
+                    "services": [f"{n} {c}" for n, c in services.most_common() if n],
+                    "from": [o for o, _ in origins.most_common() if o][:3] + (["search"] if origins.get("") else []),
+                    "thumbs": [x.get("thumb", "") for x in s["songs"][:4]]})
+    return out
 
 
 # ---- pausing, crossfade and the sleep timer
+
+def deck_shape(d, how):
+    """Reorder the set by its details, around pinned songs:
+    tempo      slowest to fastest
+    smooth     each song the nearest tempo to the one before (from what's playing)
+    energy     calm to peak
+    arc        ease in, peak about two thirds of the way, wind down
+    harmonic   each song in a key that mixes with the one before, near in tempo
+    Songs without the detail keep their order, after the others."""
+    details = deck_with_details({**d, "set": list(d["set"]), "played": [], "now": d.get("now")})
+    full = {s["uid"]: s for s in details["set"]}
+    slots = [i for i, s in enumerate(d["set"]) if s["uid"] not in d["pinned"]]
+    songs = [d["set"][i] for i in slots]
+    info = lambda s: full.get(s["uid"], {})
+    field = {"tempo": "bpm", "smooth": "bpm", "energy": "energy", "arc": "energy", "harmonic": "key"}.get(how)
+    if not field:
+        return False
+    known = [s for s in songs if info(s).get(field)]
+    rest = [s for s in songs if not info(s).get(field)]
+    if how == "tempo":
+        known.sort(key=lambda s: info(s)["bpm"])
+    elif how == "energy":
+        known.sort(key=lambda s: info(s)["energy"])
+    elif how == "arc":
+        rising = sorted(known, key=lambda s: info(s)["energy"])
+        head = [s for i, s in enumerate(rising) if i % 3 != 2]
+        tail = [s for i, s in enumerate(rising) if i % 3 == 2]
+        known = head + tail[::-1]
+    else:
+        # From the song just before the first one that moves (a pinned one, or what's playing).
+        here = (full.get(d["set"][slots[0] - 1]["uid"]) if slots and slots[0] > 0 else details.get("now")) or {}
+        ordered, left = [], list(known)
+        while left:
+            def cost(s):
+                x = info(s)
+                tempo = abs((x.get("bpm") or 0) - (here.get("bpm") or x.get("bpm") or 0))
+                if how == "smooth":
+                    return tempo
+                return (0 if keys_fit(here.get("key"), x.get("key")) else 40) + tempo / 2 \
+                    + abs((x.get("energy") or 5) - (here.get("energy") or 5))
+            best = min(left, key=cost)
+            ordered.append(best)
+            left.remove(best)
+            here = info(best)
+        known = ordered
+    for i, song in zip(slots, known + rest):
+        d["set"][i] = song
+    return True
+
 
 def deck_pause(d):
     d["playing"] = False
@@ -4686,8 +4884,10 @@ def deck_command(settings, args):
     elif action == "details":
         deck_details_fill()
     elif action == "save" and len(args) >= 2:
-        if deck_save_set(" ".join(args[1:])):
-            toast("Set saved", " ".join(args[1:])[:60], glyph="󰆓")
+        part = next((a[2:] for a in args if a in {"--played", "--all", "--next"}), "next")
+        name = " ".join(a for a in args[1:] if a not in {"--played", "--all", "--next"})
+        if deck_save_set(name, part):
+            toast("Set saved", name[:60], glyph="󰆓")
     elif action == "sets":
         print(json.dumps(deck_set_list()))
     elif action == "load" and len(args) >= 2:
@@ -4697,6 +4897,9 @@ def deck_command(settings, args):
     elif action == "forget" and len(args) >= 2:
         name = " ".join(args[1:]).lower()
         write_atomic(DECK_SETS, json.dumps([x for x in deck_sets() if x["name"].lower() != name]))
+    elif action == "shape" and len(args) == 2:
+        if deck_edit(lambda d: deck_shape(d, args[1])):
+            deck_after_edit()
     elif action == "crossfade" and len(args) == 2 and args[1] in {"on", "off"}:
         deck_update(lambda d: deck_crossfade(d, args[1] == "on"))
     elif action == "sleep" and len(args) == 2:
@@ -4751,6 +4954,12 @@ def deck_command(settings, args):
         deck_everywhere()
     elif action == "volume" and len(args) == 3:
         deck_room_volume(args[1], args[2])
+    elif action in {"fill", "build"} and "--service" in args:
+        at = args.index("--service")
+        service = args[at + 1] if at + 1 < len(args) else ""
+        if service not in DECK_SERVICES:
+            sys.exit("Unknown service.")
+        deck_command({**settings, "music": {**(settings.get("music") or {}), "service": service}}, args[:at] + args[at + 2:])
     elif action == "fill":
         deck_fill(settings)
     elif action == "build" and len(args) >= 3 and args[1].isdigit():
@@ -4763,10 +4972,10 @@ def deck_command(settings, args):
     else:
         sys.exit("Usage: afterlight deck [state|add <ytmusic|applemusic> <item json> [--next|--play|--at <n>|--scatter]|move <uid> <index>|"
                  "remove <uid>…|place <now|next|end> <uid>…|chapter <uid> [name]|move-chapter <uid> <index>|undo|"
-                 "save <name>|sets|load <name> [--replace]|forget <name>|crossfade <on|off>|sleep <minutes|song|off>|details|"
+                 "save <name> [--played|--all]|sets|load <name> [--replace]|forget <name>|shape <tempo|smooth|energy|arc|harmonic>|crossfade <on|off>|sleep <minutes|song|off>|details|"
                  "pin <uid>|shuffle|clear|play [uid]|pause|next|previous|where <laptop|room id>|rooms|join <room id>|"
-                 "leave <room id>|everywhere|volume <room id> <0-100>|search <service> <words>|mine <service>|fill|"
-                 "build <minutes> <what it's for> [--start <song>] [--replace]|run]")
+                 "leave <room id>|everywhere|volume <room id> <0-100>|search <service> <words>|mine <service>|fill [--service <s>]|"
+                 "build <minutes> <what it's for> [--start <song>] [--replace] [--service <s>]|run]")
 
 
 def deck_fill(settings, count=5):
@@ -4788,7 +4997,7 @@ def deck_fill(settings, count=5):
     found = []
     for idea, match in find_songs(service, [i for i in ideas["songs"] if song_key(i["t"]) not in have]):
         if match and len(found) < count and song_key(match["title"]) not in have:
-            found.append(deck_item(service, match))
+            found.append({**deck_item(service, match), "from": "✦ Fill"})
             have.add(song_key(match["title"]))
     deck_edit(lambda d: d["set"].extend(found))
     deck_after_edit()
@@ -4820,6 +5029,7 @@ def deck_build(settings, minutes, brief, start="", replace=False):
             seen.add(song_key(match["title"]))
             song = deck_item(service, match)
             song["why"] = idea["w"]
+            song["from"] = "✦ " + brief[:50]
             if idea["c"]:
                 song["chapter"] = idea["c"]
             if idea["e"]:
