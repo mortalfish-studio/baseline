@@ -633,6 +633,22 @@ class DeckTests(TempCase):
         self.assertEqual([s["uid"] for s in deck["set"]], ["b", "c"])
         self.assertEqual(deck["played"], [])
 
+    def test_next_pressed_while_the_watcher_looks_skips_only_once(self):
+        a, b, c = ({"uid": u, "service": "applemusic", "id": i, "title": u} for u, i in (("a", "1"), ("b", "2"), ("c", "3")))
+        self.patch("deck_where_room", lambda d: None)
+        self.patch("deck_play_laptop", lambda song, start_at=0: None)
+        self.patch("deck_watch", lambda: None)
+        al.deck_update(lambda d: d.update(now=a, set=[b, c], playing=True, expect={"uid": "a", "since": 1}))
+        def status(deck):
+            # You press Next just as the watcher asks the player: the old song has
+            # stopped and the new one is loading.
+            al.deck_update(lambda d: al.deck_start(d))
+            return {"time": 0, "length": 0, "playing": False, "id": "2"}
+        self.patch("deck_status", status)
+        al.deck_tick({"time": 40, "length": 200, "playing": True, "id": "1"})
+        d = al.deck_read()
+        self.assertEqual((d["now"]["uid"], [s["uid"] for s in d["set"]]), ("b", ["c"]))
+
     def test_sonos_queue_entry_for_an_apple_song(self):
         uri, meta = al.sonos_apple_uri("1440833098", "13")
         self.assertEqual(uri, "x-sonos-http:song%3a1440833098.mp4?sid=204&flags=8232&sn=13")

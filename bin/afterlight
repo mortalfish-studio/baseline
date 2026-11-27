@@ -4176,10 +4176,16 @@ def deck_tick(last):
         stopped = False
     if not (changed or stopped):
         return status
+    # Only if the song judged is still the Deck's: pressing Next (or Previous,
+    # or playing a song) while this looked would otherwise skip a second time.
+    started = (deck.get("expect") or {}).get("since")
+    def same(d):
+        return d.get("playing") and (d.get("now") or {}).get("uid") == song["uid"] \
+            and (d.get("expect") or {}).get("since") == started
     if ran_out or stopped or not last.get("length"):
-        deck_update(lambda d: deck_start(d))        # the song finished: next
+        deck_update(lambda d: deck_start(d) if same(d) else None)        # the song finished: next
     else:
-        deck_update(lambda d: d.update(playing=False, paused=False))   # you played something else: step back
+        deck_update(lambda d: d.update(playing=False, paused=False) if same(d) else None)   # you played something else
     return None
 
 
