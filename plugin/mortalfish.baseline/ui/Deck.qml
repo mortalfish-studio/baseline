@@ -837,6 +837,22 @@ Item {
             font.pixelSize: Style.font.caption
             Layout.maximumWidth: 420
           }
+          // Requests open: the QR code, small, so guests can scan it from here too.
+          Rectangle {
+            id: headQr
+            visible: !!root.guests && (root.guests.qr || "") !== ""
+            Layout.preferredWidth: 46; Layout.preferredHeight: 46
+            radius: Style.cornerRadius > 0 ? 4 : 0
+            color: "white"
+            Image {
+              anchors.fill: parent; anchors.margins: 3
+              source: root.guests && root.guests.qr ? "file://" + root.guests.qr + "?" + root.guests.since : ""
+              smooth: false; cache: false
+              fillMode: Image.PreserveAspectFit
+            }
+            HoverHandler { cursorShape: Qt.PointingHandCursor; onHoveredChanged: root.hint(headQr, strings.t("deck.stageScan"), hovered) }
+            TapHandler { onTapped: root.guestsOpen = !root.guestsOpen }
+          }
         }
 
         Rectangle {
@@ -918,26 +934,10 @@ Item {
                 }
                 Repeater {
                   model: root.requests.slice(-5).reverse()
-                  delegate: RowLayout {
-                    id: ask
+                  delegate: RequestRow {
                     required property var modelData
                     Layout.fillWidth: true
-                    spacing: 10
-                    Cover { url: ask.modelData.thumb || ""; size: 36 }
-                    ColumnLayout {
-                      Layout.fillWidth: true
-                      spacing: 1
-                      Label { Layout.fillWidth: true; text: ask.modelData.title; font.bold: true; font.pixelSize: Style.font.caption }
-                      Label {
-                        Layout.fillWidth: true
-                        text: ask.modelData.artist + (ask.modelData.by ? "  ·  " + strings.t("deck.requestBy").arg(ask.modelData.by) : "")
-                        font.pixelSize: Style.font.caption; opacity: 0.6
-                      }
-                    }
-                    RoundButton { glyph: "◆"; tip: strings.t("deck.requestMix"); onClicked: root.run(["deck", "request", "take", ask.modelData.rid, "--mix"]) }
-                    RoundButton { glyph: "󰒭"; tip: strings.t("deck.bloomNext"); onClicked: root.run(["deck", "request", "take", ask.modelData.rid, "--next"]) }
-                    RoundButton { glyph: "󰐒"; tip: strings.t("deck.bloomLater"); onClicked: root.run(["deck", "request", "take", ask.modelData.rid]) }
-                    RoundButton { glyph: "󰅖"; tip: strings.t("deck.requestDrop"); onClicked: root.run(["deck", "request", "drop", ask.modelData.rid]) }
+                    req: modelData
                   }
                 }
                 Label {
@@ -2509,6 +2509,46 @@ Item {
           RoundButton { glyph: "󰅖"; tip: strings.t("deck.stageLeaveTip"); onClicked: root.stageOn = false }
         }
 
+        // Requests while on stage: the newest few, to mix in, put next or turn down.
+        Rectangle {
+          id: stageAsks
+          z: 2
+          visible: root.requests.length > 0
+          anchors.right: parent.right; anchors.top: parent.top
+          anchors.topMargin: 84; anchors.rightMargin: 26
+          width: 460
+          height: stageAskCol.implicitHeight + 24
+          radius: Style.cornerRadius > 0 ? 8 : 0
+          color: Util.alpha(root.ground, 0.92)
+          border.width: 1; border.color: Util.alpha(root.teal, 0.5)
+          opacity: visible ? 1 : 0
+          Behavior on opacity { NumberAnimation { duration: Style.duration(180) } }
+          ColumnLayout {
+            id: stageAskCol
+            x: 14; y: 12
+            width: parent.width - 28
+            spacing: 8
+            Label {
+              text: "󰄜  " + strings.tn("deck.requestsCount", root.requests.length).arg(root.requests.length).toUpperCase()
+              font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal
+            }
+            Repeater {
+              model: root.requests.slice(-3).reverse()
+              delegate: RequestRow {
+                required property var modelData
+                Layout.fillWidth: true
+                coverSize: 44
+                req: modelData
+              }
+            }
+            Label {
+              visible: root.requests.length > 3
+              text: strings.t("deck.requestsMore").arg(root.requests.length - 3)
+              font.pixelSize: Style.font.caption; opacity: 0.5
+            }
+          }
+        }
+
         // The song: cover, then its name, big.
         Item {
           id: stageSong
@@ -2932,6 +2972,57 @@ Item {
 
   // ------------------------------------------------------------ parts
   // A cover from the web (Apple's or YouTube's own images), or a glyph.
+  // A guest's request: the song, who asked (their selfie on the cover's
+  // corner), and what to do with it.
+  component RequestRow: RowLayout {
+    id: rr
+    property var req: ({})
+    property int coverSize: 36
+    spacing: 10
+    Item {
+      implicitWidth: rr.coverSize + 6; implicitHeight: rr.coverSize + 6
+      Cover { url: rr.req.thumb || ""; size: rr.coverSize }
+      Rectangle {
+        visible: (rr.req.photo || "") !== "" || (rr.req.by || "") !== ""
+        anchors.right: parent.right; anchors.bottom: parent.bottom
+        width: rr.coverSize * 0.55; height: width; radius: width / 2
+        color: root.ground
+        border.width: 2; border.color: root.teal
+        clip: true
+        Image {
+          id: face
+          anchors.fill: parent; anchors.margins: 2
+          source: (rr.req.photo || "") !== "" ? "file://" + rr.req.photo : ""
+          fillMode: Image.PreserveAspectCrop
+          asynchronous: true
+          layer.enabled: true
+          layer.effect: MultiEffect { maskEnabled: true; maskSource: faceMask }
+        }
+        Rectangle { id: faceMask; anchors.fill: face; radius: width / 2; visible: false; layer.enabled: true }
+        Label {
+          anchors.centerIn: parent
+          visible: face.status !== Image.Ready
+          text: (rr.req.by || "?").charAt(0).toUpperCase()
+          font.pixelSize: rr.coverSize * 0.26; font.bold: true; color: root.teal
+        }
+      }
+    }
+    ColumnLayout {
+      Layout.fillWidth: true
+      spacing: 1
+      Label { Layout.fillWidth: true; text: rr.req.title || ""; font.bold: true; font.pixelSize: rr.coverSize > 40 ? Style.font.body : Style.font.caption }
+      Label {
+        Layout.fillWidth: true
+        text: (rr.req.artist || "") + (rr.req.by ? "  ·  " + strings.t("deck.requestBy").arg(rr.req.by) : "")
+        font.pixelSize: Style.font.caption; opacity: 0.6
+      }
+    }
+    RoundButton { glyph: "◆"; tip: strings.t("deck.requestMix"); onClicked: root.run(["deck", "request", "take", rr.req.rid, "--mix"]) }
+    RoundButton { glyph: "󰒭"; tip: strings.t("deck.bloomNext"); onClicked: root.run(["deck", "request", "take", rr.req.rid, "--next"]) }
+    RoundButton { glyph: "󰐒"; tip: strings.t("deck.bloomLater"); onClicked: root.run(["deck", "request", "take", rr.req.rid]) }
+    RoundButton { glyph: "󰅖"; tip: strings.t("deck.requestDrop"); onClicked: root.run(["deck", "request", "drop", rr.req.rid]) }
+  }
+
   component Cover: Rectangle {
     id: cover
     property string url: ""
