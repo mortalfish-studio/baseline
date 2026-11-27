@@ -1856,7 +1856,7 @@ Item {
                       Cover { url: slot.thumb; size: 48 }
                       ColumnLayout {
                         Layout.fillWidth: true
-                        spacing: 0
+                        spacing: 3
                         RowLayout {
                           Layout.fillWidth: true
                           spacing: 8
