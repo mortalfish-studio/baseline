@@ -636,6 +636,8 @@ Item {
   // requests from their phones, and a lock so guests can't undo the night.
   property bool stageOn: false
   property bool guestsOpen: false
+  property bool qrBig: false
+  readonly property bool showQr: !!guests && (guests.qr || "") !== ""
   readonly property bool locked: !!deck.lock
   readonly property var requests: deck.requests || []
   readonly property var guests: deck.guests || null
@@ -710,7 +712,8 @@ Item {
       anchors.fill: parent
       focus: true
       Keys.onEscapePressed: {
-        if (root.stageOn) root.stageOn = false
+        if (root.qrBig) root.qrBig = false
+        else if (root.stageOn) root.stageOn = false
         else if (root.guestsOpen) root.guestsOpen = false
         else if (root.bloomOpen) root.closeBloom()
         else if (root.openList) root.closePlaylist()
@@ -837,22 +840,8 @@ Item {
             font.pixelSize: Style.font.caption
             Layout.maximumWidth: 420
           }
-          // Requests open: the QR code, small, so guests can scan it from here too.
-          Rectangle {
-            id: headQr
-            visible: !!root.guests && (root.guests.qr || "") !== ""
-            Layout.preferredWidth: 46; Layout.preferredHeight: 46
-            radius: Style.cornerRadius > 0 ? 4 : 0
-            color: "white"
-            Image {
-              anchors.fill: parent; anchors.margins: 3
-              source: root.guests && root.guests.qr ? "file://" + root.guests.qr + "?" + root.guests.since : ""
-              smooth: false; cache: false
-              fillMode: Image.PreserveAspectFit
-            }
-            HoverHandler { cursorShape: Qt.PointingHandCursor; onHoveredChanged: root.hint(headQr, strings.t("deck.stageScan"), hovered) }
-            TapHandler { onTapped: root.guestsOpen = !root.guestsOpen }
-          }
+          // Requests open and the crate folded away: the code, small (tap for it big).
+          QrTile { visible: root.showQr && !root.crateOpen; size: 46 }
         }
 
         Rectangle {
@@ -912,7 +901,7 @@ Item {
             // ---- guests' requests: from their phones, waiting for you to take them
             Rectangle {
               Layout.fillWidth: true
-              visible: root.requests.length > 0
+              visible: root.requests.length > 0 || root.showQr
               implicitHeight: asks.implicitHeight + 16
               radius: Style.cornerRadius > 0 ? 6 : 0
               color: Util.alpha(root.teal, 0.06)
@@ -923,8 +912,22 @@ Item {
                 x: 10; y: 8
                 width: parent.width - 20
                 spacing: 4
+                // Requests open: the code to scan, big enough for a phone to focus on.
                 RowLayout {
                   Layout.fillWidth: true
+                  visible: root.showQr
+                  spacing: 14
+                  QrTile { size: 118 }
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    Label { text: strings.t("deck.stageScan"); font.bold: true; color: root.teal; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                    Label { text: strings.t("deck.qrTapHint"); font.pixelSize: Style.font.caption; opacity: 0.55; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                  }
+                }
+                RowLayout {
+                  Layout.fillWidth: true
+                  visible: root.requests.length > 0
                   Label {
                     Layout.fillWidth: true
                     text: "󰄜  " + strings.tn("deck.requestsCount", root.requests.length).arg(root.requests.length).toUpperCase()
@@ -2684,6 +2687,7 @@ Item {
               fillMode: Image.PreserveAspectFit
             }
           }
+          TapHandler { onTapped: root.qrBig = true }
           Label { width: 150; horizontalAlignment: Text.AlignHCenter; text: strings.t("deck.stageScan"); font.pixelSize: Style.font.caption; color: root.teal; wrapMode: Text.Wrap }
         }
       }
@@ -2873,6 +2877,31 @@ Item {
         }
       }
 
+      // ---- the QR code, big, for a phone to scan (tap or Esc closes it)
+      Rectangle {
+        anchors.fill: parent
+        z: 90
+        visible: root.qrBig && root.showQr
+        color: Util.alpha(root.ground, 0.88)
+        TapHandler { onTapped: root.qrBig = false }
+        Column {
+          anchors.centerIn: parent
+          spacing: 16
+          Rectangle {
+            width: Math.min(380, stage.height * 0.6); height: width
+            radius: Style.cornerRadius > 0 ? 10 : 0
+            color: "white"
+            Image {
+              anchors.fill: parent; anchors.margins: 14
+              source: root.guests && root.guests.qr ? "file://" + root.guests.qr + "?" + root.guests.since : ""
+              smooth: false; cache: false
+              fillMode: Image.PreserveAspectFit
+            }
+          }
+          Label { anchors.horizontalCenter: parent.horizontalCenter; text: strings.t("deck.stageScan"); font.pixelSize: Style.font.subtitle; color: root.teal }
+        }
+      }
+
       // ---- the tooltip
       Rectangle {
         z: 1000
@@ -3021,6 +3050,24 @@ Item {
     RoundButton { glyph: "󰒭"; tip: strings.t("deck.bloomNext"); onClicked: root.run(["deck", "request", "take", rr.req.rid, "--next"]) }
     RoundButton { glyph: "󰐒"; tip: strings.t("deck.bloomLater"); onClicked: root.run(["deck", "request", "take", rr.req.rid]) }
     RoundButton { glyph: "󰅖"; tip: strings.t("deck.requestDrop"); onClicked: root.run(["deck", "request", "drop", rr.req.rid]) }
+  }
+
+  // The requests page's QR code on white; tap it for it big.
+  component QrTile: Rectangle {
+    id: qt
+    property int size: 46
+    implicitWidth: size; implicitHeight: size
+    Layout.preferredWidth: size; Layout.preferredHeight: size
+    radius: Style.cornerRadius > 0 ? 4 : 0
+    color: "white"
+    Image {
+      anchors.fill: parent; anchors.margins: Math.max(3, qt.size * 0.04)
+      source: root.guests && root.guests.qr ? "file://" + root.guests.qr + "?" + root.guests.since : ""
+      smooth: false; cache: false
+      fillMode: Image.PreserveAspectFit
+    }
+    HoverHandler { cursorShape: Qt.PointingHandCursor; onHoveredChanged: root.hint(qt, strings.t("deck.qrTapHint"), hovered) }
+    TapHandler { onTapped: root.qrBig = true }
   }
 
   component Cover: Rectangle {

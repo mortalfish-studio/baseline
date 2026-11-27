@@ -638,5 +638,6 @@
   "deck.unlockHold": "Keep holding…",
   "deck.shapeBumps": "Fix the bumps",
   "deck.autodjAt": "Auto-DJ adds more about %1",
-  "deck.autodjSoon": "Auto-DJ is adding more"
+  "deck.autodjSoon": "Auto-DJ is adding more",
+  "deck.qrTapHint": "Tap it to show it big for a phone"
 }
