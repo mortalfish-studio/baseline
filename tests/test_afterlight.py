@@ -1794,6 +1794,41 @@ class DuckTest(unittest.TestCase):
         self.assertEqual(level["v"], 1.0)
 
 
+class UnplayableTest(unittest.TestCase):
+    def deck(self):
+        song = lambda uid: {"uid": uid, "title": uid, "artist": "A", "service": "applemusic", "id": "1"}
+        return {"now": song("was"), "playing": True, "played": [], "set": [song("bad"), song("good"), song("last")]}
+
+    def start(self, deck, refuses):
+        with mock.patch.object(al, "deck_where_room", return_value=None), \
+             mock.patch.object(al, "deck_play_laptop", side_effect=lambda s, at=0: s["uid"] not in refuses), \
+             mock.patch.object(al, "toast") as toast, mock.patch.object(al, "deck_watch"):
+            return al.deck_start(deck), toast
+
+    def test_a_song_that_wont_play_is_passed_over(self):
+        deck = self.deck()
+        ok, toast = self.start(deck, {"bad"})
+        self.assertTrue(ok)
+        self.assertEqual(deck["now"]["uid"], "good")
+        self.assertEqual([x["uid"] for x in deck["played"]], ["was"])     # the bad one isn't history
+        self.assertEqual([x["uid"] for x in deck["set"]], ["last"])
+        self.assertIn("Skipped bad", toast.call_args_list[0].args[0])
+
+    def test_the_deck_stops_after_a_few_in_a_row(self):
+        deck = self.deck()
+        ok, toast = self.start(deck, {"bad", "good", "last"})
+        self.assertFalse(ok)
+        self.assertFalse(deck["playing"])
+        self.assertIsNone(deck["now"])
+        self.assertIn("has stopped", toast.call_args.args[1])
+
+    def test_apple_music_refusing_a_song_gives_up_quickly(self):
+        with mock.patch.object(al, "am_bridge", return_value={"ok": False}) as bridge, \
+             mock.patch.object(al.time, "sleep"), mock.patch("builtins.open", mock.mock_open()):
+            self.assertFalse(al.deck_play_laptop({"service": "applemusic", "id": "1", "title": "x"}))
+        self.assertEqual(bridge.call_count, 3)
+
+
 class AutoDJTowardTest(unittest.TestCase):
     def test_ask_bridges_to_the_destination_then_stays(self):
         deck = {"played": [], "now": {"uid": "n", "title": "Now", "artist": "B"}, "set": [], "votes": {}, "skipped": [],

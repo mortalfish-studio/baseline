@@ -4175,7 +4175,8 @@ def deck_where_room(deck):
 
 
 def deck_play_laptop(song, start_at=0):
-    """Start one song in its app on the laptop."""
+    """Start one song in its app on the laptop. False when its app said it
+    couldn't play it (only Apple Music says so)."""
     if song["service"] == "beatport":
         # Load the track's page now; press its Play in the background, so the
         # Deck isn't held up while the page loads.
@@ -4185,10 +4186,15 @@ def deck_play_laptop(song, start_at=0):
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         return
     if song["service"] == "applemusic":
-        reply, give_up = None, time.time() + 25
+        reply, give_up, refused = None, time.time() + 25, 0
         for attempt in range(30):
             reply = am_bridge({"action": "queue", "kind": "song", "id": song["id"]}, timeout=12)
             if (reply and reply.get("ok")) or time.time() > give_up:
+                break
+            # The tab answered but wouldn't take this song (gone from Apple
+            # Music, or not in this country): trying for longer won't help.
+            refused += bool(reply) and reply.get("error") not in {"no Apple Music tab", "signed out"}
+            if refused >= 3:
                 break
             if attempt == 0 and (not reply or reply.get("error") == "no Apple Music tab"):
                 subprocess.Popen(["omarchy-launch-webapp", AM + "/"], stdout=subprocess.DEVNULL,
@@ -4196,17 +4202,18 @@ def deck_play_laptop(song, start_at=0):
                 give_up = time.time() + 40          # the window has to open first
             time.sleep(0.5)
         if not (reply and reply.get("ok")):
-            toast("Apple Music couldn't play it", song["title"][:80], glyph="󰝛")
             note = STATE.parent / "deck-errors.log"
             with open(note, "a") as log:
                 log.write(json.dumps({"at": int(time.time()), "song": song.get("id"), "title": song["title"][:80],
                                       "reply": reply}, default=str)[:600] + "\n")
+            return False
         if start_at > 2:
             am_bridge({"action": "seek", "seconds": start_at}, timeout=4)
     else:
         with open(os.devnull, "w") as quiet, contextlib.redirect_stdout(quiet):
             ytm_play({"kind": "song", "video": song["video"], "title": song["title"], "playlist": "", "browse": "",
                       "subtitle": ""})
+    return True
 
 
 def deck_status(deck):
@@ -4234,8 +4241,13 @@ def deck_status(deck):
             "title": track.get("title", "")}
 
 
-def deck_start(deck, song=None, start_at=0):
-    """Play song (or the next in the set) wherever the Deck plays."""
+DECK_UNPLAYABLE_TRIES = 3     # songs in a row that won't play before the Deck stops
+
+
+def deck_start(deck, song=None, start_at=0, tries=0):
+    """Play song (or the next in the set) wherever the Deck plays. A song its
+    app can't play is passed over for the next, so the Deck never sits
+    "playing" in silence."""
     was = deck.get("now") or deck.pop("was", None)
     was_playing = deck.get("playing")
     if song is None:
@@ -4283,15 +4295,33 @@ def deck_start(deck, song=None, start_at=0):
         # otherwise it's paused first, so the pause can't catch the new one.
         other = was and was.get("service") != song.get("service") and was_playing
         if other and deck_can_quiet(was):
-            deck_play_laptop(song, start_at)
+            played = deck_play_laptop(song, start_at)
             deck_quiet(was)
         else:
             if other:
                 deck_quiet(was)
-            deck_play_laptop(song, start_at)
+            played = deck_play_laptop(song, start_at)
+        if played is False:
+            return deck_unplayable(deck, song, was, tries)
     deck["expect"] = {"uid": song["uid"], "since": time.time()}
     deck_watch()
     return True
+
+
+def deck_unplayable(deck, song, was, tries):
+    """song wouldn't start: it doesn't count as played; the next one starts
+    instead, or after a few in a row the Deck stops and says why."""
+    deck["now"] = None
+    deck["was"] = was
+    app = {"applemusic": "Apple Music", "ytmusic": "YouTube Music", "beatport": "Beatport"}.get(song.get("service"), "Its app")
+    if deck["set"] and tries + 1 < DECK_UNPLAYABLE_TRIES:
+        toast(f"Skipped {song['title'][:60]}", f"{app} couldn't play it, so the next song is on",
+              glyph="󰒭")
+        return deck_start(deck, tries=tries + 1)
+    deck["playing"] = False
+    toast(f"{app} couldn't play {song['title'][:60]}",
+          "The Deck has stopped. Press Play to try the next song", glyph="󰝛")
+    return False
 
 
 def deck_page(song, op):

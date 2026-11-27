@@ -2551,7 +2551,6 @@ Item {
             Minimap {
               Layout.preferredWidth: 36
               Layout.fillHeight: true
-              visible: setModel.count > 8
             }
             }
           }
@@ -4633,9 +4632,10 @@ Item {
         const g = getContext("2d")
         g.reset()
         const n = map.set.length
-        if (!n) return
-        const h = height, w = width, step = h / n
+        const h = height, w = width, step = h / Math.max(1, n)
         const css = (c, a) => "rgba(" + Math.round(c.r * 255) + "," + Math.round(c.g * 255) + "," + Math.round(c.b * 255) + "," + a + ")"
+        // An empty set still shows where the shape will be.
+        if (!n) { g.fillStyle = css(root.ink, 0.12); g.fillRect(w - 6, 0, 6, h); return }
         const tone = (e) => e > 0 ? css(Qt.tint(root.teal, Util.alpha(root.amber, Math.min(1, Math.max(0, (e - 2) / 7)))), 0.85)
                                   : css(root.ink, 0.22)
         for (let i = 0; i < n; i++) {
@@ -4652,14 +4652,18 @@ Item {
         g.lineWidth = 1.5
         g.lineJoin = "round"
         g.beginPath()
-        let started = false
+        const points = []
         for (let i = 0; i < n; i++) {
           const e = map.set[i].energy || 0
-          if (!e) continue
-          const x = (w - 12) * (1 - (e - 1) / 9) + 2, y = (i + 0.5) * step
-          if (!started) { g.moveTo(x, y); started = true } else g.lineTo(x, y)
+          if (e) points.push({ x: (w - 12) * (1 - (e - 1) / 9) + 2, y: (i + 0.5) * step })
         }
+        points.forEach((p, i) => i ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y))
         g.stroke()
+        // Few songs: a dot on each, so a short set still has a shape.
+        if (n <= 8) {
+          g.fillStyle = css(root.amber, 0.95)
+          points.forEach((p) => { g.beginPath(); g.arc(p.x, p.y, 2.5, 0, Math.PI * 2); g.fill() })
+        }
       }
       Connections { target: root; function onDeckChanged() { paint.requestPaint() } }
       onWidthChanged: requestPaint()
