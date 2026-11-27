@@ -16,7 +16,7 @@ SOCK = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "afterlight-beatport.
 out_lock = threading.Lock()
 pending = {}          # request id -> (event, holder) waiting for the extension's reply
 pending_lock = threading.Lock()
-KINDS = {"open", "check", "page", "tabs", "fetch", "scratch", "scratch-close", "media", "applemusic"}
+KINDS = {"open", "check", "page", "tabs", "fetch", "scratch", "scratch-close", "media", "applemusic", "version", "reload"}
 
 
 def send(message):

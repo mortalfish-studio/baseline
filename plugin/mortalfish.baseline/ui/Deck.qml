@@ -623,6 +623,7 @@ Item {
   property bool filterOpen: false
   property bool shapeOpen: false
   readonly property var shapes: [
+    { key: "bumps", glyph: "◆", label: strings.t("deck.shapeBumps") },
     { key: "shuffle", glyph: "󰒝", label: strings.t("deck.shuffle") },
     { key: "arc", glyph: "󱗿", label: strings.t("deck.shapeArc") },
     { key: "harmonic", glyph: "󰽰", label: strings.t("deck.shapeHarmonic") },
@@ -631,6 +632,18 @@ Item {
     { key: "energy", glyph: "󱐋", label: strings.t("deck.shapeEnergy") }
   ]
   property bool playedOpen: false
+  // ---- party: the stage (the playing song, big, for the room), guests'
+  // requests from their phones, and a lock so guests can't undo the night.
+  property bool stageOn: false
+  property bool guestsOpen: false
+  readonly property bool locked: !!deck.lock
+  readonly property var requests: deck.requests || []
+  readonly property var guests: deck.guests || null
+  // Hold the lock for a second to open it again (a tap does nothing).
+  property real unlockHeld: 0
+  function hourOf(t) {
+    return t ? new Date(t * 1000).toLocaleTimeString(Qt.locale(Commons.I18n.formatLocale), "h AP").replace(":00", "") : ""
+  }
 
   // Saved sets, and your own playlists, for the crate before you search.
   property var savedSets: []
@@ -697,7 +710,9 @@ Item {
       anchors.fill: parent
       focus: true
       Keys.onEscapePressed: {
-        if (root.bloomOpen) root.closeBloom()
+        if (root.stageOn) root.stageOn = false
+        else if (root.guestsOpen) root.guestsOpen = false
+        else if (root.bloomOpen) root.closeBloom()
         else if (root.openList) root.closePlaylist()
         else if (root.selectedUids.length) root.clearPicked()
         else if (root.filterOpen || root.saving) { root.filterOpen = false; root.saving = false; root.filter = "" }
@@ -710,8 +725,9 @@ Item {
         if (event.key === Qt.Key_Home || (event.key === Qt.Key_N && !event.modifiers)) { root.toTop(); event.accepted = true }
         else if (event.key === Qt.Key_End) { root.toEnd(); event.accepted = true }
         else if (event.key === Qt.Key_Slash) { root.saving = false; root.filterOpen = true; event.accepted = true }
-        else if (event.key === Qt.Key_Z && (event.modifiers & Qt.ControlModifier)) { root.run(["deck", "undo"]); event.accepted = true }
-        else if (event.key === Qt.Key_Delete && root.selectedUids.length) { root.placePicked("remove"); event.accepted = true }
+        else if (event.key === Qt.Key_P && !event.modifiers) { root.stageOn = !root.stageOn; event.accepted = true }
+        else if (event.key === Qt.Key_Z && (event.modifiers & Qt.ControlModifier)) { if (!root.locked) root.run(["deck", "undo"]); event.accepted = true }
+        else if (event.key === Qt.Key_Delete && root.selectedUids.length) { if (!root.locked) root.placePicked("remove"); event.accepted = true }
         else if (event.key === Qt.Key_W && !event.modifiers) { root.wall = !root.wall; event.accepted = true }
         else if (event.key === Qt.Key_A && (event.modifiers & Qt.ControlModifier)) {
           const f = {}; for (const x of (root.deck.set || [])) f[x.uid] = true
@@ -778,6 +794,34 @@ Item {
             Label { text: strings.t("deck.title").toUpperCase(); font.pixelSize: 22; font.bold: true; font.letterSpacing: 3; color: root.teal }
           }
           Item { Layout.fillWidth: true }
+          // Party: the stage, guests' requests, the lock.
+          ActionButton {
+            icon: "󰐯"
+            text: strings.t("deck.stage")
+            tone: root.teal
+            enabled: !!root.now
+            onClicked: root.stageOn = true
+          }
+          ActionButton {
+            icon: "󰄜"
+            text: root.requests.length ? strings.tn("deck.requestsCount", root.requests.length).arg(root.requests.length) : strings.t("deck.guests")
+            tone: root.guests || root.requests.length ? root.amber : root.teal
+            onClicked: root.guestsOpen = !root.guestsOpen
+          }
+          ActionButton {
+            id: lockButton
+            icon: root.locked ? "󰌾" : "󰍁"
+            text: root.locked ? (root.unlockHeld > 0 ? strings.t("deck.unlockHold") : strings.t("deck.locked")) : strings.t("deck.lock")
+            tone: root.locked ? root.amber : root.teal
+            onClicked: if (!root.locked) root.run(["deck", "lock", "on"])
+            // Locked: hold it to open (so a tap from a guest does nothing).
+            TapHandler {
+              enabled: root.locked
+              gesturePolicy: TapHandler.DragThreshold
+              onPressedChanged: { root.unlockHeld = pressed ? 1 : 0; if (pressed) unlockTimer.restart(); else unlockTimer.stop() }
+            }
+            Timer { id: unlockTimer; interval: 1000; onTriggered: { root.unlockHeld = 0; root.run(["deck", "lock", "off"]) } }
+          }
           ActionButton {
             visible: root.popped
             icon: "⤓"
@@ -847,6 +891,61 @@ Item {
               Label { text: strings.t("deck.crate").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; opacity: 0.5 }
               Item { Layout.fillWidth: true }
               RoundButton { glyph: "󰅁"; tip: strings.t("deck.crateClose"); onClicked: root.setCrate(false) }
+            }
+
+            // ---- guests' requests: from their phones, waiting for you to take them
+            Rectangle {
+              Layout.fillWidth: true
+              visible: root.requests.length > 0
+              implicitHeight: asks.implicitHeight + 16
+              radius: Style.cornerRadius > 0 ? 6 : 0
+              color: Util.alpha(root.teal, 0.06)
+              border.width: 1
+              border.color: Util.alpha(root.teal, 0.4)
+              ColumnLayout {
+                id: asks
+                x: 10; y: 8
+                width: parent.width - 20
+                spacing: 4
+                RowLayout {
+                  Layout.fillWidth: true
+                  Label {
+                    Layout.fillWidth: true
+                    text: "󰄜  " + strings.tn("deck.requestsCount", root.requests.length).arg(root.requests.length).toUpperCase()
+                    font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal
+                  }
+                  HeadLink { glyph: "󰆴"; tip: strings.t("deck.requestsClear"); onTapped: root.run(["deck", "requests", "clear"]) }
+                }
+                Repeater {
+                  model: root.requests.slice(-5).reverse()
+                  delegate: RowLayout {
+                    id: ask
+                    required property var modelData
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Cover { url: ask.modelData.thumb || ""; size: 36 }
+                    ColumnLayout {
+                      Layout.fillWidth: true
+                      spacing: 1
+                      Label { Layout.fillWidth: true; text: ask.modelData.title; font.bold: true; font.pixelSize: Style.font.caption }
+                      Label {
+                        Layout.fillWidth: true
+                        text: ask.modelData.artist + (ask.modelData.by ? "  ·  " + strings.t("deck.requestBy").arg(ask.modelData.by) : "")
+                        font.pixelSize: Style.font.caption; opacity: 0.6
+                      }
+                    }
+                    RoundButton { glyph: "◆"; tip: strings.t("deck.requestMix"); onClicked: root.run(["deck", "request", "take", ask.modelData.rid, "--mix"]) }
+                    RoundButton { glyph: "󰒭"; tip: strings.t("deck.bloomNext"); onClicked: root.run(["deck", "request", "take", ask.modelData.rid, "--next"]) }
+                    RoundButton { glyph: "󰐒"; tip: strings.t("deck.bloomLater"); onClicked: root.run(["deck", "request", "take", ask.modelData.rid]) }
+                    RoundButton { glyph: "󰅖"; tip: strings.t("deck.requestDrop"); onClicked: root.run(["deck", "request", "drop", ask.modelData.rid]) }
+                  }
+                }
+                Label {
+                  visible: root.requests.length > 5
+                  text: strings.t("deck.requestsMore").arg(root.requests.length - 5)
+                  font.pixelSize: Style.font.caption; opacity: 0.5
+                }
+              }
             }
 
 
@@ -1424,12 +1523,12 @@ Item {
                   ActionButton { icon: "󰒭"; text: strings.t("deck.next"); tone: root.teal; enabled: (root.deck.set || []).length > 0; onClicked: root.skip() }
                   // Playing above; the set and the night below the bar.
                   Rectangle { width: 1; height: 30; color: Util.alpha(root.ink, 0.18) }
-                  ActionButton { icon: "✦"; text: strings.t("deck.fill"); onClicked: root.runLong(["deck", "fill", "--service", root.service]) }
+                  ActionButton { icon: "✦"; text: strings.t("deck.fill"); enabled: !root.locked; onClicked: root.runLong(["deck", "fill", "--service", root.service]) }
                   ActionButton {
                     icon: "󰘶"
                     text: strings.t("deck.shape")
                     tone: root.shapeOpen ? root.amber : root.teal
-                    enabled: (root.deck.set || []).length > 1
+                    enabled: (root.deck.set || []).length > 1 && !root.locked
                     onClicked: { root.shapeOpen = !root.shapeOpen; root.saving = false; root.filterOpen = false }
                   }
                   // Auto-DJ: with three songs left, Grok adds more that carry the night on.
@@ -1468,6 +1567,9 @@ Item {
                 text: (root.deck.set || []).length > 0
                   ? strings.tn("deck.count", (root.deck.set || []).length).arg((root.deck.set || []).length)
                     + "  ·  " + root.span(root.setSeconds) + "  ·  " + strings.t("deck.endsAt").arg(root.clockAt(root.setSeconds))
+                    + (!root.deck.autodj ? "" : "  ·  ∞ " + ((root.deck.set || []).length > 3
+                        ? strings.t("deck.autodjAt").arg(root.clockAt(root.startsAt[(root.deck.set || []).length - 3] || 0))
+                        : strings.t("deck.autodjSoon")))
                   : ""
                 font.pixelSize: Style.font.caption
                 opacity: 0.6
@@ -1482,11 +1584,11 @@ Item {
               HeadLink { visible: root.selectedUids.length > 0; glyph: "󰐊"; text: strings.t("deck.bloomNow"); onTapped: root.placePicked("now") }
               HeadLink { visible: root.selectedUids.length > 0; glyph: "󰒭"; text: strings.t("deck.bloomNext"); onTapped: root.placePicked("next") }
               HeadLink { visible: root.selectedUids.length > 0; glyph: "󰐒"; text: strings.t("deck.bloomLater"); onTapped: root.placePicked("end") }
-              HeadLink { visible: root.selectedUids.length > 0; glyph: "󰅖"; text: strings.t("deck.remove"); onTapped: root.placePicked("remove") }
+              HeadLink { visible: root.selectedUids.length > 0 && !root.locked; glyph: "󰅖"; text: strings.t("deck.remove"); onTapped: root.placePicked("remove") }
               HeadLink { visible: root.selectedUids.length > 0; glyph: "󰜺"; onTapped: root.clearPicked() }
               // Otherwise: the tools for the set.
               HeadLink {
-                visible: root.selectedUids.length === 0 && (root.deck.undo || 0) > 0
+                visible: root.selectedUids.length === 0 && (root.deck.undo || 0) > 0 && !root.locked
                 glyph: "󰕌"; text: strings.t("deck.undo"); onTapped: root.run(["deck", "undo"])
               }
               HeadLink {
@@ -1505,7 +1607,7 @@ Item {
                 onTapped: root.wall = !root.wall
               }
               HeadLink {
-                visible: root.selectedUids.length === 0 && (root.deck.set || []).length > 0
+                visible: root.selectedUids.length === 0 && (root.deck.set || []).length > 0 && !root.locked
                 glyph: "󰆴"; tip: strings.t("deck.clearTip"); onTapped: root.run(["deck", "clear"])
               }
             }
@@ -1687,13 +1789,24 @@ Item {
                     delegate: Rectangle {
                       id: was
                       required property var modelData
+                      required property int index
+                      // A new hour starts here: say which (the night read back in hours).
+                      readonly property string hour: root.hourOf(modelData.playedAt || 0)
+                      readonly property bool newHour: hour !== "" && (index === 0 || root.hourOf((root.deck.played[index - 1] || {}).playedAt || 0) !== hour)
                       width: setList.width
-                      height: 40
+                      height: 40 + (newHour ? 24 : 0)
                       radius: Style.cornerRadius > 0 ? 4 : 0
                       color: wasHover.hovered ? Util.alpha(root.ink, 0.05) : "transparent"
                       opacity: wasHover.hovered ? 1 : 0.55
+                      Label {
+                        visible: was.newHour
+                        x: 40; y: 6
+                        text: was.hour
+                        font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal
+                      }
                       RowLayout {
                         anchors.fill: parent
+                        anchors.topMargin: was.newHour ? 24 : 0
                         anchors.leftMargin: 40; anchors.rightMargin: 8
                         spacing: 10
                         Cover { url: was.modelData.thumb || ""; size: 30 }
@@ -1965,7 +2078,7 @@ Item {
                       }
                       RoundButton { glyph: "󰐊"; tip: strings.t("deck.playNow"); onClicked: root.run(["deck", "play", slot.uid]) }
                       RoundButton { glyph: row.isPinned ? "󰐃" : "󰤰"; tip: row.isPinned ? strings.t("deck.unpin") : strings.t("deck.pin"); on: row.isPinned; onClicked: root.run(["deck", "pin", slot.uid]) }
-                      RoundButton { glyph: "󰅖"; tip: strings.t("deck.remove"); onClicked: root.run(["deck", "remove", slot.uid]) }
+                      RoundButton { visible: !root.locked; glyph: "󰅖"; tip: strings.t("deck.remove"); onClicked: root.run(["deck", "remove", slot.uid]) }
                     }
                     HoverHandler { id: rowHover; cursorShape: root.dragging ? Qt.ClosedHandCursor : Qt.OpenHandCursor }
                     TapHandler {
@@ -2016,6 +2129,37 @@ Item {
                 boundsBehavior: Flickable.StopAtBounds
                 cellWidth: Math.floor(width / Math.max(1, Math.floor(width / 176)))
                 cellHeight: cellWidth + 44
+                header: Item {
+                  width: wallView.width
+                  height: root.now ? 196 : 0
+                  visible: !!root.now
+                  Rectangle {
+                    anchors.fill: parent; anchors.margins: 7; anchors.bottomMargin: 12
+                    radius: Style.cornerRadius > 0 ? 6 : 0
+                    color: Util.alpha(root.amber, 0.07)
+                    border.width: 1; border.color: Util.alpha(root.amber, 0.35)
+                    Cover { id: wallNow; x: 12; y: 12; size: parent.height - 24; url: root.now ? root.now.thumb || "" : "" }
+                    ColumnLayout {
+                      anchors.left: wallNow.right; anchors.leftMargin: 18; anchors.right: parent.right; anchors.rightMargin: 18
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: 6
+                      Label { text: strings.t("deck.nowShort").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 3; color: root.amber }
+                      Label { Layout.fillWidth: true; text: root.now ? root.titleParts(root.now.title).main : ""; font.pixelSize: 26; font.bold: true; color: root.amber; elide: Text.ElideRight }
+                      Label { Layout.fillWidth: true; text: root.now ? root.now.artist : ""; font.pixelSize: Style.font.subtitle; elide: Text.ElideRight }
+                      Rectangle {
+                        Layout.fillWidth: true; Layout.topMargin: 6
+                        height: 3; radius: 1.5
+                        color: Util.alpha(root.ink, 0.12)
+                        Rectangle {
+                          height: parent.height; radius: 1.5
+                          width: parent.width * Math.min(1, root.shownTime / Math.max(1, root.pos.length || root.lengthOf(root.now)))
+                          gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: root.amber } GradientStop { position: 1; color: root.teal } }
+                        }
+                      }
+                      Label { text: "−" + root.clock(root.nowLeft); font.pixelSize: Style.font.caption; color: root.teal }
+                    }
+                  }
+                }
                 delegate: Item {
                   id: tile
                   required property int index
@@ -2308,6 +2452,270 @@ Item {
                 }
               }
             }
+          }
+        }
+      }
+
+      // ---- the stage: the playing song, big, for the room (P, or Stage)
+      Rectangle {
+        id: stageView
+        anchors.fill: parent
+        z: 40
+        visible: opacity > 0
+        opacity: root.stageOn ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: Style.duration(root.stageOn ? 220 : 140); easing.type: Easing.OutCubic } }
+        color: root.ground
+        TapHandler {}       // nothing underneath takes a tap while it's up
+        HoverHandler { cursorShape: Qt.ArrowCursor }
+
+        readonly property var nextUp: (root.deck.set || []).slice(0, 3)
+        readonly property real big: Math.min(height * 0.5, width * 0.34)
+
+        // The cover's colours, washed across the whole stage.
+        Image { id: stageGlowSrc; anchors.fill: parent; source: glow.url; sourceSize: Qt.size(48, 48); fillMode: Image.PreserveAspectCrop; visible: false; asynchronous: true }
+        MultiEffect {
+          source: stageGlowSrc; anchors.fill: parent
+          blurEnabled: true; blur: 1.0; blurMax: 64; saturation: 0.35
+          opacity: glow.url !== "" ? 0.32 : 0
+          Behavior on opacity { NumberAnimation { duration: Style.duration(900) } }
+        }
+        Rectangle {
+          anchors.fill: parent
+          gradient: Gradient {
+            GradientStop { position: 0; color: Util.alpha(root.ground, 0.25) }
+            GradientStop { position: 0.7; color: Util.alpha(root.ground, 0.7) }
+            GradientStop { position: 1; color: root.ground }
+          }
+        }
+        Rectangle {
+          anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+          height: 3
+          gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: root.amber } GradientStop { position: 1; color: root.teal } }
+        }
+
+        // The time, and the way out.
+        Label {
+          x: 36; y: 28
+          text: stageClock.now
+          font.pixelSize: 22; font.letterSpacing: 3; color: root.teal
+          Timer { id: stageClock; property string now: ""; interval: 10000; repeat: true; running: stageView.visible; triggeredOnStart: true
+                  onTriggered: now = new Date().toLocaleTimeString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat) }
+        }
+        RowLayout {
+          anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 26
+          spacing: 10
+          Label { text: root.locked ? "󰌾" : ""; font.family: "Iosevka Nerd Font Propo"; color: root.amber; visible: root.locked }
+          Label { text: strings.t("deck.stageLeave"); font.pixelSize: Style.font.caption; opacity: 0.4 }
+          RoundButton { glyph: "󰅖"; tip: strings.t("deck.stageLeaveTip"); onClicked: root.stageOn = false }
+        }
+
+        // The song: cover, then its name, big.
+        Item {
+          id: stageSong
+          anchors.left: parent.left; anchors.right: parent.right
+          anchors.leftMargin: 64; anchors.rightMargin: 64
+          y: parent.height * 0.11
+          height: stageView.big
+          Rectangle {
+            id: stageCoverShadow
+            width: stageView.big; height: width
+            radius: Style.cornerRadius > 0 ? 8 : 0
+            color: "transparent"
+            layer.enabled: true
+            layer.effect: MultiEffect { shadowEnabled: true; shadowColor: Util.alpha(root.amber, 0.45); shadowBlur: 1.0; shadowVerticalOffset: 10 }
+            Cover { anchors.fill: parent; size: stageView.big; url: root.now ? root.now.thumb || "" : "" }
+          }
+          ColumnLayout {
+            id: stageWords
+            anchors.left: stageCoverShadow.right; anchors.leftMargin: 56
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 10
+            // A new song arrives: its name slides in.
+            property string uid: root.now ? root.now.uid : ""
+            onUidChanged: if (stageView.visible && !Style.reduceMotion) arrive.restart()
+            SequentialAnimation {
+              id: arrive
+              ParallelAnimation {
+                NumberAnimation { target: stageWords; property: "opacity"; from: 0; to: 1; duration: Style.duration(260); easing.type: Easing.OutCubic }
+                NumberAnimation { target: stageWords; property: "anchors.leftMargin"; from: 96; to: 56; duration: Style.duration(260); easing.type: Easing.OutCubic }
+              }
+            }
+            Label { text: (root.deck.playing ? strings.t("deck.nowPlaying") : strings.t("deck.paused")).toUpperCase(); font.pixelSize: Style.font.subtitle; font.letterSpacing: 6; color: root.teal }
+            Label {
+              Layout.fillWidth: true
+              text: root.now ? root.titleParts(root.now.title).main : ""
+              font.pixelSize: Math.max(34, Math.min(76, stageView.width / 20))
+              font.bold: true
+              color: root.amber
+              wrapMode: Text.Wrap
+              maximumLineCount: 2
+              elide: Text.ElideRight
+            }
+            Label {
+              Layout.fillWidth: true
+              visible: text !== ""
+              text: root.now ? root.titleParts(root.now.title).extra : ""
+              font.pixelSize: Math.max(16, Math.min(26, stageView.width / 56))
+              color: root.amber; opacity: 0.75
+              elide: Text.ElideRight
+            }
+            Label {
+              Layout.fillWidth: true
+              text: root.now ? root.now.artist : ""
+              font.pixelSize: Math.max(22, Math.min(40, stageView.width / 36))
+              elide: Text.ElideRight
+            }
+            Item { implicitHeight: 14 }
+            Rectangle {
+              Layout.fillWidth: true
+              height: 4; radius: 2
+              color: Util.alpha(root.ink, 0.12)
+              Rectangle {
+                height: parent.height; radius: 2
+                width: parent.width * Math.min(1, root.shownTime / Math.max(1, root.pos.length || root.lengthOf(root.now)))
+                gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: root.amber } GradientStop { position: 1; color: root.teal } }
+              }
+            }
+            RowLayout {
+              Layout.fillWidth: true
+              Label { text: root.clock(root.shownTime); font.pixelSize: Style.font.subtitle; opacity: 0.6 }
+              Item { Layout.fillWidth: true }
+              Label { text: "−" + root.clock(root.nowLeft); font.pixelSize: Style.font.subtitle; color: root.teal }
+            }
+          }
+        }
+
+        // The sound, across the bottom.
+        DeckVisualizer {
+          anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+          anchors.leftMargin: 64; anchors.rightMargin: stageQr.visible ? stageQr.width + 96 : 64
+          anchors.bottomMargin: 150
+          height: Math.min(150, stageView.height * 0.16)
+          active: stageView.visible && !!root.now
+          playing: root.deck.playing
+          live: !root.inSonos
+          amber: root.amber; teal: root.teal; ground: root.ground
+        }
+
+        // Up next: the next three, and when each starts.
+        RowLayout {
+          anchors.left: parent.left; anchors.bottom: parent.bottom
+          anchors.leftMargin: 64; anchors.bottomMargin: 40
+          anchors.right: stageQr.visible ? stageQr.left : parent.right; anchors.rightMargin: 32
+          spacing: 28
+          visible: stageView.nextUp.length > 0
+          Label { text: strings.t("deck.upNext").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 4; color: root.teal; Layout.alignment: Qt.AlignVCenter }
+          Repeater {
+            model: stageView.nextUp
+            delegate: RowLayout {
+              id: coming
+              required property var modelData
+              required property int index
+              spacing: 12
+              Layout.maximumWidth: 320
+              Cover { url: coming.modelData.thumb || ""; size: 64 }
+              ColumnLayout {
+                spacing: 2
+                Layout.fillWidth: true
+                Label { Layout.fillWidth: true; text: root.titleParts(coming.modelData.title).main; font.bold: true; elide: Text.ElideRight }
+                Label { Layout.fillWidth: true; text: coming.modelData.artist; opacity: 0.6; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
+                Label { text: root.clockAt(root.startsAt[coming.index] || 0); color: root.teal; font.pixelSize: Style.font.caption }
+              }
+            }
+          }
+          Item { Layout.fillWidth: true }
+        }
+
+        // Guests: scan to ask for a song.
+        Column {
+          id: stageQr
+          visible: !!root.guests && (root.guests.qr || "") !== ""
+          anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 40
+          spacing: 8
+          Rectangle {
+            width: 150; height: 150
+            radius: Style.cornerRadius > 0 ? 6 : 0
+            color: "white"
+            Image {
+              anchors.fill: parent; anchors.margins: 6
+              source: root.guests && root.guests.qr ? "file://" + root.guests.qr + "?" + root.guests.since : ""
+              smooth: false; cache: false
+              fillMode: Image.PreserveAspectFit
+            }
+          }
+          Label { width: 150; horizontalAlignment: Text.AlignHCenter; text: strings.t("deck.stageScan"); font.pixelSize: Style.font.caption; color: root.teal; wrapMode: Text.Wrap }
+        }
+      }
+
+      // ---- guests: the QR code for the requests page, and how requests go in
+      Rectangle {
+        id: guestsCard
+        visible: root.guestsOpen
+        z: 50
+        anchors.top: parent.top; anchors.right: parent.right
+        anchors.topMargin: 78; anchors.rightMargin: 22
+        width: 340
+        height: guestCol.implicitHeight + 28
+        radius: Style.cornerRadius > 0 ? 8 : 0
+        color: Util.alpha(root.ground, 0.97)
+        border.width: 1
+        border.color: Util.alpha(root.teal, 0.5)
+        TapHandler {}       // keep taps inside the card
+        ColumnLayout {
+          id: guestCol
+          x: 14; y: 14
+          width: parent.width - 28
+          spacing: 10
+          Label { text: strings.t("deck.guestsTitle").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal }
+          Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            text: root.guests ? strings.t("deck.guestsOnHint") : strings.t("deck.guestsOffHint")
+            font.pixelSize: Style.font.caption; opacity: 0.7
+          }
+          Rectangle {
+            visible: !!root.guests && (root.guests.qr || "") !== ""
+            Layout.alignment: Qt.AlignHCenter
+            width: 200; height: 200
+            radius: Style.cornerRadius > 0 ? 6 : 0
+            color: "white"
+            Image {
+              anchors.fill: parent; anchors.margins: 8
+              source: root.guests && root.guests.qr ? "file://" + root.guests.qr + "?" + root.guests.since : ""
+              smooth: false
+              fillMode: Image.PreserveAspectFit
+              cache: false
+            }
+          }
+          Label {
+            visible: !!root.guests
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignHCenter
+            text: root.guests ? root.guests.url.replace(/\/[^\/]*$/, "/…") : ""
+            font.pixelSize: Style.font.caption; opacity: 0.5
+          }
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            ActionButton {
+              icon: root.guests ? "󰅖" : "󰐲"
+              text: root.guests ? strings.t("deck.guestsStop") : strings.t("deck.guestsStart")
+              tone: root.guests ? root.teal : root.amber
+              onClicked: root.run(["deck", "guests", root.guests ? "off" : "on"])
+            }
+            ActionButton {
+              icon: root.deck.requestsAuto ? "󰄬" : "󰄱"
+              text: strings.t("deck.requestsAuto")
+              tone: root.deck.requestsAuto ? root.amber : root.teal
+              onClicked: root.run(["deck", "requests", "auto", root.deck.requestsAuto ? "off" : "on"])
+            }
+          }
+          Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            text: root.deck.requestsAuto ? strings.t("deck.requestsAutoOn") : strings.t("deck.requestsAutoOff")
+            font.pixelSize: Style.font.caption; opacity: 0.55
           }
         }
       }

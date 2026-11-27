@@ -12,6 +12,7 @@ Other people install this from GitHub, so the docs are part of the change, not a
 | `install.sh`, prerequisites, apps it installs, the install command | `docs/install.md` and the README's install section |
 | the Chrome add-on (`chrome/`) or its native host | `docs/chrome-extension.md`, and bump `version` in its `manifest.json` |
 | where an app (T3 Code, Grok Bot, Superwhisper, Chrome) is wired in | `docs/adapting.md` |
+| the Deck's guest requests page (`web/requests.html`, served by `afterlight deck guests serve`) | the README's Deck section and `docs/system-changes.md` (it listens on the network) |
 | health checks, repair, looks, the catalog, sharing | the matching README section |
 | the catalog format or its rules | also `tools/validate.py` and `README.md` in `mortalfish-studio/baseline-looks` (Baseline's `validate_shared` and the catalog's validator must agree) |
 

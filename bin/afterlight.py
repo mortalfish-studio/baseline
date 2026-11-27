@@ -3156,6 +3156,31 @@ def beatport_bridge(request, timeout=5):
     return reply if isinstance(reply, dict) else None
 
 
+def addon_wanted():
+    return str(read_json(REPO / "chrome/beatport-baseline/manifest.json", {}).get("version", ""))
+
+
+def addon_version():
+    """The version of the add-on running in Chrome: "" when it's too old to
+    say, None when Chrome or the add-on isn't running."""
+    reply = beatport_bridge({"type": "version"}, timeout=2)
+    if reply is None:
+        return None
+    return str(reply.get("version") or "")
+
+
+def addon_reload():
+    """Ask the add-on to reload itself, so a pulled update takes; True when
+    it's then on the repo's version."""
+    if not (beatport_bridge({"type": "reload"}, timeout=2) or {}).get("ok"):
+        return False
+    for _ in range(20):
+        time.sleep(0.5)
+        if addon_version() == addon_wanted():
+            return True
+    return False
+
+
 def beatport_open(url, play=False):
     """Open a Beatport page in the Beatport app; the new window replaces the
     old one, so there's only ever one player. With play, the Baseline for
@@ -3869,7 +3894,8 @@ DECK_UNDO = STATE.parent / "deck-undo.json"           # the set before each of t
 DECK_SETS = STATE.parent / "deck-sets.json"           # sets you saved
 DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kind": "laptop"}, "playing": False,
               "paused": False, "sleep": None, "crossfade": False, "autodj": False, "autodjAt": 0, "handoff": "",
-              "pushed": [], "pushedFrom": 1, "expect": None, "was": None, "updated": 0}
+              "pushed": [], "pushedFrom": 1, "expect": None, "was": None, "updated": 0,
+              "lock": False, "requests": [], "guests": None, "requestsAuto": False}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -4191,7 +4217,7 @@ def deck_start(deck, song=None, start_at=0):
             return False
         song = deck["set"].pop(0)
     if deck.get("now") and deck["now"]["uid"] != song["uid"]:
-        deck["played"] = (deck["played"] + [deck["now"]])[-DECK_HISTORY:]
+        deck["played"] = (deck["played"] + [{**deck["now"], "playedAt": int(time.time())}])[-DECK_HISTORY:]
     deck["now"] = song
     deck["set"] = [s for s in deck["set"] if s["uid"] != song["uid"]]
     deck["playing"] = True
@@ -4331,7 +4357,7 @@ def deck_tick(last):
                 at = next((i for i, s in enumerate(ordered) if s["uid"] == uid), None)
                 if at is None:
                     return
-                d["played"] = (d["played"] + ordered[:at])[-DECK_HISTORY:]
+                d["played"] = (d["played"] + [{**x, "playedAt": int(time.time())} for x in ordered[:at]])[-DECK_HISTORY:]
                 d["now"], d["set"] = ordered[at], ordered[at + 1:]
             deck_update(advance)
         # Near the end of what the room was given: give it the next songs.
@@ -4814,7 +4840,7 @@ def deck_save_set(name, part="next"):
     if not name or not songs:
         return False
     saved = [s for s in deck_sets() if s["name"].lower() != name.lower()]
-    saved.insert(0, {"name": name, "saved": time.time(), "songs": [{k: v for k, v in s.items() if k != "warn"} for s in songs][:300]})
+    saved.insert(0, {"name": name, "saved": time.time(), "songs": [{k: v for k, v in s.items() if k not in ("warn", "playedAt")} for s in songs][:300]})
     write_atomic(DECK_SETS, json.dumps(saved[:50]))
     return True
 
@@ -4866,6 +4892,8 @@ def deck_shape(d, how):
     slots = [i for i, s in enumerate(d["set"]) if s["uid"] not in d["pinned"]]
     songs = [d["set"][i] for i in slots]
     info = lambda s: full.get(s["uid"], {})
+    if how == "bumps":
+        return deck_smooth_bumps(d, full, details.get("now"))
     field = {"tempo": "bpm", "smooth": "bpm", "energy": "energy", "arc": "energy", "harmonic": "key"}.get(how)
     if not field:
         return False
@@ -4900,6 +4928,51 @@ def deck_shape(d, how):
     for i, song in zip(slots, known + rest):
         d["set"][i] = song
     return True
+
+
+def deck_bump(before, song):
+    """How badly song sits after before: a key clash or a tempo jump 2 each,
+    the same artist again 3."""
+    if not before:
+        return 0
+    return (0 if keys_fit(before.get("key"), song.get("key")) else 2) \
+        + (0 if tempos_fit(before.get("bpm"), song.get("bpm")) else 2) \
+        + (3 if deck_artists(before) & deck_artists(song) else 0)
+
+
+def deck_smooth_bumps(d, full, now):
+    """Fix the bumps: keep the order, but move a song that doesn't sit well
+    (the ◆ ones) to wherever it fits best, one move at a time, while that
+    makes the set smoother. Pinned songs stay put."""
+    info = lambda s: full.get(s["uid"], s)
+    pinned = set(d["pinned"])
+    def total(seq):
+        return sum(deck_bump(info(a) if a else now, info(b)) for a, b in zip([None] + seq[:-1], seq))
+    seq = list(d["set"])
+    best = total(seq)
+    moved = False
+    for _ in range(40):
+        bumpy = [i for i, s in enumerate(seq) if s["uid"] not in pinned
+                 and (deck_bump(info(seq[i - 1]) if i else now, info(s)) or
+                      (i + 1 < len(seq) and deck_bump(info(s), info(seq[i + 1]))))]
+        choice = None
+        for i in bumpy:
+            rest = seq[:i] + seq[i + 1:]
+            for j in range(len(rest) + 1):
+                if j == i:
+                    continue
+                trial = rest[:j] + [seq[i]] + rest[j:]
+                # pinned songs keep their places
+                if any(trial[k]["uid"] != seq[k]["uid"] for k in range(len(seq)) if seq[k]["uid"] in pinned):
+                    continue
+                score = total(trial)
+                if score < best and (choice is None or score < choice[0]):
+                    choice = (score, trial)
+        if not choice:
+            break
+        best, seq, moved = choice[0], choice[1], True
+    d["set"] = seq
+    return moved or True
 
 
 def deck_pause(d):
@@ -4980,6 +5053,233 @@ def deck_export(service, name, songs):
         reply = beatport_bridge({"type": "page", "op": {"type": "bp-export", "name": name, "ids": found}}, timeout=30)
     return {"ok": bool((reply or {}).get("ok")), "found": len(found), "missing": missing,
             "error": str((reply or {}).get("error") or ("" if reply else "the add-on isn't answering"))[:120]}
+
+
+# ---- guests' requests: a page on the home network where guests search Apple
+# Music and ask for a song; requests wait in the Deck until you take them.
+
+DECK_GUESTS_QR = STATE.parent / "deck-guests.png"
+DECK_GUESTS_PORT = 8765
+DECK_GUESTS_HOURS = 8           # the page closes itself after a night
+
+
+def lan_address():
+    try:
+        out = subprocess.run(["ip", "route", "get", "1.1.1.1"], capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    m = re.search(r"\bsrc (\d{1,3}(?:\.\d{1,3}){3})\b", out)
+    return m.group(1) if m else ""
+
+
+def deck_guests_on():
+    """Open the requests page: a server on the home network, at a link with a
+    secret in it, and a QR code of that link for the Deck to show."""
+    deck_guests_off()
+    ip = lan_address()
+    if not ip:
+        sys.exit("Not on a network.")
+    import secrets
+    token = secrets.token_urlsafe(9)
+    url = f"http://{ip}:{DECK_GUESTS_PORT}/{token}"
+    proc = subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "guests", "serve", token], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        subprocess.run(["qrencode", "-o", str(DECK_GUESTS_QR), "-s", "10", "-m", "2", url], timeout=5, check=True)
+    except (OSError, subprocess.SubprocessError):
+        DECK_GUESTS_QR.unlink(missing_ok=True)
+    deck_update(lambda d: d.update(guests={"url": url, "pid": proc.pid, "since": int(time.time()),
+                                           "qr": str(DECK_GUESTS_QR) if DECK_GUESTS_QR.is_file() else ""}))
+    return url
+
+
+def deck_guests_off():
+    guests = deck_read().get("guests") or {}
+    pid = guests.get("pid")
+    if isinstance(pid, int) and pid > 1:
+        try:
+            if "deck guests serve" in Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="ignore"):
+                os.kill(pid, 15)
+        except OSError:
+            pass
+    if guests:
+        deck_update(lambda d: d.update(guests=None))
+    DECK_GUESTS_QR.unlink(missing_ok=True)
+
+
+def deck_guest_song(item):
+    """A search result as guests see it (only what the page needs)."""
+    artist = str(item.get("subtitle", "")).split(" • ")[0]
+    return {"id": item["id"], "title": item["title"], "artist": clean_text(artist, 100), "thumb": item.get("thumb", "")}
+
+
+def deck_guests_serve(token):
+    """The requests page. Only three things are possible: see what's playing,
+    search Apple Music, and ask for a song that search returned. Each phone
+    can ask once every 20 seconds and have at most 5 waiting."""
+    import http.server
+    import threading
+    import urllib.parse
+    template = (REPO / "web/requests.html").read_text()
+    def page():
+        """The page in the theme you're running now (read each time, so a
+        theme change reaches the phones on their next refresh)."""
+        try:
+            colors = read_colors(STATE_HOME / "omarchy/current/theme/colors.toml")
+        except OSError:
+            colors = {}
+        out = template
+        for key, name, default in (("BG", "background", "#120c18"), ("INK", "foreground", "#f2e9f5"),
+                                   ("ACCENT", "accent", "#ff5aa5"), ("CYAN", "cyan", "#62b6ff")):
+            value = str(colors.get(name, ""))
+            out = out.replace(f"__{key}__", value if re.fullmatch(r"#[0-9a-fA-F]{6}", value) else default)
+        return out.encode()
+    served, asked, lock = {}, {}, threading.Lock()
+    started = time.time()
+
+    class Page(http.server.BaseHTTPRequestHandler):
+        server_version = "Baseline"
+        sys_version = ""
+
+        def log_message(self, *args):
+            pass
+
+        def send(self, code, body, kind="application/json"):
+            data = body if isinstance(body, bytes) else json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", kind + "; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Security-Policy", "default-src 'self'; img-src https:; style-src 'unsafe-inline'; script-src 'unsafe-inline'")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def route(self):
+            path = urllib.parse.urlsplit(self.path)
+            parts = path.path.strip("/").split("/")
+            if not parts or parts[0] != token or len(parts) > 2:
+                return None, None
+            return (parts[1] if len(parts) == 2 else ""), urllib.parse.parse_qs(path.query)
+
+        def do_GET(self):
+            where, query = self.route()
+            if where is None:
+                return self.send(404, b"", "text/plain")
+            if where == "":
+                return self.send(200, page(), "text/html")
+            if where == "now":
+                deck = deck_read()
+                show = lambda x: {"title": x.get("title", ""), "artist": x.get("artist", ""), "thumb": x.get("thumb", "")}
+                return self.send(200, {"now": show(deck["now"]) if deck.get("now") else None,
+                                       "next": [show(x) for x in deck["set"][:3]]})
+            if where == "search":
+                words = clean_text((query.get("q") or [""])[0], 100)
+                if not words:
+                    return self.send(200, {"songs": []})
+                songs = [deck_guest_song(i) for i in am_search(words) if i.get("kind") == "song"][:12]
+                with lock:
+                    for item in songs:
+                        served[item["id"]] = item
+                return self.send(200, {"songs": songs})
+            return self.send(404, b"", "text/plain")
+
+        def do_POST(self):
+            where, _ = self.route()
+            if where != "ask":
+                return self.send(404, b"", "text/plain")
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(min(length, 2000)) or b"{}")
+            except ValueError:
+                return self.send(400, {"ok": False})
+            song = served.get(str(body.get("id", ""))) if isinstance(body, dict) else None
+            if not song:
+                return self.send(200, {"ok": False, "error": "Search for it first."})
+            phone = self.client_address[0]
+            with lock:
+                if time.time() - asked.get(phone, 0) < 20:
+                    return self.send(200, {"ok": False, "error": "One at a time: try again in a few seconds."})
+                asked[phone] = time.time()
+            by = clean_text(str(body.get("by", "")), 30)
+            def ask(d):
+                waiting = d.get("requests") or []
+                if any(r["id"] == song["id"] for r in waiting) or any(x.get("id") == song["id"] for x in d["set"]):
+                    return "already"
+                if sum(1 for r in waiting if r.get("phone") == phone) >= 5:
+                    return "full"
+                d["requests"] = (waiting + [{**song, "rid": os.urandom(4).hex(), "by": by, "phone": phone,
+                                             "at": int(time.time())}])[-40:]
+                return "auto:" + d["requests"][-1]["rid"] if d.get("requestsAuto") else "ok"
+            result = deck_update(ask)
+            if result.startswith("auto:"):
+                if deck_request_take(result[5:], "mix"):
+                    deck_after_edit()
+                result = "ok"
+            if result == "full":
+                return self.send(200, {"ok": False, "error": "You've got 5 waiting already."})
+            if result == "ok":
+                toast(f"Request: {song['title']}", f"{song['artist']}" + (f" · from {by}" if by else ""), glyph="󰎈")
+            return self.send(200, {"ok": True})
+
+    class Server(http.server.ThreadingHTTPServer):
+        daemon_threads = True
+        request_queue_size = 16
+
+    server = Server(("0.0.0.0", DECK_GUESTS_PORT), Page)
+    server.timeout = 30
+    def closing():
+        while True:
+            time.sleep(30)
+            if time.time() - started > DECK_GUESTS_HOURS * 3600 or (deck_read().get("guests") or {}).get("url", "").rsplit("/", 1)[-1] != token:
+                server.shutdown()
+                return
+    threading.Thread(target=closing, daemon=True).start()
+    server.serve_forever()
+    if (deck_read().get("guests") or {}).get("url", "").endswith(token):
+        deck_update(lambda d: d.update(guests=None))
+
+
+def deck_request_take(rid, where="end"):
+    """Put a guest's request in the set (next, or at the end); True if it was there."""
+    def take(d):
+        found = next((r for r in d.get("requests") or [] if r.get("rid") == rid), None)
+        if not found:
+            return None
+        d["requests"] = [r for r in d["requests"] if r.get("rid") != rid]
+        song = deck_item("applemusic", {"id": found["id"], "title": found["title"], "artist": found["artist"],
+                                        "thumb": found.get("thumb", ""),
+                                        "from": f"Request · {found['by']}" if found.get("by") else "Request"})
+        if where == "next":
+            d["set"].insert(0, song)
+        elif where == "mix":
+            d["set"].insert(deck_mix_spot(d, song), song)
+        else:
+            d["set"].append(song)
+        return song
+    return deck_edit(take)
+
+
+DECK_MIX_REACH = 8              # a request mixed in plays within about this many songs
+
+
+def deck_mix_spot(d, song):
+    """Where a song fits best in the next few: the gap it sits in most
+    smoothly (key, tempo, artist), a little sooner rather than later, and
+    never ahead of a pinned song's place."""
+    details = deck_with_details({**d, "set": list(d["set"]) + [song], "played": [], "now": d.get("now")})
+    full = {s["uid"]: s for s in details["set"]}
+    me = full.get(song["uid"], song)
+    ordered = [details.get("now")] + [full.get(s["uid"], s) for s in d["set"]]
+    best, spot = None, min(len(d["set"]), 1)
+    for i in range(min(len(d["set"]), DECK_MIX_REACH) + 1):
+        before, after = ordered[i], ordered[i + 1] if i + 1 < len(ordered) else None
+        if after and after.get("uid") in d["pinned"]:
+            continue
+        cost = deck_bump(before, me) + (deck_bump(me, after) - deck_bump(before, after) if after else 0) + i * 0.3
+        if best is None or cost < best:
+            best, spot = cost, i
+    return spot
 
 
 # ---- the hand-off on the laptop: the song fades out over its last seconds,
@@ -5112,6 +5412,25 @@ def deck_command(settings, args):
     elif action == "shape" and len(args) == 2:
         if deck_edit(lambda d: deck_shape(d, args[1])):
             deck_after_edit()
+    elif action == "guests" and len(args) == 2 and args[1] in {"on", "off"}:
+        if args[1] == "on":
+            print(deck_guests_on())
+        else:
+            deck_guests_off()
+    elif action == "guests" and len(args) == 3 and args[1] == "serve" and re.fullmatch(r"[A-Za-z0-9_-]{8,40}", args[2]):
+        deck_guests_serve(args[2])
+    elif action == "request" and len(args) >= 3 and args[1] in {"take", "drop"}:
+        if args[1] == "take":
+            if deck_request_take(args[2], "next" if "--next" in args else "mix" if "--mix" in args else "end"):
+                deck_after_edit()
+        else:
+            deck_update(lambda d: d.update(requests=[r for r in d.get("requests") or [] if r.get("rid") != args[2]]))
+    elif action == "requests" and args[1:] == ["clear"]:
+        deck_update(lambda d: d.update(requests=[]))
+    elif action == "requests" and len(args) == 3 and args[1] == "auto" and args[2] in {"on", "off"}:
+        deck_update(lambda d: d.update(requestsAuto=args[2] == "on"))
+    elif action == "lock" and len(args) == 2 and args[1] in {"on", "off"}:
+        deck_update(lambda d: d.update(lock=args[1] == "on"))
     elif action == "autodj" and len(args) == 2 and args[1] in {"on", "off"}:
         deck_update(lambda d: d.update(autodj=args[1] == "on", autodjAt=0))
         if args[1] == "on":
@@ -5269,7 +5588,7 @@ def deck_command(settings, args):
     else:
         sys.exit("Usage: afterlight deck [state|add <ytmusic|applemusic> <item json> [--next|--play|--at <n>|--scatter]|move <uid> <index>|"
                  "remove <uid>…|place <now|next|end> <uid>…|chapter <uid> [name]|move-chapter <uid> <index>|undo|"
-                 "save <name> [--played|--all]|sets|load <name> [--replace]|grab [--next]|find-add <words> [--next]|build-from-playing [minutes]|next-up|songs <service> <album or playlist json>|forget <name>|shape <tempo|smooth|energy|arc|harmonic>|autodj <on|off>|autodj from <service> <item json>|export <service> <name> [--played|--all|--saved]|crossfade <on|off>|sleep <minutes|song|off>|details|"
+                 "save <name> [--played|--all]|sets|load <name> [--replace]|grab [--next]|find-add <words> [--next]|build-from-playing [minutes]|next-up|songs <service> <album or playlist json>|forget <name>|shape <tempo|smooth|energy|arc|harmonic|bumps>|autodj <on|off>|autodj from <service> <item json>|export <service> <name> [--played|--all|--saved]|crossfade <on|off>|sleep <minutes|song|off>|guests <on|off>|request <take|drop> <id> [--next|--mix]|requests <clear|auto on|auto off>|lock <on|off>|details|"
                  "pin <uid>|shuffle|clear|play [uid]|pause|next|previous|where <laptop|room id>|rooms|join <room id>|"
                  "leave <room id>|everywhere|volume <room id> <0-100>|search <service> <words>|mine <service>|fill [--service <s>]|"
                  "build <minutes> [what it's for] [--start <song>|--seed <item json>] [--replace] [--service <s>]|run]")
@@ -6208,6 +6527,11 @@ def health_checks(settings):
     host_ok = read_json(CHROME_HOST, {}) == chrome_host_wanted()
     add("chrome:host", "look", "Chrome add-on bridge registered", host_ok,
         "" if host_ok else "points at the wrong place or extension", chrome_host_write)
+    # The add-on running in Chrome is the repo's version (it reloads itself
+    # when asked, from 1.12.2; older ones need ↻ in chrome://extensions once).
+    have, want = addon_version(), addon_wanted()
+    add("chrome:addon", "look", "Chrome add-on up to date", have in (None, want),
+        "" if have in (None, want) else f"running {have}, the repo has {want}", addon_reload)
 
     # Needs the password: done in a terminal.
     rule = REPO / "system/udev/99-afterlight-charge-limit.rules"
@@ -7152,6 +7476,13 @@ def main(argv):
             print(json.dumps(updates_state(fetch="--fetch" in args)))
         elif command == "update":
             update_all(settings)
+            if addon_version() not in (None, addon_wanted()):
+                addon_reload()
+        elif command == "addon" and args[:1] in (["version"], ["reload"]):
+            if args[0] == "reload":
+                print("reloaded" if addon_reload() else "couldn't: press ↻ on the add-on in chrome://extensions")
+            else:
+                print(json.dumps({"running": addon_version(), "repo": addon_wanted()}))
         elif command == "check":
             result = health_run(settings)
             print(json.dumps(result)) if "--json" in args else health_print(result)

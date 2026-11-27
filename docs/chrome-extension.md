@@ -35,6 +35,8 @@ If the panel says *"Beatport add-on isn't running"*, reload the add-on in `chrom
 
 ## Keeping it up to date
 
+From 1.12.2 the add-on reloads itself when Baseline asks: `afterlight update` does it after a pull, `afterlight addon reload` does it by hand, `afterlight addon version` shows what's running against the repo, and `afterlight check` notices when they differ. Older versions need the reload by hand, once:
+
 Chrome never updates an unpacked add-on by itself. After you pull Baseline (`afterlight update`, or **Update** on the Status tab), open `chrome://extensions` and press the add-on's **↻ reload** button. The version number in its card should match `chrome/beatport-baseline/manifest.json`.
 
 ## How it fits together
@@ -51,9 +53,9 @@ Baseline panel / mouse ──► afterlight beatport … ──► socket ($XDG_
 | File | Job |
 |---|---|
 | `manifest.json` | permissions: native messaging, tabs, scripting; only `beatport.com`, `youtube.com`, `music.youtube.com` |
-| `background.js` | connects to the native host and handles each request: `open`, `check`, `page`, `fetch`, `scratch`, `media`, `tabs`; passes playlists back |
+| `background.js` | connects to the native host and handles each request: `open`, `check`, `page`, `fetch`, `scratch`, `media`, `tabs`, `version`, `reload` (reloads the add-on, so a pulled update takes); passes playlists back |
 | `bridge.js` | runs inside the page: finds and clicks things (`click`, with `first` for the page's own button rather than a recommendation's; `steps`), browses YouTube Music (`ytm-browse`), and quiets that page's audio and video (`pause-media`; `dry` only says whether it could, and how many players it found: Beatport's player isn't on the page, so the Deck presses its bar's Pause instead), so the Deck can start the next song before it stops the last |
-| `background.js` → `appleMusic()` | one fixed function run in the Apple Music page's own world (Apple's player lives there): `now`, `queue` (checked catalogue ids only), `play`, `pause`, `toggle`, `next`, `previous`, `seek`, `volume` (the Deck's fade), and, reading only, `playlists` (a search of your library playlists and Apple's, or with `*` every playlist in your library) and `tracks` (a checked playlist id's songs) |
+| `background.js` → `appleMusic()` | one fixed function run in the Apple Music page's own world (Apple's player lives there): `now`, `queue` (checked catalogue ids only), `play`, `pause`, `toggle`, `next`, `previous`, `seek`, `volume` (the Deck's fade; without a level it only reads), `export` (a new playlist in your library, through Apple's API with the player's own sign-in, 20 seconds at most), and, reading only, `playlists` (a search of your library playlists and Apple's, or with `*` every playlist in your library) and `tracks` (a checked playlist id's songs) |
 | `autoplay.js` | presses a Beatport page's own Play button when Baseline opens it with `#baseline-play` |
 | `report.js` | reads your playlists from Beatport's sidebar |
 | `../native/beatport-host.py` | Chrome starts it; it saves playlists to `~/.local/state/afterlight/beatport.json` and relays requests from the socket |

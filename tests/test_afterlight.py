@@ -831,6 +831,39 @@ class DeckTests(TempCase):
         self.assertEqual(al.deck_with_details(d)["set"][0]["bpm"], 126)
         self.assertEqual(al.deck_song_key(song), "bp:22988389")
 
+    def test_fix_the_bumps_moves_only_what_clashes(self):
+        song = lambda uid, artist, key, bpm: {"uid": uid, "service": "applemusic", "id": uid, "title": uid,
+                                              "artist": artist, "key": key, "bpm": bpm}
+        a, b, c, d = song("1", "A", "8A", 120), song("2", "A", "8A", 121), song("3", "B", "9A", 122), song("4", "C", "8A", 120)
+        deck = {**al.DECK_EMPTY, "now": None, "set": [a, b, c, d], "pinned": []}
+        self.patch("deck_with_details", lambda x: x)
+        al.deck_shape(deck, "bumps")
+        order = [s["uid"] for s in deck["set"]]
+        self.assertNotEqual(order.index("2"), order.index("1") + 1)    # same artist no longer back to back
+        self.assertEqual(sorted(order), ["1", "2", "3", "4"])
+
+    def test_a_request_mixed_in_lands_soon_where_it_fits(self):
+        song = lambda uid, artist, key: {"uid": uid, "service": "applemusic", "id": uid, "title": uid, "artist": artist, "key": key, "bpm": 120}
+        now = song("n", "Now", "8A")
+        rest = [song("a", "X", "8A"), song("b", "Y", "1B"), song("c", "Z", "9A")] + [song(f"z{i}", f"Q{i}", "8A") for i in range(20)]
+        deck = {**al.DECK_EMPTY, "now": now, "set": rest, "pinned": []}
+        self.patch("deck_with_details", lambda x: x)
+        spot = al.deck_mix_spot(deck, song("r", "Now", "8A"))
+        self.assertLessEqual(spot, al.DECK_MIX_REACH)     # soon, not at the end
+        self.assertNotEqual(spot, 0)                      # not straight after the same artist
+
+    def test_taking_a_request_puts_it_in_the_set(self):
+        self.patch("deck_with_details", lambda x: x)
+        al.deck_update(lambda d: d.update(set=[{"uid": "s1", "service": "applemusic", "id": "1", "title": "One", "artist": "A"}],
+                                          requests=[{"rid": "r1", "id": "99", "title": "Asked", "artist": "Guest band",
+                                                     "thumb": "", "by": "Sam", "phone": "10.0.0.2", "at": 1}]))
+        self.assertTrue(al.deck_request_take("r1", "next"))
+        deck = al.deck_read()
+        self.assertEqual(deck["requests"], [])
+        self.assertEqual(deck["set"][0]["title"], "Asked")
+        self.assertEqual(deck["set"][0]["from"], "Request · Sam")
+        self.assertFalse(al.deck_request_take("r1"))     # only once
+
     def test_beatport_is_quieted_with_its_own_pause_button(self):
         sent, keys = [], []
         self.patch("beatport_bridge", lambda req, timeout=8: sent.append(req["op"]) or {"ok": True, "count": 0})

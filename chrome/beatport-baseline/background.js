@@ -142,11 +142,16 @@ async function appleMusic(op, tab) {
       if (op.action === "export") {
         if (!kit.isAuthorized) return { ok: false, error: "signed out" };
         try {
-          const reply = await kit.api.music("/v1/me/library/playlists", {}, { fetchOptions: { method: "POST",
+          // Apple's own API with the player's own tokens, as the web app does; capped at 20 s.
+          const made = await fetch("https://api.music.apple.com/v1/me/library/playlists", {
+            method: "POST", signal: AbortSignal.timeout(20000),
+            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${kit.developerToken}`,
+                       "Music-User-Token": kit.musicUserToken },
             body: JSON.stringify({ attributes: { name: op.name, description: "Saved from Baseline's Deck" },
-                                   relationships: { tracks: { data: op.ids.map((id) => ({ id, type: "songs" })) } } }) } });
-          const made = (((reply || {}).data || {}).data || [])[0];
-          return { ok: !!made, id: made ? String(made.id) : "" };
+                                   relationships: { tracks: { data: op.ids.map((id) => ({ id, type: "songs" })) } } }) });
+          const body = await made.json().catch(() => ({}));
+          const first = (body.data || [])[0];
+          return { ok: made.ok && !!first, id: first ? String(first.id) : "", status: made.status };
         } catch (error) { return { ok: false, error: String(error).slice(0, 120) }; }
       }
       // Reading only: playlists for a search (yours, then the catalogue's),
@@ -356,6 +361,12 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
 
 async function handle(message) {
   if (!message || typeof message !== "object") return { ok: false };
+  if (message.type === "version") return { ok: true, version: chrome.runtime.getManifest().version };
+  if (message.type === "reload") {
+    // Baseline asks after an update, so a new version takes without a trip to chrome://extensions.
+    setTimeout(() => chrome.runtime.reload(), 300);
+    return { ok: true, version: chrome.runtime.getManifest().version };
+  }
   if (message.type === "open") {
     if (typeof message.url !== "string" || !(BEATPORT.test(message.url) || YTMUSIC.test(message.url))) return { ok: false };
     const tab = YTMUSIC.test(message.url) ? await ytmusicTab() : await beatportTab();
