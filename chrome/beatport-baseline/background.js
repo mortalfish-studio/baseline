@@ -72,7 +72,7 @@ const AM_PLAYLIST = /^(pl\.[A-Za-z0-9.-]{1,80}|p\.[A-Za-z0-9]{1,40})$/;
 async function appleMusic(op, tab) {
   tab = tab || await appleMusicTab();
   if (!tab) return { ok: false, error: "no Apple Music tab" };
-  const actions = ["now", "queue", "play", "pause", "toggle", "next", "previous", "seek", "playlists", "tracks", "volume", "export"];
+  const actions = ["now", "queue", "play", "pause", "toggle", "next", "previous", "seek", "playlists", "tracks", "volume", "export", "unplaylist"];
   if (!op || !actions.includes(op.action)) return { ok: false };
   const clean = { action: op.action };
   if (op.action === "queue") {
@@ -107,6 +107,11 @@ async function appleMusic(op, tab) {
     clean.name = String(op.name || "").replace(/[\u0000-\u001f]/g, "").slice(0, 100);
     clean.ids = (Array.isArray(op.ids) ? op.ids : []).map(String).filter((i) => /^\d{1,15}$/.test(i)).slice(0, 300);
     if (!clean.name || !clean.ids.length) return { ok: false };
+  }
+  if (op.action === "unplaylist") {
+    // Delete one playlist from your library, only one Baseline made itself.
+    if (!/^p\.[A-Za-z0-9]{1,40}$/.test(String(op.id))) return { ok: false };
+    clean.id = String(op.id);
   }
   if (op.action === "seek") {
     clean.seconds = Number(op.seconds);
@@ -150,6 +155,19 @@ async function appleMusic(op, tab) {
           // The player's own tokens, for this worker to make the playlist
           // with (they never leave the add-on).
           return { ok: !!(kit.developerToken && kit.musicUserToken), dev: kit.developerToken, user: kit.musicUserToken };
+        } catch (error) { return { ok: false, error: String(error).slice(0, 120) }; }
+      }
+      if (op.action === "unplaylist") {
+        if (!kit.isAuthorized) return { ok: false, error: "signed out" };
+        try {
+          const found = ((await kit.api.music(`/v1/me/library/playlists/${op.id}`)) || {}).data || {};
+          const attrs = ((found.data || [])[0] || {}).attributes || {};
+          const about = String((attrs.description || {}).standard || "");
+          if (about !== "Saved from Baseline's Deck") return { ok: false, error: "not one Baseline made" };
+          // From the page, as Apple's web app deletes one.
+          const gone = await fetch(`https://amp-api.music.apple.com/v1/me/library/playlists/${op.id}`, {
+            method: "DELETE", headers: { "Authorization": `Bearer ${kit.developerToken}`, "Music-User-Token": kit.musicUserToken } });
+          return { ok: gone.ok, name: String(attrs.name || ""), status: gone.status };
         } catch (error) { return { ok: false, error: String(error).slice(0, 120) }; }
       }
       // Reading only: playlists for a search (yours, then the catalogue's),
@@ -225,6 +243,7 @@ async function appleMusic(op, tab) {
   const reply = (result && result.result) || { ok: false };
   if (op.action === "export") log("apple tokens: " + (reply.ok ? "yes" : "no " + (reply.error || "")));
   if (op.action === "export") return reply.ok ? await appleExport(clean, reply.dev, reply.user) : { ok: false, error: reply.error || "signed out" };
+  if (op.action === "unplaylist") log(`apple unplaylist ${reply.status || ""} ${reply.error || ""}`);
   return reply;
 }
 
