@@ -1676,3 +1676,14 @@ class SuggestionTests(TempCase):
         self.patch("grok_ideas", lambda q: {"songs": [], "q": ["x"]})
         al.grok_suggest("applemusic", "older")
         self.assertTrue(json.loads((self.tmp / "suggest.json").read_text())["pending"])
+
+
+class GuestStatusTest(unittest.TestCase):
+    def test_first_in_set_is_up_next(self):
+        deck = {"requests": [], "now": {"rid": "a"}, "set": [{"rid": "b"}, {"rid": "c"}], "played": []}
+        self.assertEqual(al.deck_guest_status(deck, {"rid": "a"}, [0, 200])["state"], "playing")
+        first = al.deck_guest_status(deck, {"rid": "b"}, [60, 260])
+        second = al.deck_guest_status(deck, {"rid": "c"}, [60, 260])
+        self.assertTrue(first.get("next"))
+        self.assertEqual(second["state"], "set")
+        self.assertNotIn("next", second)

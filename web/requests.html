@@ -87,6 +87,21 @@
   .tonight a { color: inherit; text-decoration: none; display: flex; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
   .tonight a img { width: 40px; height: 40px; border-radius: 4px; object-fit: cover; background: #222; flex: none; }
   .tonight a .open { margin-left: auto; color: var(--pink); font-size: 12px; flex: none; }
+  /* Covers fade in as they arrive; search results rise in one after another. */
+  img[src] { opacity: 0; transition: opacity .35s ease-out; }
+  img[src].in { opacity: 1; }
+  #results .row { animation: rise .32s ease-out both; }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+  .bar { height: 3px; margin-top: 8px; border-radius: 2px; background: var(--line); overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--pink), var(--teal)); transition: width 1s linear; }
+  .party.next { color: var(--teal); background: rgba(255,255,255,.04); border: 1px solid var(--teal); animation: none; font-weight: 400; }
+  .party.next b { color: var(--ink); }
+  .party { animation: pulse 1.6s ease-in-out infinite, drop .4s ease-out; }
+  @keyframes drop { from { opacity: 0; transform: translateY(-8px); } }
+  .tray.sent .covers img { animation: fly .38s ease-in forwards; }
+  .tray.sent .covers img:nth-child(2) { animation-delay: .04s; } .tray.sent .covers img:nth-child(3) { animation-delay: .08s; }
+  .tray.sent .covers img:nth-child(4) { animation-delay: .12s; } .tray.sent .covers img:nth-child(5) { animation-delay: .16s; }
+  @keyframes fly { to { opacity: 0; transform: translateY(-60px) scale(.8); } }
   .link { background: none; border: 0; color: var(--teal); text-transform: none; letter-spacing: 0; padding: 6px; font-size: 13px; text-decoration: underline; }
 </style>
 </head>
@@ -123,6 +138,7 @@
         <div class="title" id="nowTitle"></div>
         <div class="sub" id="nowArtist"></div>
         <div class="shout" id="nowShout" hidden></div>
+        <div class="bar" id="nowBarBox" hidden><i id="nowBar"></i></div>
       </div>
       <div class="votes">
         <button id="up" aria-label="Love it">👍<small id="upN"></small></button>
@@ -169,10 +185,16 @@
                   set(k, v) { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch (e) {} } };
   const say = (text) => { const m = $("msg"); m.textContent = text; m.classList.add("on"); clearTimeout(say.t); say.t = setTimeout(() => m.classList.remove("on"), 2600); };
   const el = (tag, props) => Object.assign(document.createElement(tag), props || {});
-  function art(img, url) { if (/^https:\/\//.test(url || "")) img.src = url; else img.removeAttribute("src"); }
+  document.addEventListener("load", (e) => { if (e.target.tagName === "IMG") e.target.classList.add("in"); }, true);
+  const buzz = (pattern) => { try { navigator.vibrate && navigator.vibrate(pattern); } catch (e) {} };
+  function art(img, url) {
+    if (!/^https:\/\//.test(url || "")) { img.removeAttribute("src"); return; }
+    if (img.getAttribute("src") === url) return;   // the same cover: no fade again
+    img.classList.remove("in"); img.src = url;
+  }
   function face(box, photo, name) {
     box.replaceChildren();
-    if (/^data:image\/jpeg;base64,/.test(photo || "")) box.append(el("img", { src: photo, alt: "", style: "width:100%;height:100%;object-fit:cover" }));
+    if (/^data:image\/jpeg;base64,/.test(photo || "")) box.append(el("img", { src: photo, alt: "", className: "in", style: "width:100%;height:100%;object-fit:cover" }));
     else box.textContent = (name || "?").trim().charAt(0).toUpperCase() || "?";
   }
 
@@ -243,6 +265,8 @@
         $("nowTitle").textContent = r.now.title; $("nowArtist").textContent = r.now.artist; art($("nowArt"), r.now.thumb);
         $("nowShout").hidden = !r.now.by;
         $("nowShout").textContent = r.now.by ? "Requested by " + r.now.by + (r.now.note ? ": “" + r.now.note + "”" : "") : "";
+        song = r.now.length ? { pos: r.now.pos || 0, length: r.now.length, running: !!r.now.running, at: Date.now() } : null;
+        progress();
         $("upN").textContent = r.now.up || ""; $("downN").textContent = r.now.down || "";
         $("up").classList.toggle("on", r.now.mine === 1); $("down").classList.toggle("on", r.now.mine === -1);
       }
@@ -255,17 +279,28 @@
       for (const s of (r.next || [])) list.append(el("li", { textContent: s.title + " · " + s.artist }));
     } catch (e) {}
   }
+  // The song's bar runs on between polls.
+  let song = null;
+  function progress() {
+    $("nowBarBox").hidden = !song;
+    if (!song) return;
+    const pos = song.pos + (song.running ? (Date.now() - song.at) / 1000 : 0);
+    $("nowBar").style.width = Math.min(100, pos / song.length * 100).toFixed(1) + "%";
+  }
+  setInterval(progress, 1000);
   // ---- what you've asked for, and what became of it
-  let asked = {};
+  let asked = {}, alerted = null;
   const CHIP = { waiting: "Waiting for the DJ", playing: "Playing now!", played: "Played", declined: "Not this time" };
   async function mine() {
     if (!me.gid) return;
     let r = {};
+    clearTimeout(mine.t); mine.t = setTimeout(mine, 10000);   // keeps polling even if this one fails
     try { r = await (await fetch(base + "/mine?gid=" + encodeURIComponent(me.gid))).json(); } catch (e) { return; }
     const list = $("mineList"); list.replaceChildren();
     asked = {};
-    let playing = null;
+    let playing = null, next = null;
     for (const a of (r.asks || [])) {
+      if (a.next) next = a;
       asked[a.id] = a.state;
       if (a.state === "playing") playing = a;
       const row = el("div", { className: "row" });
@@ -277,8 +312,23 @@
       list.append(row);
     }
     $("mine").hidden = !(r.asks || []).length;
-    $("party").hidden = !playing;
-    if (playing) $("party").textContent = "Your song is playing: " + playing.title + "!";
+    // Your song is on, or up next: a banner, and a buzz when it changes.
+    const party = $("party"), key = playing ? "on:" + playing.id : next ? "next:" + next.id : "";
+    party.hidden = !key;
+    party.classList.toggle("next", !playing && !!next);
+    if (playing) party.textContent = "Your song is on! " + playing.title + " 🎉";
+    else if (next) {
+      party.replaceChildren("You're up next: ", el("b", { textContent: next.title }),
+        " · about " + new Date(next.at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
+    }
+    if (key !== alerted) {
+      if (alerted !== null && key) {
+        buzz(playing ? [200, 100, 200, 100, 400] : [80, 60, 80]);
+        party.style.animation = "none"; void party.offsetWidth; party.style.animation = "";   // drop in again
+      }
+      alerted = key;
+    }
+    clearTimeout(mine.t); mine.t = setTimeout(mine, next || playing ? 5000 : 10000);
     tray();
   }
   let playing = null, closed = false;
@@ -311,7 +361,6 @@
   $("tonight").addEventListener("toggle", tonight);
   setInterval(tonight, 30000);
   now(); setInterval(now, 8000);
-  setInterval(mine, 10000);
 
   // ---- picks: add a few, keep searching, send them together
   let picks = [];
@@ -364,7 +413,9 @@
     if (!a.ok) return say(a.error || "Couldn't send. Try again in a moment.");
     say((a.sent > 1 ? "Sent " + a.sent + "! The DJ will see them." : "Sent! The DJ will see it.")
         + ((a.again || []).length ? " (You'd already asked for " + a.again.join(", ") + ".)" : ""));
-    picks = []; $("note").value = ""; dedication(false); clearSearch(); tray(); mine();
+    buzz(30);
+    $("tray").classList.add("sent");
+    setTimeout(() => { $("tray").classList.remove("sent"); picks = []; $("note").value = ""; dedication(false); clearSearch(); tray(); mine(); }, 420);
   });
 
   // ---- search

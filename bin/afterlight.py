@@ -5184,9 +5184,9 @@ def deck_guest_status(deck, ask, starts):
         return {"state": "waiting"}
     if (deck.get("now") or {}).get("rid") == rid:
         return {"state": "playing"}
-    for song, at in zip(deck["set"], starts):
+    for i, (song, at) in enumerate(zip(deck["set"], starts)):
         if song.get("rid") == rid:
-            return {"state": "set", "at": int(time.time() + at)}
+            return {"state": "set", "at": int(time.time() + at), **({"next": True} if i == 0 else {})}
     if any(x.get("rid") == rid for x in deck["played"]):
         return {"state": "played"}
     return {"state": "declined"}
@@ -5422,7 +5422,12 @@ def deck_guests_serve(token):
                 votes = (deck.get("votes") or {}).get(now["uid"], {}) if now else {}
                 closes = deck.get("lastCall") or 0
                 speaks = bool(deck.get("voice", True) and voice_ready())
-                return self.send(200, {"now": {**show(now), "uid": now["uid"], "by": now.get("by", ""), "note": now.get("note", ""),
+                # How far into the song, so the phone's bar can run on between polls.
+                mark = read_json(DECK_NOW, {})
+                where_in = {"pos": round((mark.get("time") or 0) + (time.time() - (mark.get("at") or time.time()) if mark.get("playing") else 0), 1),
+                            "length": mark.get("length") or 0, "running": bool(mark.get("playing") and deck.get("playing"))} \
+                    if now and mark.get("uid") == now["uid"] and mark.get("length") else {}
+                return self.send(200, {"now": {**show(now), **where_in, "uid": now["uid"], "by": now.get("by", ""), "note": now.get("note", ""),
                                                "up": sum(1 for v in votes.values() if v == 1),
                                                "down": sum(1 for v in votes.values() if v == -1),
                                                "mine": votes.get(gid, 0)} if now else None,

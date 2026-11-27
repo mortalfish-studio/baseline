@@ -3244,14 +3244,8 @@ Item {
           border.width: 1; border.color: Util.alpha(root.amber, 0.45)
           layer.enabled: true
           layer.effect: MultiEffect { shadowEnabled: true; shadowColor: Util.alpha(root.amber, 0.35); shadowBlur: 1.0; shadowVerticalOffset: 6 }
-          Rectangle {
-            anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
-            anchors.margins: 1
-            width: 3; radius: 2
-            gradient: Gradient { GradientStop { position: 0; color: root.amber } GradientStop { position: 1; color: root.teal } }
-          }
           RowLayout {
-            anchors.fill: parent; anchors.leftMargin: 18; anchors.rightMargin: 16
+            anchors.fill: parent; anchors.leftMargin: 16; anchors.rightMargin: 16
             spacing: 16
             Item {
               Layout.preferredWidth: 72; Layout.preferredHeight: 72
@@ -3278,7 +3272,7 @@ Item {
               Layout.fillWidth: true
               spacing: 2
               Label {
-                text: "󰄜  " + strings.t("deck.newRequest").toUpperCase() + ((askPop.item.note || "") !== "" ? "  ·  ✦ " + strings.t("deck.withDedication").toUpperCase() : "")
+                text: strings.t("deck.newRequest").toUpperCase() + ((askPop.item.note || "") !== "" ? "  ·  ✦ " + strings.t("deck.withDedication").toUpperCase() : "")
                 font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption - 1; font.letterSpacing: 3; color: root.teal
               }
               Label { Layout.fillWidth: true; text: strings.t("deck.askedFor").arg(askPop.item.by || strings.t("deck.aGuest")); font.pixelSize: Style.font.body; opacity: 0.8; elide: Text.ElideRight }
