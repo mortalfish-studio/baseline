@@ -1813,7 +1813,8 @@ Item {
               HeadLink { visible: root.selectedUids.length > 0 && !root.locked; glyph: "󰅖"; text: strings.t("deck.remove"); onTapped: root.placePicked("remove") }
               HeadLink { visible: root.selectedUids.length > 0; glyph: "󰜺"; onTapped: root.clearPicked() }
               // Otherwise: the tools for the set. Smooth it out reorders so it
-              // flows (Fix the bumps; pinned songs stay, Undo puts it back).
+              // flows (Fix the bumps; pinned songs stay, Undo puts it back). Hidden
+              // when locked, like Shape.
               HeadLink {
                 visible: root.selectedUids.length === 0 && root.bumps > 0 && !root.locked
                 glyph: "󰘖"; on: true
@@ -2442,16 +2443,17 @@ Item {
                               !ktChip.keyOk ? [strings.t("deck.clash").arg(slot.key).arg(ktChip.before.key)] : [],
                               ktChip.jump ? [strings.t("deck.jump").arg(Math.round(ktChip.before.bpm)).arg(Math.round(slot.bpm))] : [],
                               row.warns.filter(w => w !== "key" && w !== "tempo").map(w => strings.t("deck.warn." + w))).join("  ·  ")
-                          // A song that doesn't flow says why, always (no hover needed),
-                          // ahead of the artist so a long name can't hide it.
-                          text: reasons !== "" ? "◆ " + reasons + "  ·  " + slot.artist
+                          // Calm by default; hover a song to see what doesn't flow (or
+                          // where it came from), ahead of the artist so it can't be cut off.
+                          readonly property bool showWhy: rowHover.hovered && reasons !== ""
+                          text: showWhy ? "◆ " + reasons + "  ·  " + slot.artist
                                 : root.serviceGlyph(slot.service) + "  " + slot.artist
                                   + (rowHover.hovered ? (slot.from !== "" ? "  ·  " + slot.from : "")
                                                       : slot.why !== "" ? "  ·  ✦ " + slot.why : "")
                           font.family: "Iosevka Nerd Font Propo"
                           font.pixelSize: Style.font.caption
-                          color: reasons !== "" ? Commons.Color.warning : root.ink
-                          opacity: reasons !== "" ? 0.85 : 0.6
+                          color: showWhy ? Commons.Color.warning : root.ink
+                          opacity: showWhy ? 0.9 : 0.6
                           elide: Text.ElideRight
                         }
                       }
@@ -2471,7 +2473,7 @@ Item {
                           text: slot.key !== "" ? slot.key : "–"
                           font.pixelSize: Style.font.caption
                           font.bold: slot.key !== ""
-                          color: !ktChip.keyOk ? Commons.Color.warning : root.teal
+                          color: !ktChip.keyOk && rowHover.hovered ? Commons.Color.warning : root.teal
                           opacity: slot.key !== "" ? 1 : 0.3
                         }
                       }
@@ -2481,7 +2483,7 @@ Item {
                         horizontalAlignment: Text.AlignHCenter
                         text: slot.bpm > 0 ? Math.round(slot.bpm) : "–"
                         font.pixelSize: Style.font.caption
-                        color: ktChip.jump ? Commons.Color.warning : root.teal
+                        color: ktChip.jump && rowHover.hovered ? Commons.Color.warning : root.teal
                         opacity: slot.bpm > 0 ? 1 : 0.3
                       }
                       // When it starts.
