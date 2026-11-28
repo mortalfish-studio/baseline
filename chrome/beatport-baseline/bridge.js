@@ -190,7 +190,7 @@
     if (op.type === "mixer") {
       // Finding the beats listens for a while; going waits for its moment.
       const inner = op.op || {};
-      const wait = inner.type === "grid" ? (Number(inner.seconds) || 10) * 1000 + 5000
+      const wait = inner.type === "grid" || inner.type === "envelope" ? (Number(inner.seconds) || 10) * 1000 + 5000
         : inner.type === "go" ? Math.max(5000, Number(inner.start) - (performance.timeOrigin + performance.now()) + 5000)
         : inner.type === "cue" ? 8000 : 3000;
       return mixer(inner, Math.min(120000, wait));

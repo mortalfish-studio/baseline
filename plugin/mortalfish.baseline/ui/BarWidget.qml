@@ -404,7 +404,7 @@ BarWidget {
     function studio(page: string): void { root.openStudio(page === "looks" || page === "browse" ? page : "library") }
     // The Deck: the set of songs to arrange, play and send to a room.
     function deck(): void { root.openDeck() }
-    // The Deck on one view: "stage", "requests" (the guests' card) or "set" (neither).
+    // The Deck on one view: "stage", "requests" (the guests' card), "autodj", "mix" or "set" (none).
     function deckView(name: string): void {
       root.openDeck()
       if (deckLoader.item) deckLoader.item.view(name)

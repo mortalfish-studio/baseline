@@ -1833,7 +1833,7 @@ class MixTests(TempCase):
         return {"uid": uid, "service": service, "id": uid, "title": uid, "artist": "", **more}
 
     def test_style_follows_tempo_and_key(self):
-        self.assertEqual(al.mix_style({"bpm": 124, "key": "8A"}, {"bpm": 125, "key": "9A"}), "blend")
+        self.assertEqual(al.mix_style({"bpm": 124, "key": "8A"}, {"bpm": 125, "key": "9A"}), "swap")
         self.assertEqual(al.mix_style({"bpm": 124, "key": "8A"}, {"bpm": 125, "key": "2B"}), "filter")
         self.assertEqual(al.mix_style({"bpm": 124, "key": "8A"}, {"bpm": 140, "key": "8A"}), "cut")
         self.assertEqual(al.mix_style({"bpm": 124}, {}), "cut")          # no tempo known: no blend
@@ -1843,7 +1843,7 @@ class MixTests(TempCase):
         b = {"bpm": 125, "key": "9B", "title": "Two (Extended Mix)"}
         # The catalogue says 125 for both; heard, a is 123 (0.4878 s a beat).
         plan = al.mix_plan(a, b, 360, 0.15, 0.08, beat_a=0.4878, beat_b=0.48)
-        self.assertEqual((plan["style"], plan["bars"]), ("blend", 32))
+        self.assertEqual((plan["style"], plan["bars"]), ("swap", 32))
         self.assertAlmostEqual(plan["rate"], 0.48 / 0.4878, places=4)       # b slowed to a's tempo
         phrase = 16 * 4 * 0.4878
         self.assertAlmostEqual(((plan["start"] - 0.15) / phrase) % 1, 0, places=3)
@@ -1864,6 +1864,66 @@ class MixTests(TempCase):
         self.assertEqual((cut["style"], cut["bars"], cut["rate"]), ("cut", 4, 1.0))
         self.assertEqual(cut["enter"], cut["seconds"])        # b comes in as a has gone
         self.assertIsNone(al.mix_plan(a, b, 60, 0, 0))
+
+    def test_each_style_hands_the_bass_over_once(self):
+        # Drawn, the old song's bass gives way to the new one's and never
+        # both at full at once; beat first hands it over early, the rest later.
+        for style in al.MIX_STYLES:
+            shape = al.mix_shapes()[style]
+            a, b = shape["a"]["bass"], shape["b"]["bass"]
+            self.assertGreater(a[0], 0.9, style)
+            self.assertLess(a[-1], 0.1, style)
+            self.assertGreater(b[-1], 0.9, style)
+            self.assertTrue(all(x + y < 1.6 for x, y in zip(a, b)), style)
+        self.assertLess(al.mix_shapes()["beat"]["swap"], al.mix_shapes()["swap"]["swap"])
+        # Beat first: the new beat is in while the old song's melody still plays.
+        beat = al.mix_shapes()["beat"]
+        third = len(beat["a"]["top"]) // 3
+        self.assertGreater(beat["b"]["bass"][third], 0.9)
+        self.assertGreater(beat["a"]["top"][third], 0.8)
+        self.assertLess(beat["b"]["top"][third], 0.5)
+
+    def test_length_and_style_can_be_chosen(self):
+        a = {"bpm": 125, "key": "8B", "title": "One (Extended Mix)"}
+        b = {"bpm": 125, "key": "9B", "title": "Two (Extended Mix)"}
+        plan = al.mix_plan(a, b, 400, 0, 0, style="beat", bars=16)
+        self.assertEqual((plan["style"], plan["bars"]), ("beat", 16))
+        self.assertAlmostEqual(plan["swap"], plan["seconds"] / 4, places=2)
+        self.assertEqual(al.mix_plan(a, b, 400, 0, 0, style="cut", bars=32)["bars"], 4)
+        deck = {**al.DECK_EMPTY, "now": self.song("a"), "set": [self.song("b"), self.song("c")]}
+        self.assertTrue(al.deck_mix_set(deck, ["style", "smooth"]))
+        self.assertTrue(al.deck_mix_set(deck, ["bars", "8"]))
+        self.assertTrue(al.deck_mix_set(deck, ["pick", "c", "cut"]))
+        self.assertFalse(al.deck_mix_set(deck, ["pick", "c", "rm -rf"]))
+        self.assertFalse(al.deck_mix_set(deck, ["bars", "12"]))
+        self.assertEqual(al.deck_mix_choice(deck, "b"), ("smooth", 8, False))
+        self.assertEqual(al.deck_mix_choice(deck, "c"), ("cut", 8, True))
+        preview = al.deck_mix_preview(deck)
+        self.assertEqual(preview["b"], {"style": "smooth", "bars": 8, "picked": False})
+        self.assertEqual(preview["c"], {"style": "cut", "bars": 4, "picked": True})
+        # Kept in deck.json (anything the Deck doesn't know is dropped when read).
+        al.deck_update(lambda d: (d.update(set=deck["set"]), al.deck_mix_set(d, ["style", "beat"]),
+                                  al.deck_mix_set(d, ["pick", "c", "smooth"])))
+        self.assertEqual((al.deck_read()["mixStyle"], al.deck_read()["mixPicks"]), ("beat", {"c": "smooth"}))
+        al.deck_mix_set(deck, ["pick", "c", "auto"])
+        al.deck_mix_set(deck, ["style", "auto"])
+        self.assertEqual(al.deck_mix_choice(deck, "c"), (None, 8, False))
+
+    def test_the_gap_between_two_decks_beats(self):
+        beat, dt = 0.48, 5.0
+        def env(offset):
+            rise = [0] * 2000
+            for k in range(25):
+                i = int(round((k * beat + offset) * 1000 / dt))
+                if i < len(rise):
+                    rise[i] = 900
+            return {"t0": 1_000_000.0, "dt": dt, "rise": rise}
+        gap, sure = al.mix_gap(env(0.100), env(0.140), beat)
+        self.assertAlmostEqual(gap, 0.040, delta=0.006)            # b 40 ms late
+        self.assertGreater(sure, al.MIX_SYNC_SURE)
+        gap, _ = al.mix_gap(env(0.100), env(0.060), beat)
+        self.assertAlmostEqual(gap, -0.040, delta=0.006)           # b 40 ms early
+        self.assertEqual(al.mix_gap({}, env(0.1), beat), (0.0, 0.0))
 
     def test_wall_times_are_ms_on_the_shared_clock(self):
         self.assertEqual(al.mix_wall({"gain": [[0, 1], [1.5, 0]]}, 1000), {"gain": [[1000, 1], [2500, 0]]})

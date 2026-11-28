@@ -824,12 +824,29 @@ Item {
                                   ? (deck.played || []).find(s => s.uid === mixInfo.from) || null
                                   : (deck.set || []).find(s => s.uid === mixInfo.to) || null
   readonly property bool hasBeatport: (!!now && now.service === "beatport") || (deck.set || []).some(s => s.service === "beatport")
-  function mixGlyph(style) { return style === "cut" ? "󰆐" : style === "filter" ? "󰈶" : "󰘭" }
+  readonly property var mixStyles: ["swap", "beat", "smooth", "filter", "cut"]
+  function mixKind(style) { return mixStyles.indexOf(style) >= 0 ? style : "swap" }   // "blend" was the old name for a swap
+  function mixGlyph(style) { return ({ swap: "󰓡", beat: "󰟚", smooth: "󰞍", filter: "󰈶", cut: "󰆐" })[mixKind(style)] }
   function mixTone(style) { return style === "cut" ? Util.alpha(ink, 0.7) : style === "filter" ? amber : teal }
+  property bool mixOpen: false
+  // Beatport songs mix like a DJ (on the laptop, or a Sonos room hearing its live stream).
+  readonly property bool canMix: hasBeatport
+  readonly property bool mixing: canMix && deck.mixes !== false
+  readonly property string mixChosen: mixStyles.indexOf(deck.mixStyle || "") >= 0 ? deck.mixStyle : ""
+  property string mixPeek: ""          // a style under the pointer in the Mix card
+  readonly property string mixShown: mixPeek !== "" ? mixPeek : mixChosen !== "" ? mixChosen : "swap"
+  readonly property string mixButtonGlyph: mixing ? (mixChosen !== "" ? mixGlyph(mixChosen) : "󰘭") : inSonos ? "󰡍" : "∿"
+  readonly property string mixButtonText: strings.t("deck.mixButton").arg(
+      mixing ? (mixChosen !== "" ? strings.t("deck.mixStyle." + mixChosen) : strings.t("deck.mixAuto"))
+      : inSonos ? (deck.crossfade ? strings.t("deck.crossfade") : strings.t("deck.mixHard"))
+      : deck.softSkip === false ? strings.t("deck.mixHard") : strings.t("deck.soft"))
+  // Where the takeover falls in the mix under way, 0-1.
+  readonly property real mixSwap: mixTimed && (mixInfo.takeover || 0) > 0
+                                  ? Math.max(0, Math.min(1, (mixInfo.takeover * 1000 - mixInfo.startMs) / (mixInfo.endMs - mixInfo.startMs))) : -1
   readonly property string mixLine: {
     if (!mixLive) return ""
     const other = mixOther ? titleParts(mixOther.title).main : ""
-    const style = mixInfo.style || "blend"
+    const style = mixKind(mixInfo.style)
     if (mixInfo.stage === "cueing") return strings.t("deck.mixCueing").arg(other)
     const bars = strings.t("deck.mixBar").arg(mixBar).arg(mixInfo.bars || 0)
     if (mixInfo.stage === "out") return strings.t("deck.mixOut").arg(other) + "  ·  " + bars
@@ -853,6 +870,7 @@ Item {
     guestsOpen = name === "requests"
     autodjOpen = name === "autodj"
     shapeOpen = false
+    mixOpen = name === "mix"
     qrBig = false
   }
   property bool qrBig: false
@@ -2087,20 +2105,16 @@ Item {
                     font.letterSpacing: 0.5
                     color: root.mixTone(root.mixInfo.style)
                   }
-                  Item {
-                    visible: root.mixTimed
-                    implicitWidth: 72; implicitHeight: 12
-                    Rectangle {
-                      anchors.verticalCenter: parent.verticalCenter
-                      width: parent.width; height: 2; radius: 1
-                      color: Util.alpha(root.ink, 0.18)
-                    }
-                    Rectangle {
-                      width: 6; height: 12; radius: 2
-                      x: (parent.width - width) * (root.mixInfo.stage === "out" ? Math.max(0.5, root.mixShare) : root.mixShare)
-                      color: root.mixTone(root.mixInfo.style)
-                      Behavior on x { NumberAnimation { duration: Style.duration(240); easing.type: Easing.OutCubic } }
-                    }
+                  // The mix as drawn in the Mix card, small, with where it is now.
+                  MixShape {
+                    visible: root.mixTimed && !!root.mixInfo.curves
+                    Layout.preferredWidth: 140; Layout.preferredHeight: 30
+                    Layout.rightMargin: 4
+                    labels: false
+                    curves: root.mixInfo.curves || null
+                    swap: root.mixSwap
+                    playhead: root.mixShare
+                    outColor: root.amber; inColor: root.teal; ink: root.ink
                   }
                 }
                 Flow {
@@ -2123,14 +2137,14 @@ Item {
                     text: strings.t("deck.shape")
                     tone: root.shapeOpen ? root.amber : root.teal
                     enabled: (root.deck.set || []).length > 1 && !root.locked
-                    onClicked: { root.shapeOpen = !root.shapeOpen; root.autodjOpen = false; root.saving = false; root.filterOpen = false }
+                    onClicked: { root.shapeOpen = !root.shapeOpen; root.autodjOpen = false; root.mixOpen = false; root.saving = false; root.filterOpen = false }
                   }
                   // Auto-DJ: with three songs left, the agent adds more that carry the night on.
                   ActionButton {
                     icon: "∞"
                     text: root.djBusy ? strings.t("deck.autodjWorking") : strings.t("deck.autodj")
                     tone: root.deck.autodj ? root.amber : root.teal
-                    onClicked: { root.autodjOpen = !root.autodjOpen; root.shapeOpen = false; root.saving = false; root.filterOpen = false }
+                    onClicked: { root.autodjOpen = !root.autodjOpen; root.shapeOpen = false; root.mixOpen = false; root.saving = false; root.filterOpen = false }
                   }
                   // Sleep: off, 15, 30, 60 minutes, the end of this song.
                   ActionButton {
@@ -2139,45 +2153,21 @@ Item {
                     tone: root.sleep ? root.amber : root.teal
                     onClicked: root.nextSleep()
                   }
-                  // Soft: Next, Back, Pause and Play fade rather than cut (on the laptop).
+                  // Mix: how one song goes into the next (a DJ mix between Beatport
+                  // songs, soft fades or cuts on the laptop, Sonos's crossfade).
                   ActionButton {
-                    visible: !root.inSonos
-                    icon: "∿"
-                    text: strings.t(root.deck.softSkip === false ? "deck.softOff" : "deck.soft")
-                    tone: root.deck.softSkip === false ? root.teal : root.amber
-                    onClicked: {
-                      const on = root.deck.softSkip === false
-                      root.deck = Object.assign({}, root.deck, { softSkip: on })
-                      root.run(["deck", "soft-skip", on ? "on" : "off"])
-                    }
-                  }
-                  // Mix: one Beatport song into the next, on the beat.
-                  ActionButton {
-                    visible: root.hasBeatport
-                    icon: "󰘭"
-                    text: strings.t("deck.mixes")
-                    tone: root.deck.mixes === false ? root.teal : root.amber
-                    onClicked: {
-                      const on = root.deck.mixes === false
-                      root.deck = Object.assign({}, root.deck, { mixes: on })
-                      root.run(["deck", "mixes", on ? "on" : "off"])
-                    }
-                  }
-                  // Crossfade: Sonos fades one song into the next.
-                  ActionButton {
-                    id: crossfadeButton
-                    visible: root.inSonos
-                    icon: "󰡍"
-                    text: strings.t("deck.crossfade")
-                    tone: root.deck.crossfade ? root.amber : root.teal
-                    onClicked: root.run(["deck", "crossfade", root.deck.crossfade ? "off" : "on"])
+                    id: mixButton
+                    icon: root.mixButtonGlyph
+                    text: root.mixButtonText
+                    tone: root.mixOpen ? root.amber : root.teal
+                    onClicked: { root.mixOpen = !root.mixOpen; root.autodjOpen = false; root.shapeOpen = false; root.saving = false; root.filterOpen = false }
                   }
                   // The volume where the Deck plays: the Sonos room, or the
                   // laptop's speaker or headphones. Centred on the buttons.
                   Item {
                     visible: root.hereVolume !== null
                     width: volRow.implicitWidth + 12
-                    height: crossfadeButton.implicitHeight
+                    height: mixButton.implicitHeight
                     Row {
                       x: 12
                       id: volRow
@@ -2427,6 +2417,127 @@ Item {
                   text: strings.t("deck.autoTidy")
                   tip: strings.t("deck.autoTidyTip")
                   onTapped: root.run(["deck", "autodj", "tidy", root.deck.autoTidy !== false ? "off" : "on"])
+                }
+              }
+            }
+            // Mix, all in one place: how Beatport songs mix into each other (the
+            // style, drawn, and how long), and how every other change goes.
+            Rectangle {
+              Layout.fillWidth: true
+              visible: root.mixOpen
+              implicitHeight: mixCol.implicitHeight + 24
+              radius: Style.cornerRadius > 0 ? 8 : 0
+              color: Util.alpha(root.teal, 0.035)
+              border.width: 1; border.color: Util.alpha(root.teal, 0.45)
+              ColumnLayout {
+                id: mixCol
+                x: 14; y: 12
+                width: parent.width - 28
+                spacing: 10
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: 8
+                  Label { text: "󰘭  " + strings.t("deck.mixes").toUpperCase(); font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal }
+                  Item { Layout.fillWidth: true }
+                  RoundButton { glyph: "󰅖"; onClicked: { root.mixOpen = false; root.mixPeek = "" } }
+                }
+                // The style: off, picked per seam, or one for every seam.
+                Flow {
+                  Layout.fillWidth: true
+                  visible: root.canMix
+                  spacing: 8
+                  Label { text: strings.t("deck.mixStyleLabel"); font.pixelSize: Style.font.caption; color: root.teal; height: 30; verticalAlignment: Text.AlignVCenter; width: 120 }
+                  DjChip { text: strings.t("deck.mixOff"); on: !root.mixing; onTapped: { root.deck = Object.assign({}, root.deck, { mixes: false }); root.run(["deck", "mixes", "off"]) } }
+                  DjChip {
+                    glyph: "󰘭"; text: strings.t("deck.mixAuto"); on: root.mixing && root.mixChosen === ""
+                    onHoveredChanged: root.mixPeek = hovered ? "auto" : ""
+                    onTapped: { root.deck = Object.assign({}, root.deck, { mixes: true, mixStyle: null }); root.run(["deck", "mixes", "style", "auto"]) }
+                  }
+                  Repeater {
+                    model: root.mixStyles
+                    delegate: DjChip {
+                      required property string modelData
+                      glyph: root.mixGlyph(modelData)
+                      text: strings.t("deck.mixStyle." + modelData)
+                      on: root.mixing && root.mixChosen === modelData
+                      onHoveredChanged: root.mixPeek = hovered ? modelData : (root.mixPeek === modelData ? "" : root.mixPeek)
+                      onTapped: { root.deck = Object.assign({}, root.deck, { mixes: true, mixStyle: modelData }); root.run(["deck", "mixes", "style", modelData]) }
+                    }
+                  }
+                }
+                // What that style does, drawn: the bass and the melody of the song
+                // going out (amber) and the one coming in (teal), across the mix.
+                RowLayout {
+                  Layout.fillWidth: true
+                  visible: root.canMix && (root.mixing || root.mixPeek !== "")
+                  spacing: 16
+                  MixShape {
+                    // The lanes start under the chips; BASS and MELODY sit to their left.
+                    Layout.leftMargin: 128 - gutter
+                    Layout.preferredWidth: gutter + 440
+                    Layout.preferredHeight: 72
+                    readonly property var drawn: ((root.deck.mixShapes || {})[root.mixShown === "auto" ? "swap" : root.mixShown]) || null
+                    curves: drawn
+                    swap: drawn ? drawn.swap : -1
+                    bassLabel: strings.t("deck.mixBass"); topLabel: strings.t("deck.mixTop")
+                    outColor: root.amber; inColor: root.teal; ink: root.ink
+                  }
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignTop
+                    spacing: 6
+                    Row {
+                      spacing: 14
+                      Row { spacing: 6; Rectangle { width: 14; height: 3; radius: 1.5; color: root.amber; anchors.verticalCenter: parent.verticalCenter }
+                            Label { text: strings.t("deck.mixGoing"); font.pixelSize: Style.font.caption; opacity: 0.7 } }
+                      Row { spacing: 6; Rectangle { width: 14; height: 3; radius: 1.5; color: root.teal; anchors.verticalCenter: parent.verticalCenter }
+                            Label { text: strings.t("deck.mixComing"); font.pixelSize: Style.font.caption; opacity: 0.7 } }
+                    }
+                    Label {
+                      Layout.fillWidth: true
+                      wrapMode: Text.Wrap
+                      text: strings.t("deck.mixAbout." + (root.mixPeek !== "" ? root.mixPeek : root.mixChosen !== "" ? root.mixChosen : "auto"))
+                      font.pixelSize: Style.font.caption
+                      color: root.ink
+                    }
+                  }
+                }
+                // How long: as suits the songs, or 8, 16 or 32 bars.
+                Flow {
+                  Layout.fillWidth: true
+                  visible: root.mixing
+                  spacing: 8
+                  Label { text: strings.t("deck.mixLength"); font.pixelSize: Style.font.caption; color: root.teal; height: 30; verticalAlignment: Text.AlignVCenter; width: 120 }
+                  Repeater {
+                    model: [0, 8, 16, 32]
+                    delegate: DjChip {
+                      required property int modelData
+                      text: modelData === 0 ? strings.t("deck.mixAuto") : strings.tn("deck.mixBars", modelData).arg(modelData)
+                      on: (root.deck.mixBars || 0) === modelData
+                      onTapped: { root.deck = Object.assign({}, root.deck, { mixBars: modelData }); root.run(["deck", "mixes", "bars", String(modelData)]) }
+                    }
+                  }
+                  Label { text: strings.t("deck.mixLengthAbout"); font.pixelSize: Style.font.caption; opacity: 0.55; height: 30; verticalAlignment: Text.AlignVCenter }
+                }
+                // Every other change: soft fades or hard cuts here, Sonos's own crossfade there.
+                Flow {
+                  Layout.fillWidth: true
+                  spacing: 8
+                  Label { text: root.canMix ? strings.t("deck.mixOthers") : strings.t("deck.mixBetween"); font.pixelSize: Style.font.caption; color: root.teal; height: 30; verticalAlignment: Text.AlignVCenter; width: 120 }
+                  DjChip {
+                    glyph: root.inSonos ? "󰡍" : "∿"
+                    text: root.inSonos ? strings.t("deck.mixCrossfade") : strings.t("deck.mixSoft")
+                    on: root.inSonos ? !!root.deck.crossfade : root.deck.softSkip !== false
+                    onTapped: if (root.inSonos) root.run(["deck", "crossfade", "on"])
+                              else { root.deck = Object.assign({}, root.deck, { softSkip: true }); root.run(["deck", "soft-skip", "on"]) }
+                  }
+                  DjChip {
+                    glyph: "󰆐"
+                    text: strings.t("deck.mixHard")
+                    on: root.inSonos ? !root.deck.crossfade : root.deck.softSkip === false
+                    onTapped: if (root.inSonos) root.run(["deck", "crossfade", "off"])
+                              else { root.deck = Object.assign({}, root.deck, { softSkip: false }); root.run(["deck", "soft-skip", "off"]) }
+                  }
                 }
               }
             }
@@ -2850,7 +2961,16 @@ Item {
                     width: parent.width
                     height: slot.jointBand + 2
                     readonly property bool live: root.mixLive && root.mixInfo.stage !== "out" && root.mixInfo.to === slot.uid
-                    readonly property string style: live && root.mixInfo.style ? root.mixInfo.style : (slot.joint ? slot.joint.style : "blend")
+                    readonly property string style: root.mixKind(live && root.mixInfo.style ? root.mixInfo.style : (slot.joint ? slot.joint.style : "swap"))
+                    readonly property bool picked: !live && !!slot.joint && !!slot.joint.picked
+                    // A tap picks how this one mixes in: each style in turn, then back to the Deck's choice.
+                    function cycle() {
+                      const styles = root.mixStyles
+                      let at = picked ? styles.indexOf(style) + 1 : 0
+                      if (!picked && styles[at] === style) at += 1
+                      const pick = at < styles.length ? styles[at] : "auto"
+                      root.run(["deck", "mixes", "pick", slot.uid, pick])
+                    }
                     readonly property int bars: live && root.mixInfo.bars ? root.mixInfo.bars : (slot.joint ? slot.joint.bars : 0)
                     readonly property color tone: root.mixTone(style)
                     // Centred over the key and tempo columns.
@@ -2872,9 +2992,19 @@ Item {
                       width: seamText.implicitWidth + 18
                       height: 16
                       radius: 8
-                      color: seam.live ? Util.alpha(seam.tone, 0.16) : root.ground
+                      color: seam.live ? Util.alpha(seam.tone, 0.16) : pillHover.hovered ? Util.alpha(seam.tone, 0.1) : root.ground
                       border.width: 1
-                      border.color: Util.alpha(seam.tone, seam.live ? 0.8 : 0.35)
+                      border.color: Util.alpha(seam.tone, seam.live || pillHover.hovered ? 0.8 : seam.picked ? 0.6 : 0.35)
+                      Behavior on color { ColorAnimation { duration: Style.duration(140) } }
+                      HoverHandler { id: pillHover; enabled: !seam.live && !root.locked; cursorShape: Qt.PointingHandCursor; onHoveredChanged: root.hint(pill, strings.t("deck.mixPickTip"), hovered) }
+                      TapHandler { enabled: !seam.live && !root.locked; onTapped: seam.cycle() }
+                      // Chosen for this song (not the Deck's own pick): a small dot.
+                      Rectangle {
+                        visible: seam.picked
+                        anchors.verticalCenter: parent.verticalCenter
+                        x: 5; width: 4; height: 4; radius: 2
+                        color: seam.tone
+                      }
                       Label {
                         id: seamText
                         anchors.centerIn: parent
@@ -3828,6 +3958,35 @@ Item {
                 Layout.rightMargin: 18
               }
               Label { text: "−" + root.clock(root.nowLeft); font.pixelSize: Style.font.subtitle; color: root.teal }
+            }
+            // A mix under way, for the room: what's coming in, and the two songs
+            // handing over, drawn, with where it is now.
+            RowLayout {
+              visible: root.mixLive
+              Layout.topMargin: 18
+              Layout.fillWidth: true
+              spacing: 18
+              Label {
+                text: root.mixGlyph(root.mixInfo.style)
+                font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.subtitle + 6
+                color: root.mixTone(root.mixInfo.style)
+              }
+              Label {
+                Layout.fillWidth: true
+                text: root.mixLine
+                font.pixelSize: Math.max(16, Math.min(24, stageView.width / 60))
+                color: root.mixTone(root.mixInfo.style)
+                elide: Text.ElideRight
+              }
+              MixShape {
+                visible: root.mixTimed && !!root.mixInfo.curves
+                Layout.preferredWidth: Math.min(360, stageView.width * 0.2); Layout.preferredHeight: 52
+                labels: false
+                curves: root.mixInfo.curves || null
+                swap: root.mixSwap
+                playhead: root.mixShare
+                outColor: root.amber; inColor: root.teal; ink: root.ink
+              }
             }
           }
         }
@@ -5070,6 +5229,7 @@ Item {
       Label { visible: chip.glyph !== ""; text: chip.glyph; font.family: "Iosevka Nerd Font Propo"; color: chip.on ? root.amber : root.teal }
       Label { text: chip.text; font.pixelSize: Style.font.caption; color: root.ink; font.bold: chip.on }
     }
+    readonly property bool hovered: chipMouse.hovered
     HoverHandler { id: chipMouse; cursorShape: Qt.PointingHandCursor }
     TapHandler { onTapped: chip.tapped() }
   }

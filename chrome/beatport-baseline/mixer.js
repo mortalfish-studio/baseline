@@ -94,6 +94,37 @@
       }, seconds * 1000);
     });
   }
+  // The kick's rises on an even timeline (gaps left at zero), smoothed over
+  // ~12 ms: where each beat lands.
+  function rises(rows, sampleRate) {
+    const dt = HOP / sampleRate, t0 = rows[0][0];
+    const n = Math.round((rows[rows.length - 1][0] - t0) / dt) + 1;
+    const energy = new Float32Array(n);
+    for (const [t, e] of rows) energy[Math.round((t - t0) / dt)] = e;
+    const smooth = new Float32Array(n);
+    for (let i = 0, run = 0; i < n; i += 1) { run += energy[i] - (i >= 4 ? energy[i - 4] : 0); smooth[i] = run; }
+    const rise = new Float32Array(n);
+    let top = 0;
+    for (let i = 1; i < n; i += 1) { rise[i] = Math.max(0, smooth[i] - smooth[i - 1]); top = Math.max(top, rise[i]); }
+    return { dt, t0, n, rise, top };
+  }
+  // The same rises on the shared clock, for lining two decks up against each
+  // other: heard over the same moments, so nothing about either song's own
+  // timing can come between them.
+  async function envelope(op) {
+    const s = arm();
+    await s.ctx.resume().catch(() => {});
+    const seconds = Math.max(3, Math.min(20, Number(op.seconds) || 10));
+    const { rows } = await listen(s, seconds);
+    if (rows.length < 100) return { ok: false, error: "silent" };
+    const { dt, t0, n, rise, top } = rises(rows, s.ctx.sampleRate);
+    if (!(top > 0)) return { ok: false, error: "silent" };
+    const stamp = s.ctx.getOutputTimestamp();
+    const toWall = (t) => performance.timeOrigin + stamp.performanceTime + (t - stamp.contextTime) * 1000;
+    const out = new Array(n);
+    for (let i = 0; i < n; i += 1) out[i] = Math.round(rise[i] / top * 999);
+    return { ok: true, t0: toWall(t0), dt: dt * 1000, rise: out };
+  }
   function median(values) {
     const v = [...values].sort((x, y) => x - y);
     return v.length ? v[Math.floor(v.length / 2)] : 0;
@@ -106,16 +137,7 @@
     const seconds = Math.max(6, Math.min(30, Number(op.seconds) || 12));
     const { rows, maps, rate } = await listen(s, seconds);
     if (rows.length < 200 || maps.length < 5) return { ok: false, error: "silent" };
-    // An even timeline (gaps left at zero), smoothed over ~12 ms, then rises.
-    const dt = HOP / s.ctx.sampleRate, t0 = rows[0][0];
-    const n = Math.round((rows[rows.length - 1][0] - t0) / dt) + 1;
-    const energy = new Float32Array(n);
-    for (const [t, e] of rows) energy[Math.round((t - t0) / dt)] = e;
-    const smooth = new Float32Array(n);
-    for (let i = 0, run = 0; i < n; i += 1) { run += energy[i] - (i >= 4 ? energy[i - 4] : 0); smooth[i] = run; }
-    const rise = new Float32Array(n);
-    let top = 0;
-    for (let i = 1; i < n; i += 1) { rise[i] = Math.max(0, smooth[i] - smooth[i - 1]); top = Math.max(top, rise[i]); }
+    const { dt, t0, n, rise, top } = rises(rows, s.ctx.sampleRate);
     if (!(top > 0)) return { ok: false, error: "silent" };
     const at = (x) => { const i = Math.floor(x), f = x - i; return i + 1 < n ? rise[i] * (1 - f) + rise[i + 1] * f : 0; };
     const echo = (period) => {
@@ -214,7 +236,8 @@
       }
       // Ease towards it over about four seconds, never more than 1% off,
       // and leave it be inside 4 ms.
-      const nudge = Math.abs(error) < 0.004 ? 0 : Math.max(-0.01, Math.min(0.01, error / 4));
+      const most = now < (follow.fastUntil || 0) ? 0.03 : 0.01;
+      const nudge = Math.abs(error) < 0.004 ? 0 : Math.max(-most, Math.min(most, error / 4));
       el.playbackRate = rate * (1 - nudge);
     }, 200);
   }
@@ -305,6 +328,13 @@
       else if (op.type === "go") reply = await go(op);
       else if (op.type === "automate") { automate(op.lanes || {}); reply = { ok: true }; }
       else if (op.type === "lock") { lock(op); reply = { ok: true }; }
+      else if (op.type === "envelope") reply = await envelope(op);
+      else if (op.type === "shift") {
+        // Line the beats up anew: the schedule moves on by `seconds`, and the
+        // tempo may lean a little harder for a few seconds to get there.
+        if (follow) { follow.time += Math.max(-0.3, Math.min(0.3, Number(op.seconds) || 0)); follow.fastUntil = wall() + 6000; follow.recent = []; }
+        reply = { ok: !!follow };
+      }
       else if (op.type === "reset") reply = reset(op);
       else if (op.type === "seek") { const el = player(); if (el) el.currentTime = Math.max(0, Number(op.time) || 0); reply = { ok: !!el }; }
       else if (op.type === "play") { const el = player(); if (el) await el.play(); reply = { ok: !!el }; }

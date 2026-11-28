@@ -42,6 +42,7 @@ import time
 import fcntl
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -4250,7 +4251,8 @@ DECK_DETAILS_LOCK = STATE.parent / "deck-details.lock"
 DECK_UNDO = STATE.parent / "deck-undo.json"           # the set before each of the last changes
 DECK_SETS = STATE.parent / "deck-sets.json"           # sets you saved
 DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kind": "laptop"}, "playing": False,
-              "paused": False, "sleep": None, "crossfade": False, "mixes": True, "mixNow": None, "mixDeck": None,
+              "paused": False, "sleep": None, "crossfade": False, "mixes": True, "mixStyle": None, "mixBars": 0, "mixPicks": {},
+              "mixNow": None, "mixDeck": None,
               "autodj": False, "autodjAt": 0, "handoff": "",
               "pushed": [], "pushedFrom": 1, "expect": None, "was": None, "updated": 0,
               "lock": False, "requests": [], "guests": None, "requestsAuto": False, "votes": {}, "lastCall": 0,
@@ -4978,36 +4980,86 @@ MIX_LENGTH_SLACK = 4           # seconds a song's length may differ from the cat
 MIX_SURE = 0.35                # how clearly the kicks must fold onto the beat to blend on it
 
 
+MIX_STYLES = ("swap", "beat", "smooth", "filter", "cut")
+MIX_LENGTHS = (0, 8, 16, 32)      # bars; 0 = as suits the songs
+
+
 def mix_style(a, b):
-    """blend, filter or cut, for song a into song b (each with bpm, key)."""
+    """The style that suits song a into song b (each with bpm, key): a bass
+    swap when the keys mix, a filter when they clash, a cut when the tempos
+    are too far apart to match."""
     ta, tb = a.get("bpm") or 0, b.get("bpm") or 0
     if not ta or not tb or abs(ta / tb - 1) > MIX_RATE_MAX:
         return "cut"
-    return "blend" if keys_fit(a.get("key"), b.get("key")) else "filter"
+    return "swap" if keys_fit(a.get("key"), b.get("key")) else "filter"
 
 
-def mix_bars(a, b, style):
-    """How long a mix runs, in bars: a long blend between two extended mixes
-    (made to be mixed: long intros and outros), shorter otherwise."""
+def mix_bars(a, b, style, bars=0):
+    """How long a mix runs, in bars: the length asked for, else a long one
+    between two extended mixes (made to be mixed: long intros and outros),
+    shorter otherwise. A cut is always 4."""
+    if style == "cut":
+        return 4
+    if bars in MIX_LENGTHS[1:]:
+        return bars
     extended = all("extended" in str(x.get("title", "")).lower() for x in (a, b))
-    return {"blend": 32 if extended else 16, "filter": 16, "cut": 4}[style]
+    return 16 if style == "filter" or not extended else 32
 
 
-def mix_plan(a, b, length_a, offset_a, offset_b, beat_a=None, beat_b=None, style=None):
+def mix_lanes(style, seconds, beat):
+    """Each deck's moves for a style over a mix of that many seconds: per
+    control, [seconds from the start, value] (gain 0-1, low/mid/high dB,
+    hp/lp Hz), and when the new song takes over (its bass in)."""
+    k, half, s = MIX_KILL, seconds / 2, seconds
+    if style == "swap":
+        # Bass swap: the new song's top creeps in, the basses trade places
+        # on the halfway downbeat (never two at once), the old song's top goes.
+        a = {"low": [[half - beat / 2, 0], [half, k]], "mid": [[half, 0], [s * 0.9, -8]],
+             "high": [[half, 0], [s * 0.9, -12]], "gain": [[s * 0.7, 1], [s, 0]]}
+        b = {"gain": [[0, 0], [s * 0.25, 1]], "low": [[0, k], [half - beat / 2, k], [half, 0]],
+             "high": [[0, -10], [half, 0]]}
+        return a, b, half
+    if style == "beat":
+        # Beat first: a hint of the new song's hats, then its kick and bass
+        # take over a quarter of the way in, under the old song's melody,
+        # and the rest of it crossfades in slowly after.
+        q = s * 0.25
+        a = {"low": [[q - beat / 2, 0], [q, k]], "mid": [[s * 0.4, 0], [s * 0.95, -20]],
+             "high": [[s * 0.4, 0], [s * 0.95, -20]], "gain": [[s * 0.8, 1], [s, 0]]}
+        b = {"gain": [[0, 0], [q * 0.5, 1]], "low": [[0, k], [q - beat / 2, k], [q, 0]],
+             "mid": [[0, k], [q, k], [s * 0.85, 0]], "high": [[0, -26], [q, -14], [s * 0.85, 0]]}
+        return a, b, q
+    if style == "smooth":
+        # Smooth fade: one long crossfade, the basses handing over gently in the middle.
+        a = {"gain": [[s * 0.25, 1], [s, 0]], "low": [[s * 0.35, 0], [s * 0.6, k]]}
+        b = {"gain": [[0, 0], [s * 0.75, 1]], "low": [[0, k], [s * 0.4, k], [s * 0.65, 0]]}
+        return a, b, half
+    if style == "filter":
+        # Filter: the old song thins out through a rising high-pass while the new one comes up under it.
+        a = {"hp": [[0, 10], [s * 0.85, 900]], "low": [[half - beat / 2, 0], [half, k]],
+             "gain": [[s * 0.75, 1], [s, 0]]}
+        b = {"gain": [[0, 0], [half, 1]], "low": [[0, k], [half - beat / 2, k], [half, 0]]}
+        return a, b, half
+    # Cut: the old song closes down through a low-pass; the new one lands on the downbeat.
+    a = {"lp": [[0, 22000], [s, 320]], "gain": [[s * 0.4, 1], [s, 0]]}
+    b = {"gain": [[s - 0.02, 0], [s, 1]]}          # silent through its pre-roll, then in on the downbeat
+    return a, b, s
+
+
+def mix_plan(a, b, length_a, offset_a, offset_b, beat_a=None, beat_b=None, style=None, bars=0):
     """How song a goes into song b: the style, how many bars, where in a it
     starts (on a phrase), where b comes in (its first beat), b's tempo
-    (a's, keylocked), how long it lasts, and the lanes: for each deck, each
-    control's [seconds from the start, value] (gain 0-1, low/mid/high dB,
-    hp/lp Hz). beat_a and beat_b are the beats as heard (seconds); the
+    (a's, keylocked), how long it lasts, when b takes over, and the lanes
+    (mix_lanes). beat_a and beat_b are the beats as heard (seconds); the
     catalogue's tempo is only the fallback, as it's often rounded. style
-    forces one (a cut, when a song's beats couldn't be heard clearly). None
-    when a is too short to mix out of."""
+    and bars force them (else they suit the songs). None when a is too
+    short to mix out of."""
     beat_a = beat_a or 60 / (a.get("bpm") or b.get("bpm") or 120)
     beat_b = beat_b or 60 / (b.get("bpm") or 60 / beat_a)
-    style = style or mix_style({**a, "bpm": 60 / beat_a}, {**b, "bpm": 60 / beat_b})
+    style = style if style in MIX_STYLES else mix_style({**a, "bpm": 60 / beat_a}, {**b, "bpm": 60 / beat_b})
     beat = beat_a
     bar = 4 * beat
-    bars = mix_bars(a, b, style)
+    bars = mix_bars(a, b, style, bars)
     seconds = bars * bar
     phrase = 16 * bar
     last = length_a - MIX_TAIL - seconds
@@ -5015,23 +5067,58 @@ def mix_plan(a, b, length_a, offset_a, offset_b, beat_a=None, beat_b=None, style
         return None
     start = offset_a + int((last - offset_a) // phrase) * phrase
     rate = round(beat_b / beat_a, 5) if style != "cut" else 1.0
-    half, k = seconds / 2, MIX_KILL
-    if style == "blend":
-        lanes_a = {"low": [[half - beat / 2, 0], [half, k]], "mid": [[half, 0], [seconds * 0.9, -8]],
-                   "high": [[half, 0], [seconds * 0.9, -12]], "gain": [[seconds * 0.7, 1], [seconds, 0]]}
-        lanes_b = {"gain": [[0, 0], [seconds * 0.25, 1]], "low": [[0, k], [half - beat / 2, k], [half, 0]],
-                   "high": [[0, -10], [half, 0]]}
-    elif style == "filter":
-        lanes_a = {"hp": [[0, 10], [seconds * 0.85, 900]], "low": [[half - beat / 2, 0], [half, k]],
-                   "gain": [[seconds * 0.75, 1], [seconds, 0]]}
-        lanes_b = {"gain": [[0, 0], [half, 1]], "low": [[0, k], [half - beat / 2, k], [half, 0]]}
-    else:
-        lanes_a = {"lp": [[0, 22000], [seconds, 320]], "gain": [[seconds * 0.4, 1], [seconds, 0]]}
-        lanes_b = {"gain": [[seconds - 0.01, 1]]}
+    lanes_a, lanes_b, swap = mix_lanes(style, seconds, beat)
     return {"style": style, "bars": bars, "start": round(start, 3), "entry": round(offset_b, 3), "rate": rate,
             "seconds": round(seconds, 3), "beat": round(beat, 4), "lanes": {"a": lanes_a, "b": lanes_b},
+            "swap": round(swap, 3),
             # a cut brings b in on the downbeat after a's fade; otherwise b runs under a from the start
             "enter": round(seconds if style == "cut" else 0, 3)}
+
+
+def mix_curves(lanes, seconds, points=48):
+    """What each deck gives over a mix, for drawing it: its bass (kick and
+    bass line) and its top (the rest) as 0-1, sampled evenly."""
+    def at(points_list, t, neutral):
+        if not points_list:
+            return neutral
+        if t <= points_list[0][0]:
+            return points_list[0][1]
+        for (t0, v0), (t1, v1) in zip(points_list, points_list[1:]):
+            if t <= t1:
+                return v0 + (v1 - v0) * ((t - t0) / (t1 - t0) if t1 > t0 else 1)
+        return points_list[-1][1]
+    level = lambda db: 10 ** (db / 20)
+    share = lambda x, lo, hi: max(0.0, min(1.0, math.log(x / lo) / math.log(hi / lo)))
+    out = {}
+    for deck in ("a", "b"):
+        lane = lanes.get(deck, {})
+        bass, top = [], []
+        for i in range(points):
+            t = seconds * i / (points - 1)
+            g = at(lane.get("gain"), t, 1.0)
+            hp, lp = at(lane.get("hp"), t, 10), at(lane.get("lp"), t, 22000)
+            bass.append(round(g * level(at(lane.get("low"), t, 0)) * (1 - share(max(hp, 40), 40, 300))
+                              * share(min(max(lp, 60), 200), 60, 200), 2))
+            top.append(round(g * level((at(lane.get("mid"), t, 0) + at(lane.get("high"), t, 0)) / 2)
+                             * share(min(max(lp, 320), 8000), 320, 8000), 2))
+        out[deck] = {"bass": bass, "top": top}
+    return out
+
+
+_MIX_SHAPES = {}
+
+
+def mix_shapes():
+    """Every style drawn over a 32-bar mix (a cut over its 4), for the Mix card."""
+    if _MIX_SHAPES:
+        return _MIX_SHAPES
+    shapes = _MIX_SHAPES
+    for style in MIX_STYLES:
+        bars = 4 if style == "cut" else 32
+        seconds = bars * 4 * 0.48
+        lanes_a, lanes_b, swap = mix_lanes(style, seconds, 0.48)
+        shapes[style] = {**mix_curves({"a": lanes_a, "b": lanes_b}, seconds), "swap": round(swap / seconds, 3)}
+    return shapes
 
 
 def mix_wall(lanes, start_ms):
@@ -5076,7 +5163,7 @@ def mix_press_play(deck, length=0, wait=30):
     return None
 
 
-def deck_mix(a, b, live="a", url_b=None, log=None, route=None, wanted=None):
+def deck_mix(a, b, live="a", url_b=None, log=None, route=None, wanted=None, style=None, bars=0, chosen=False):
     """Mix song a (playing on deck live) into song b, now. Blocks until it's
     done; returns the plan with how it went, or None if it couldn't (and
     nothing was changed that the song playing would notice)."""
@@ -5085,7 +5172,7 @@ def deck_mix(a, b, live="a", url_b=None, log=None, route=None, wanted=None):
     plan = None
     try:
         plan = deck_mix_cue(a, b, live, idle, url_b or beatport_track_url(b), log or (lambda *x: None), route,
-                            wanted or (lambda: True))
+                            wanted or (lambda: True), style, bars, chosen)
     except (KeyError, TypeError, ValueError):
         plan = None
     if not plan:
@@ -5097,7 +5184,7 @@ def deck_mix(a, b, live="a", url_b=None, log=None, route=None, wanted=None):
     return plan
 
 
-def deck_mix_cue(a, b, live, idle, url_b, say, route=None, wanted=lambda: True):
+def deck_mix_cue(a, b, live, idle, url_b, say, route=None, wanted=lambda: True, style=None, bars=0, chosen=False):
     """deck_mix's work: hear both songs' beats, cue b silently on the idle
     deck, plan it and set it going. None if any step falls short, or once
     wanted() says the mix isn't wanted any more (paused, skipped)."""
@@ -5131,10 +5218,11 @@ def deck_mix_cue(a, b, live, idle, url_b, say, route=None, wanted=lambda: True):
     length_a = look_a.get("duration") or a.get("length") or 0
     clear = lambda g: bool(g.get("ok")) and g.get("sure", 0) >= MIX_SURE
     heard = lambda g, key: g.get(key) if clear(g) else None
-    # Beats that can't be lined up aren't blended: a cut on the downbeat instead.
+    # Beats that can't be lined up aren't blended: a cut on the downbeat
+    # instead, unless this mix's style was picked by hand.
     plan = mix_plan(a, b, length_a, heard(grid_a, "offset") or 0, heard(grid_b, "offset") or 0,
                     heard(grid_a, "period"), heard(grid_b, "period"),
-                    style=None if clear(grid_a) and clear(grid_b) else "cut")
+                    style=style if chosen or (clear(grid_a) and clear(grid_b)) else "cut", bars=bars)
     if not plan:
         say("too short to mix out of", length_a)
         return None
@@ -5185,19 +5273,50 @@ def deck_mix_song(song, details=None):
     return {**song, **{k: known[k] for k in ("bpm", "key", "length") if known.get(k)}}
 
 
+def deck_mix_choice(deck, uid):
+    """How the mix into song uid should go: (style or None for whatever
+    suits, bars or 0, picked by hand for this one song)."""
+    picked = (deck.get("mixPicks") or {}).get(uid)
+    style = picked if picked in MIX_STYLES else deck.get("mixStyle") if deck.get("mixStyle") in MIX_STYLES else None
+    bars = deck.get("mixBars") if deck.get("mixBars") in MIX_LENGTHS else 0
+    return style, bars, picked in MIX_STYLES
+
+
 def deck_mix_preview(deck):
     """How each Beatport song in the set will come in from the one before
-    (the playing one, for the first): {uid: {style, bars}}, from what the
-    details say. The mix itself goes by what it hears, so it can differ."""
+    (the playing one, for the first): {uid: {style, bars, picked}}, from
+    the choices and what the details say. The mix itself goes by what it
+    hears, so a mix it can't line up becomes a cut."""
     if not deck.get("mixes", True):
         return {}
     out, before = {}, deck.get("now")
     for song in deck.get("set") or []:
         if before and before.get("service") == "beatport" == song.get("service"):
-            style = mix_style(before, song)
-            out[song["uid"]] = {"style": style, "bars": mix_bars(before, song, style)}
+            chosen, bars, picked = deck_mix_choice(deck, song["uid"])
+            style = chosen or mix_style(before, song)
+            out[song["uid"]] = {"style": style, "bars": mix_bars(before, song, style, bars), "picked": picked}
         before = song
     return out
+
+
+def deck_mix_set(d, args):
+    """deck mixes style <style|auto>, bars <0|8|16|32>, pick <uid> <style|auto>."""
+    if args[:1] == ["style"] and len(args) == 2 and args[1] in MIX_STYLES + ("auto",):
+        d["mixStyle"] = None if args[1] == "auto" else args[1]
+        d["mixes"] = True
+    elif args[:1] == ["bars"] and len(args) == 2 and args[1].isdigit() and int(args[1]) in MIX_LENGTHS:
+        d["mixBars"] = int(args[1])
+    elif args[:1] == ["pick"] and len(args) == 3 and args[2] in MIX_STYLES + ("auto",):
+        picks = {u: v for u, v in (d.get("mixPicks") or {}).items()
+                 if any(x["uid"] == u for x in d["set"])}          # only songs still to come
+        if args[2] == "auto":
+            picks.pop(args[1], None)
+        elif any(x["uid"] == args[1] for x in d["set"]):
+            picks[args[1]] = args[2]
+        d["mixPicks"] = picks
+    else:
+        return False
+    return True
 
 
 def deck_mix_due(deck, status):
@@ -5259,6 +5378,71 @@ def deck_mix_pause(d):
     mix_op(live, {"type": "pause"})
 
 
+MIX_SYNC_BINS = 96
+
+
+def mix_gap(env_a, env_b, beat):
+    """How far song b's beats fall after song a's (seconds, either way, up to
+    half a beat) from both decks' kick-onset envelopes over the same moments
+    (on the shared clock), and how sure: each folded onto the beat, then the
+    shift that lines the two up best. (0, 0) when either is empty."""
+    def fold(env):
+        bins = [0.0] * MIX_SYNC_BINS
+        for i, v in enumerate(env.get("rise") or []):
+            if v:
+                t = (env["t0"] + i * env["dt"]) / 1000
+                bins[int((t % beat) / beat * MIX_SYNC_BINS) % MIX_SYNC_BINS] += v
+        total = sum(bins)
+        n = MIX_SYNC_BINS
+        return [(bins[k - 1] + 2 * bins[k] + bins[(k + 1) % n]) / total for k in range(n)] if total else None
+    fa, fb = fold(env_a or {}), fold(env_b or {})
+    if not fa or not fb:
+        return 0.0, 0.0
+    n = MIX_SYNC_BINS
+    score = [sum(fa[k] * fb[(k + lag) % n] for k in range(n)) for lag in range(n)]
+    best = max(range(n), key=lambda lag: score[lag])
+    left, mid, right = score[best - 1], score[best], score[(best + 1) % n]
+    bend = 0.5 * (left - right) / (left - 2 * mid + right) if left - 2 * mid + right else 0
+    lag = (best + max(-0.5, min(0.5, bend))) % n
+    lag = lag - n if lag > n / 2 else lag
+    mean = sum(score) / n
+    return lag / n * beat, (mid / mean if mean else 0)
+
+
+MIX_SYNC_LISTEN = 10           # seconds both decks are heard together at the start of a mix
+MIX_SYNC_SURE = 1.4            # how clearly the two must line up to be nudged
+MIX_SYNC_SMALL = 0.006         # seconds: closer than this is left be
+
+
+def mix_resync(plan, old):
+    """Once both songs play, hear them together for a few seconds (before
+    the new one's bass comes in) and nudge the new one's beats onto the old
+    one's: the plan's own guess of where its beats fall can be out by a few
+    tens of milliseconds on a soft kick. Logged either way."""
+    new = plan["live"]
+    if plan["style"] == "cut":
+        return 0.0          # the old song is gone before the new one plays: nothing to line up
+    begin = plan["startMs"] / 1000 + plan["enter"] + 0.5
+    if time.time() < begin:
+        time.sleep(begin - time.time())
+    seconds = max(5, min(MIX_SYNC_LISTEN, plan["swap"] - plan["enter"] - 4))
+    heard = {}
+    def listen(deck):
+        heard[deck] = mix_op(deck, {"type": "envelope", "seconds": seconds}, timeout=seconds + 8)
+    threads = [threading.Thread(target=listen, args=(d,)) for d in (old, new)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    gap, sure = mix_gap(heard.get(old), heard.get(new), plan["beat"])
+    nudge = sure >= MIX_SYNC_SURE and abs(gap) >= MIX_SYNC_SMALL
+    if nudge:
+        # b late by gap: it should be that much further on (in its own time).
+        mix_op(new, {"type": "shift", "seconds": round(gap * plan["rate"], 4)})
+    mix_log("sync", {"gap ms": round(gap * 1000), "sure": round(sure, 2), "nudged": nudge})
+    return gap if nudge else 0.0
+
+
 MIX_LOG = STATE.parent / "deck-mix.log"
 
 
@@ -5294,14 +5478,18 @@ def deck_mix_run():
         d = deck_read()
         return d["playing"] and (d.get("now") or {}).get("uid") == a["uid"] \
             and (d.get("mixNow") or {}).get("stage") == "cueing" and (d.get("mixNow") or {}).get("from") == a["uid"]
-    plan = deck_mix(a, b, live=live, route=route, wanted=wanted, log=mix_log)
+    style, bars, chosen = deck_mix_choice(deck, b["uid"])
+    plan = deck_mix(a, b, live=live, route=route, wanted=wanted, log=mix_log, style=style, bars=bars, chosen=chosen)
     mix_log("mix", a.get("title"), "→", b.get("title"), plan and {k: v for k, v in plan.items() if k != "lanes"})
     if not plan:
         mark(stage="failed")
         return
-    takeover = plan["startMs"] / 1000 + (plan["enter"] or plan["seconds"] / 2)
+    takeover = plan["startMs"] / 1000 + plan["swap"]
     mark(stage="mixing", style=plan["style"], bars=plan["bars"], rate=plan["rate"], startMs=plan["startMs"],
-         endMs=plan["endMs"], takeover=takeover, live=plan["live"])
+         endMs=plan["endMs"], takeover=takeover, live=plan["live"],
+         curves=mix_curves(plan["lanes"], plan["seconds"]))
+    # Both songs heard together, the new one's beats nudged onto the old one's.
+    mix_resync(plan, live)
     moved = False
     while time.time() * 1000 < plan["endMs"] + 500:
         time.sleep(0.4)
@@ -7950,6 +8138,7 @@ def deck_command(settings, args):
         deck["voices"] = [{"key": k, "name": n, "about": a} for k, n, a in voices_ready()]
         shown = deck_with_details(deck)
         shown["mixPlan"] = deck_mix_preview(shown)
+        shown["mixShapes"] = mix_shapes()
         print(json.dumps(shown))
         sys.stdout.flush()
         deck_details_soon(deck)
@@ -8181,6 +8370,9 @@ def deck_command(settings, args):
         deck_update(lambda d: d.update(mixes=args[1] == "on"))
     elif action == "mixes" and args[1:] == ["go"]:
         deck_mix_run()
+    elif action == "mixes" and len(args) >= 3:
+        if not deck_update(lambda d: deck_mix_set(d, args[1:])):
+            sys.exit("deck mixes style <" + "|".join(MIX_STYLES) + "|auto> · bars <0|8|16|32> · pick <uid> <style|auto>")
     elif action == "crossfade" and len(args) == 2 and args[1] in {"on", "off"}:
         deck_update(lambda d: deck_crossfade(d, args[1] == "on"))
     elif action == "sleep" and len(args) == 2:

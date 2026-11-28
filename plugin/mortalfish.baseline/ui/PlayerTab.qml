@@ -48,6 +48,68 @@ Column {
   Commons.Translations { id: strings; directory: Qt.resolvedUrl("../i18n") }
 
   // Speaker or headphones, first: it's what you reach for before pressing play.
+  // ---- The Deck, at a glance: what it's on, how it mixes, what's next. A tap opens it.
+  readonly property var deckState: host ? host.deckState : null
+  readonly property var deckNow: deckState ? deckState.now || null : null
+  readonly property int deckLeft: deckState && deckState.set ? deckState.set.length : 0
+  readonly property string deckMix: {
+    const d = deckState
+    if (!d) return ""
+    const m = d.mixNow || {}
+    const styles = ["swap", "beat", "smooth", "filter", "cut"]
+    const style = styles.indexOf(m.style) >= 0 ? m.style : "swap"
+    if (deckNow && ["cueing", "mixing"].indexOf(m.stage || "") >= 0 && m.from === deckNow.uid) {
+      const to = (d.set || []).find(x => x.uid === m.to)
+      return strings.t("deck.mixNow." + style).arg(to ? to.title.replace(/\s*[([].*$/, "") : "")
+    }
+    if (d.mixes === false) return ""
+    const beatport = (deckNow && deckNow.service === "beatport") || (d.set || []).some(x => x.service === "beatport")
+    if (!beatport) return ""
+    return strings.t("deck.mixButton").arg(styles.indexOf(d.mixStyle) >= 0 ? strings.t("deck.mixStyle." + d.mixStyle) : strings.t("deck.mixAuto"))
+  }
+  Rectangle {
+    id: deckStrip
+    visible: !!root.deckNow || root.deckLeft > 0
+    width: parent.width
+    implicitHeight: deckCol.implicitHeight + Style.space(16)
+    radius: Style.cornerRadius > 0 ? Style.space(4) : 0
+    color: deckHover.hovered ? Qt.rgba(root.amber.r, root.amber.g, root.amber.b, 0.1) : Qt.rgba(root.amber.r, root.amber.g, root.amber.b, 0.04)
+    border.width: 1
+    border.color: Qt.rgba(root.amber.r, root.amber.g, root.amber.b, deckHover.hovered ? 0.8 : 0.35)
+    Behavior on color { ColorAnimation { duration: Style.duration(140) } }
+    Column {
+      id: deckCol
+      x: Style.space(12); y: Style.space(8)
+      width: parent.width - Style.space(24)
+      spacing: Style.space(3)
+      RowLayout {
+        width: parent.width
+        Label { text: "󰲸  DECK"; font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal }
+        Item { Layout.fillWidth: true }
+        Label { text: strings.t("deck.open") + "  ›"; font.pixelSize: Style.font.caption; color: root.amber; opacity: deckHover.hovered ? 1 : 0.7 }
+      }
+      Label {
+        width: parent.width
+        visible: !!root.deckNow
+        textFormat: Text.PlainText
+        text: root.deckNow ? root.deckNow.title + "  ·  " + (root.deckNow.artist || "") : ""
+        font.bold: true; color: root.amber
+        elide: Text.ElideRight
+      }
+      Label {
+        width: parent.width
+        textFormat: Text.PlainText
+        text: [root.deckNow ? strings.t(root.deckState.playing ? "deck.nowPlaying" : "deck.paused") : "",
+               root.deckMix,
+               root.deckLeft > 0 ? strings.t("player.deckNext").arg(Commons.I18n.formatNumber(root.deckLeft)) : ""].filter(x => x !== "").join("  ·  ")
+        font.pixelSize: Style.font.caption; opacity: 0.7
+        elide: Text.ElideRight
+      }
+    }
+    HoverHandler { id: deckHover; cursorShape: Qt.PointingHandCursor }
+    TapHandler { onTapped: if (root.host) root.host.openDeck() }
+  }
+
   OutputSwitch { id: output; width: parent.width; host: root.host }
 
   function clock(seconds) {
@@ -493,6 +555,7 @@ Column {
         }
       }
       Chip {
+        visible: !deckStrip.visible
         text: "󰲸  " + strings.t("deck.open")
         tone: root.amber
         onClicked: if (root.host) root.host.openDeck()
