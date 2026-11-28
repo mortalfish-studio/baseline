@@ -87,7 +87,21 @@
   // of it, and the beat's place is where the kicks fold onto it. Returns the
   // beat in media seconds and where one falls (`offset`, media time).
   const HOP = 128;
-  function listen(s, seconds) {
+  // The attack band: what's above 1.5 kHz, where a drum's hit is a sharp click
+  // (the low band's thump swells over tens of ms, differently for each kick,
+  // so it places a beat only to within about 20 ms). Made when first wanted,
+  // so decks armed before it existed get it too.
+  function attackBand(s) {
+    if (!s.attackFilter) {
+      s.attackFilter = s.ctx.createBiquadFilter();
+      s.attackFilter.type = "highpass";
+      s.attackFilter.frequency.value = 1500;
+      s.source.connect(s.attackFilter);
+    }
+    return s.attackFilter;
+  }
+  function listen(s, seconds, from) {
+    const band = from || s.kickFilter;
     return new Promise((resolve) => {
       const tap = s.ctx.createScriptProcessor(1024, 1, 1);
       const mute = s.ctx.createGain();
@@ -106,9 +120,9 @@
         }
         maps.push(s.el.currentTime - t0 * s.el.playbackRate);
       };
-      s.kickFilter.connect(tap).connect(mute).connect(s.ctx.destination);
+      band.connect(tap).connect(mute).connect(s.ctx.destination);
       setTimeout(() => {
-        tap.disconnect(); mute.disconnect(); try { s.kickFilter.disconnect(tap); } catch (error) { /* gone */ }
+        tap.disconnect(); mute.disconnect(); try { band.disconnect(tap); } catch (error) { /* gone */ }
         resolve({ rows, maps, rate: s.el.playbackRate });
       }, seconds * 1000);
     });
@@ -134,15 +148,22 @@
     const s = arm();
     await s.ctx.resume().catch(() => {});
     const seconds = Math.max(3, Math.min(20, Number(op.seconds) || 10));
-    const { rows } = await listen(s, seconds);
+    // Both bands over the same moments: the kick's thump, and the hits' attack.
+    const [{ rows }, sharp] = await Promise.all([listen(s, seconds), listen(s, seconds, attackBand(s))]);
     if (rows.length < 100) return { ok: false, error: "silent" };
-    const { dt, t0, n, rise, top } = rises(rows, s.ctx.sampleRate);
-    if (!(top > 0)) return { ok: false, error: "silent" };
     const stamp = s.ctx.getOutputTimestamp();
     const toWall = (t) => performance.timeOrigin + stamp.performanceTime + (t - stamp.contextTime) * 1000;
-    const out = new Array(n);
-    for (let i = 0; i < n; i += 1) out[i] = Math.round(rise[i] / top * 999);
-    return { ok: true, t0: toWall(t0), dt: dt * 1000, rise: out };
+    const shaped = (taken) => {
+      if (taken.length < 100) return null;
+      const { dt, t0, n, rise, top } = rises(taken, s.ctx.sampleRate);
+      if (!(top > 0)) return null;
+      const out = new Array(n);
+      for (let i = 0; i < n; i += 1) out[i] = Math.round(rise[i] / top * 999);
+      return { t0: toWall(t0), dt: dt * 1000, rise: out };
+    };
+    const low = shaped(rows);
+    if (!low) return { ok: false, error: "silent" };
+    return { ok: true, ...low, attack: shaped(sharp.rows) };
   }
   function median(values) {
     const v = [...values].sort((x, y) => x - y);

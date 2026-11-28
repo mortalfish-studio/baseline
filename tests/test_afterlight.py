@@ -1983,6 +1983,27 @@ class MixTests(TempCase):
         self.assertAlmostEqual(near, 0.02, delta=0.006)                        # near zero: the kicks
         self.assertGreater(sure, 1)
 
+    def test_heard_gap_takes_the_attack_when_its_clear(self):
+        beat, dt = 0.48, 2.9
+        def hits(at):
+            rise = [0] * 3400
+            for b in range(20):
+                i = int(round((b * beat + at) * 1000 / dt))
+                rise[i] = 999
+            return {"t0": 0.0, "dt": dt, "rise": rise}
+        a = {**hits(0.1), "attack": hits(0.1)}
+        b = {**hits(0.1 + 0.02), "attack": hits(0.1 + 0.004)}          # its thump swells late; its hit is 4 ms off
+        gap, sure, by, other = al.mix_heard_gap(a, b, beat, False)
+        self.assertEqual(by, "attack")
+        self.assertAlmostEqual(gap, 0.004, delta=0.004)
+        self.assertAlmostEqual(other[0], 0.02, delta=0.006)
+        quiet = {k: v for k, v in b.items() if k != "attack"}             # an older add-on: no attack band
+        self.assertEqual(al.mix_heard_gap(a, quiet, beat, False)[2], "thump")
+        far = {**hits(0.1 + 0.2), "attack": hits(0.1 + 0.2)}              # well out at the start: the thump's word
+        gap, sure, by, other = al.mix_heard_gap(a, far, beat, True)
+        self.assertEqual(by, "thump")
+        self.assertAlmostEqual(gap, 0.2, delta=0.01)
+
     def test_resync_ignores_a_big_jump_and_bends_tempo_only_a_hair(self):
         clock = [1000.0]
         gaps = iter([(0.004, 2.0), (-0.205, 1.9), (0.02, 1.6), (0.03, 1.6)])   # start, then each 8 bars
@@ -1992,7 +2013,7 @@ class MixTests(TempCase):
         with mock.patch.object(al.time, "time", lambda: clock[0]), \
              mock.patch.object(al.time, "sleep", lambda t: clock.__setitem__(0, clock[0] + t)), \
              mock.patch.object(al, "mix_op", lambda deck, op, **k: sent.append((deck, op)) or {}), \
-             mock.patch.object(al, "mix_gap", lambda a, b, beat, within=None: next(gaps, (0.0, 0.0))), \
+             mock.patch.object(al, "mix_heard_gap", lambda a, b, beat, first: (*next(gaps, (0.0, 0.0)), "thump", (0.0, 0.0))), \
              mock.patch.object(al, "mix_log", lambda *a: None):
             al.mix_resync(plan, "a")
         shifts = [op for deck, op in sent if op.get("type") == "shift"]

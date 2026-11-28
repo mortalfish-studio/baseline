@@ -5705,6 +5705,23 @@ MIX_SYNC_SURE = 1.25            # how clearly the two must line up to be nudged
 MIX_SYNC_SMALL = 0.006         # seconds: closer than this is left be
 
 
+def mix_heard_gap(env_a, env_b, beat, first):
+    """How far b's beats fall after a's, from what both decks heard: from the
+    hits' attack (sharp, to a few ms) when both have one that lines up
+    clearly close by, else from the kicks' thump (to about 20 ms). The thump
+    is looked at anywhere in the beat the first time (the plan may be well
+    out), only close by after that. Returns gap, sure, which ("attack" or
+    "thump"), and the other reading for the log."""
+    low = mix_gap(env_a, env_b, beat, within=None if first else MIX_SYNC_DRIFT)
+    sharp_a, sharp_b = (env_a or {}).get("attack"), (env_b or {}).get("attack")
+    fine = mix_gap(sharp_a, sharp_b, beat, within=MIX_SYNC_DRIFT) if sharp_a and sharp_b else (0.0, 0.0)
+    # The thump saying they're far apart, clearly, comes first: the attack only looks close by.
+    far = first and low[1] >= MIX_SYNC_SURE and abs(low[0]) > MIX_SYNC_DRIFT
+    if fine[1] >= MIX_SYNC_SURE and not far:
+        return fine[0], fine[1], "attack", low
+    return low[0], low[1], "thump", fine
+
+
 def mix_resync(plan, old):
     """Once both songs play, hear them together for a few seconds (before
     the new one's bass comes in) and nudge the new one's beats onto the old
@@ -5725,17 +5742,20 @@ def mix_resync(plan, old):
         t.start()
     for t in threads:
         t.join()
-    gap, sure = mix_gap(heard.get(old), heard.get(new), plan["beat"])
+    gap, sure, by, other = mix_heard_gap(heard.get(old), heard.get(new), plan["beat"], True)
     nudge = sure >= MIX_SYNC_SURE and abs(gap) >= MIX_SYNC_SMALL
     if nudge:
         # b late by gap: it should be that much further on (in its own time).
         mix_op(new, {"type": "shift", "seconds": round(gap * plan["rate"], 4)})
-    mix_log("sync", {"gap ms": round(gap * 1000), "sure": round(sure, 2), "nudged": nudge})
+    told = lambda: {"gap ms": round(gap * 1000), "sure": round(sure, 2), "by": by,
+                    "other ms": round(other[0] * 1000), "other sure": round(other[1], 2)}
+    mix_log("sync", {**told(), "nudged": nudge})
     first = gap if nudge else 0.0
-    # Then again every 8 bars while both are heard, and if the beats keep
+    # Then again every 4 bars while both are heard, and if the beats keep
     # drifting the same way, the tempo was a touch off: put it right too.
     rate, last, drift = plan["rate"], None, 0.0
-    every = 8 * 4 * plan["beat"]
+    every = 4 * 4 * plan["beat"]
+    seconds = min(seconds, max(4, every - 2))
     end = plan["endMs"] / 1000 - MIX_SYNC_LISTEN / 2 - 2
     while time.time() + every / 2 + seconds < end:
         time.sleep(max(0.0, every - seconds))
@@ -5745,12 +5765,12 @@ def mix_resync(plan, old):
             t.start()
         for t in threads:
             t.join()
-        gap, sure = mix_gap(heard.get(old), heard.get(new), plan["beat"], within=MIX_SYNC_DRIFT)
-        # Once in time, the beats can only drift a little in 8 bars, so only a
+        gap, sure, by, other = mix_heard_gap(heard.get(old), heard.get(new), plan["beat"], False)
+        # Once in time, the beats can only drift a little in 4 bars, so only a
         # small shift is looked for (a rolling off-beat bassline lines up best
         # half a beat away), and a big one is never a reason to jump.
         if sure < MIX_SYNC_SURE or abs(gap) > MIX_SYNC_DRIFT:
-            mix_log("sync again", {"gap ms": round(gap * 1000), "sure": round(sure, 2), "nudged": False})
+            mix_log("sync again", {**told(), "nudged": False})
             last, drift = None, 0.0
             continue
         op = {"type": "shift", "seconds": round(gap * rate, 4)}
@@ -5763,7 +5783,7 @@ def mix_resync(plan, old):
         if abs(gap) >= MIX_SYNC_SMALL:
             mix_op(new, op)
         last, drift = time.time(), (gap if abs(gap) >= MIX_SYNC_SMALL else 0.0)
-        mix_log("sync again", {"gap ms": round(gap * 1000), "sure": round(sure, 2), "rate": rate})
+        mix_log("sync again", {**told(), "rate": rate})
     return first
 
 
