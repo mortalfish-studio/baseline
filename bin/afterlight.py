@@ -3963,7 +3963,8 @@ DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kin
               "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": "",
               "micViz": False, "speaking": None, "asks": [], "awoke": False, "phoneSeen": 0, "ready": None,
               "recapAt": 0, "closedAt": 0, "skipped": [], "direction": "", "toward": None,
-              "autoTidy": True, "autodjSettle": None, "autodjBusy": None, "softSkip": True, "unplayable": None, "silent": None, "batteryWarned": 0, "setGen": 0}
+              "autoTidy": True, "autodjSettle": None, "autodjBusy": None, "softSkip": True, "unplayable": None, "silent": None, "batteryWarned": 0, "setGen": 0,
+              "roomStream": True, "roomSwitch": None}
 APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
@@ -4136,6 +4137,7 @@ def deck_sonos_push(room, songs, sn, start_at=0):
     if start_at > 2:
         sonos_call(ip, "AVTransport", "Seek", {"InstanceID": 0, "Unit": "REL_TIME", "Target": hms(start_at)})
     sonos_call(ip, "AVTransport", "Play", {"InstanceID": 0, "Speed": 1})
+    sonos_call(ip, "GroupRenderingControl", "SetGroupMute", {"InstanceID": 0, "DesiredMute": 0}, timeout=3)
     return pushed
 
 
@@ -4172,8 +4174,8 @@ def deck_sonos_sync():
 def deck_sonos_sync_once():
     """One pass of deck_sonos_sync."""
     deck = deck_read()
-    room = deck_where_room(deck)
-    if not room or not deck["playing"] or not deck.get("now"):
+    room = deck_queue_room(deck)
+    if not room or not deck["playing"] or not deck.get("now") or deck_switch_pending(deck):
         return
     if (deck.get("voiceUntil") or 0) > time.time():
         return                              # saying a dedication: the room isn't on its queue; deck_say syncs after
@@ -4186,7 +4188,7 @@ def deck_sonos_sync_once():
     at = current - (deck.get("pushedFrom") or 1)
     if 0 <= at < len(deck["pushed"]) and deck["pushed"][at] != deck["now"]["uid"]:
         return                              # the room moved on; the watcher catches up, then this runs again
-    wanted = [x for x in deck["set"] if deck_apple_id(x)][:SONOS_AHEAD]
+    wanted = [x for x in deck_queue_run(deck, deck["set"]) if deck_apple_id(x)][:SONOS_AHEAD]
     keep, add = deck_sonos_plan(deck["pushed"], deck.get("pushedFrom") or 1, current, deck["now"]["uid"],
                                 [x["uid"] for x in wanted])
     if total > current + keep:
@@ -4222,6 +4224,353 @@ def deck_sonos_soon():
         return
     subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "sonos-sync"], stdin=subprocess.DEVNULL,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+# ---- the live stream: songs Sonos can't play itself (Beatport, YouTube
+# Music) play in Chrome on the laptop into a silent output, and the room plays
+# what that output hears as an endless MP3 stream, like a radio station. Apple
+# Music songs still go into the room's own queue. Nothing is ever saved: the
+# server keeps only the last few seconds in memory, and only the home
+# network can reach it. A room runs a few seconds behind the laptop.
+
+DECK_STREAM_SINK = "baseline_sonos"
+DECK_STREAM_PORT = 8766             # its own port; until the firewall allows it, the guest page's when that's free
+DECK_STREAM_STATE = STATE.parent / "deck-stream.json"
+DECK_STREAM_LAG = 4.5               # seconds a room runs behind the laptop, until the server has measured it
+DECK_STREAM_RING = 10.0             # seconds kept, so a room switching over starts at once, from the song's start
+DECK_STREAM_MARK = STATE.parent / "deck-stream-mark"    # when the laptop started the song a room is about to join
+DECK_STREAM_QUEUE_EARLY = 2.0       # a queued song takes about this long to start: switch that much sooner
+DECK_STREAM_CATCH = 1.5             # seconds spent catching Chrome's sound as a streamed song starts
+DECK_STREAM_PREROLL = {"beatport": 8.0, "ytmusic": 6.0}     # started this long before the room's song ends
+DECK_STREAM_APPS = ("chrome", "chromium", "pw-play")         # what the room hears: the music and spoken dedications
+QUEUE_SERVICES = {"applemusic"}     # Sonos plays these itself, from its queue
+
+
+def deck_streams(deck, song):
+    """Does this song reach a Sonos room through the live stream (rather
+    than the room's queue)? Only with the stream on (deck room-stream)."""
+    return bool(song) and deck.get("roomStream", True) and song.get("service") not in QUEUE_SERVICES
+
+
+def deck_queue_room(deck):
+    """The room, when the playing song is in its queue; None on the laptop
+    or while the room plays the live stream (the laptop plays the song)."""
+    room = deck_where_room(deck)
+    return None if room and deck_streams(deck, deck.get("now")) else room
+
+
+def deck_queue_run(deck, songs):
+    """The songs from the start that go in a room's queue, up to the first
+    that streams: the room plays those, then switches over."""
+    run = []
+    for song in songs:
+        if deck_streams(deck, song):
+            break
+        run.append(song)
+    return run
+
+
+def ufw_allows(port):
+    """Can the home network reach this port? (No firewall, or a rule for it.)"""
+    if quiet_out("systemctl", "is-active", "ufw").strip() != "active":
+        return True
+    try:
+        rules = Path("/etc/ufw/user.rules").read_text()
+    except OSError:
+        return False
+    return bool(re.search(rf"--dport {port}\b.*-j ACCEPT", rules))
+
+
+def deck_stream_info():
+    """The running stream server ({pid, port, token}) or None."""
+    info = read_json(DECK_STREAM_STATE, {})
+    pid = info.get("pid") if isinstance(info, dict) else None
+    try:
+        alive = isinstance(pid, int) and pid > 1 and "deck stream" in Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+    except OSError:
+        alive = False
+    return info if alive and info.get("ready") else None
+
+
+def deck_stream_ensure(wait=6):
+    """Start the stream server if it isn't running; its info, or None."""
+    info = deck_stream_info()
+    if info:
+        return info
+    subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "stream"], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    end = time.time() + wait
+    while time.time() < end:
+        time.sleep(0.25)
+        info = deck_stream_info()
+        if info:
+            return info
+    return None
+
+
+def deck_stream_lag(info=None):
+    """How far behind the laptop the room is (what the server measured)."""
+    info = info or deck_stream_info() or {}
+    lag = info.get("lag")
+    return float(lag) if isinstance(lag, (int, float)) and 1 <= lag <= 15 else DECK_STREAM_LAG
+
+
+def deck_stream_soon():
+    """Have the stream server running before a streamed song is due (it
+    takes a few seconds to start), without waiting for it."""
+    if not deck_stream_info():
+        subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "stream"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def deck_stream_uri(info):
+    return f"x-rincon-mp3radio://{lan_address()}:{info['port']}/live/{info['token']}.mp3"
+
+
+def deck_room_on_live(room, info=None):
+    info = info or deck_stream_info()
+    uri = (sonos_call(room["ip"], "AVTransport", "GetMediaInfo", {"InstanceID": 0}) or {}).get("CurrentURI", "")
+    return bool(info) and uri.endswith(f"/live/{info['token']}.mp3")
+
+
+def deck_room_live(room, info):
+    """Point the room at the live stream and play it."""
+    didl = ('<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" '
+            'xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">'
+            '<item id="R:0/0/0" parentID="R:0/0" restricted="true"><dc:title>Baseline</dc:title>'
+            '<upnp:class>object.item.audioItem.audioBroadcast</upnp:class>'
+            '<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON65031_</desc></item></DIDL-Lite>')
+    sonos_call(room["ip"], "AVTransport", "SetAVTransportURI", {"InstanceID": 0, "CurrentURI": deck_stream_uri(info),
+                                                               "CurrentURIMetaData": didl}, timeout=6)
+    sonos_call(room["ip"], "AVTransport", "Play", {"InstanceID": 0, "Speed": 1}, timeout=6)
+    sonos_call(room["ip"], "GroupRenderingControl", "SetGroupMute", {"InstanceID": 0, "DesiredMute": 0}, timeout=3)
+
+
+def deck_room_switch_soon(d, to, after):
+    """Switch the room (to the live stream, or to its queue) in a few seconds,
+    in the background: when the laptop starts a song ahead of the room, or
+    the room still has the end of a streamed song to play."""
+    uid = (d.get("now") or {}).get("uid", "")
+    d["roomSwitch"] = {"to": to, "uid": uid, "at": time.time() + after}
+    subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "room-switch", to, uid, f"{after:.2f}"], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def deck_room_switch(to, uid, after):
+    """deck room-switch: wait, then switch the room, if the Deck is still on
+    that song in that room."""
+    time.sleep(max(0.0, min(after, 20.0)))
+    def switch(d):
+        pending = d.get("roomSwitch") or {}
+        room = deck_where_room(d)
+        if pending.get("uid") != uid or pending.get("to") != to or not room or (d.get("now") or {}).get("uid") != uid:
+            return
+        d["roomSwitch"] = None
+        if to == "live":
+            info = deck_stream_ensure()
+            if info:
+                deck_room_live(room, info)
+        elif to == "queue":
+            sn = sonos_apple_sn()
+            if sn and d.get("playing"):
+                d["pushed"] = deck_sonos_push(room, deck_queue_run(d, [d["now"]] + d["set"]), sn)
+                d["pushedFrom"] = 1
+                deck_sonos_soon()
+        elif to == "unmute":
+            sonos_call(room["ip"], "GroupRenderingControl", "SetGroupMute", {"InstanceID": 0, "DesiredMute": 0}, timeout=3)
+    deck_update(switch)
+
+
+def deck_switch_pending(deck):
+    """A room switch is waiting (or just happened): the room isn't where the
+    Deck's song is yet, so don't follow it meanwhile."""
+    pending = deck.get("roomSwitch") or {}
+    return bool(pending) and time.time() < pending.get("at", 0) + 4
+
+
+def pactl_json(*what):
+    try:
+        return json.loads(subprocess.run(["pactl", "-f", "json", *what], capture_output=True, text=True, timeout=4).stdout or "[]")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+
+
+def deck_stream_route(sink, back=None):
+    """Send what the room should hear (Chrome, spoken dedications) to the
+    silent output; with back, return it all to that output."""
+    target = back or sink
+    index = next((s.get("index") for s in pactl_json("list", "sinks") if s.get("name") == target), None)
+    for item in pactl_json("list", "sink-inputs"):
+        props = item.get("properties") or {}
+        app = f"{props.get('application.process.binary', '')} {props.get('application.name', '')}".lower()
+        if any(name in app for name in DECK_STREAM_APPS) and item.get("sink") != index:
+            subprocess.run(["pactl", "move-sink-input", str(item["index"]), target], capture_output=True, timeout=4)
+
+
+def deck_stream_serve():
+    """deck stream: the live stream server. One at a time; it ends itself
+    when the Deck stops needing it, and puts the sound back."""
+    import http.server
+    import queue as queues
+    import secrets
+    import socket
+    import socketserver
+    import threading
+    with open(STATE.parent / "deck-stream.lock", "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        def free(port):
+            with socket.socket() as s:
+                try:
+                    s.bind(("0.0.0.0", port))
+                    return True
+                except OSError:
+                    return False
+        port = DECK_STREAM_PORT if ufw_allows(DECK_STREAM_PORT) and free(DECK_STREAM_PORT) \
+            else DECK_GUESTS_PORT if free(DECK_GUESTS_PORT) else None
+        if port is None:
+            toast("The room can't hear the laptop", f"Let the home network reach port {DECK_STREAM_PORT}: "
+                  f"sudo ufw allow from 192.168.0.0/16 to any port {DECK_STREAM_PORT} proto tcp", glyph="󰀦")
+            return
+        sinks = {s.get("name"): s for s in pactl_json("list", "sinks")}
+        module = None
+        if DECK_STREAM_SINK not in sinks:
+            module = quiet_out("pactl", "load-module", "module-null-sink", f"sink_name={DECK_STREAM_SINK}",
+                               "sink_properties=device.description=Baseline-Sonos").strip()
+        encoder = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "pulse", "-fragment_size", "4096",
+                                    "-i", f"{DECK_STREAM_SINK}.monitor", "-ac", "2", "-ar", "44100", "-c:a", "libmp3lame",
+                                    "-b:a", "320k", "-write_xing", "0", "-flush_packets", "1", "-f", "mp3", "pipe:1"],
+                                   stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        token = secrets.token_hex(8)
+        ring, listeners, guard = [], [], threading.Lock()
+        last_client = [time.time()]
+        title = ["Baseline"]
+        lag = [DECK_STREAM_LAG]
+
+        def pump():
+            while True:
+                chunk = encoder.stdout.read1(4096)
+                if not chunk:
+                    return
+                now = time.time()
+                with guard:
+                    ring.append((now, chunk))
+                    while ring and now - ring[0][0] > DECK_STREAM_RING:
+                        ring.pop(0)
+                    for q in listeners:
+                        try:
+                            q.put_nowait(chunk)
+                        except queues.Full:
+                            pass
+        threading.Thread(target=pump, daemon=True).start()
+
+        class Live(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"      # no length, not chunked: Sonos plays it as radio
+            server_version = "Baseline"
+            sys_version = ""
+
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                if self.path.split("?")[0] != f"/live/{token}.mp3":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                icy = self.headers.get("Icy-MetaData") == "1"
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/mpeg")
+                self.send_header("icy-name", "Baseline")
+                if icy:
+                    self.send_header("icy-metaint", "16000")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                q = queues.Queue(maxsize=4000)
+                try:
+                    mark = float(DECK_STREAM_MARK.read_text())
+                except (OSError, ValueError):
+                    mark = 0
+                now = time.time()
+                # A room joining a song the laptop has just started hears it
+                # from its start (sent at once, so it starts straight away);
+                # otherwise the last few seconds, for a quick start.
+                since = mark - 0.3 if 0 < now - mark < DECK_STREAM_RING else now - 3
+                with guard:
+                    burst = [(at, chunk) for at, chunk in ring if at >= since]
+                    for _, chunk in burst:
+                        q.put_nowait(chunk)
+                    listeners.append(q)
+                lag[0] = round(now - (burst[0][0] if burst else now) + 1.0, 1)
+                write_atomic(DECK_STREAM_STATE, json.dumps({"pid": os.getpid(), "port": port, "token": token,
+                                                            "ready": True, "lag": max(lag[0], 2.0)}) + "\n")
+                until, said = 16000, None
+                try:
+                    while True:
+                        data = q.get(timeout=15)
+                        last_client[0] = time.time()
+                        while data:
+                            if not icy:
+                                self.wfile.write(data)
+                                break
+                            part, data = data[:until], data[until:]
+                            self.wfile.write(part)
+                            until -= len(part)
+                            if until == 0:
+                                until = 16000
+                                if title[0] != said:
+                                    said = title[0]
+                                    text = f"StreamTitle='{said.replace(chr(39), '’')[:200]}';".encode()
+                                    text += b"\0" * (-len(text) % 16)
+                                    self.wfile.write(bytes([len(text) // 16]) + text)
+                                else:
+                                    self.wfile.write(b"\0")
+                except (OSError, queues.Empty):
+                    pass
+                finally:
+                    with guard:
+                        if q in listeners:
+                            listeners.remove(q)
+                    last_client[0] = time.time()
+
+        class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+            daemon_threads = True
+            allow_reuse_address = True
+
+        server = Server(("0.0.0.0", port), Live)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        write_atomic(DECK_STREAM_STATE, json.dumps({"pid": os.getpid(), "port": port, "token": token, "ready": True}) + "\n")
+        idle_since = None
+        try:
+            while encoder.poll() is None:
+                deck = deck_read()
+                room = deck_where_room(deck)
+                song = deck.get("now") or {}
+                if song:
+                    title[0] = f"{song.get('artist', '')} - {song.get('title', '')}".strip(" -")
+                streaming = bool(room) and deck_streams(deck, song)
+                if streaming:
+                    deck_stream_route(DECK_STREAM_SINK)
+                # Done: the Deck left the room, or a minute with nothing to stream and no room listening.
+                busy = streaming and (deck.get("playing") or deck.get("paused"))
+                with guard:
+                    heard = bool(listeners)
+                if not room:
+                    break
+                idle_since = None if busy or heard else (idle_since or time.time())
+                if idle_since and time.time() - idle_since > 60:
+                    break
+                time.sleep(1)
+        finally:
+            write_atomic(DECK_STREAM_STATE, json.dumps({"pid": 0}) + "\n")
+            server.shutdown()
+            encoder.terminate()
+            back = quiet_out("pactl", "get-default-sink").strip()
+            if back and back != DECK_STREAM_SINK:
+                deck_stream_route(DECK_STREAM_SINK, back=back)
+            if module and module.isdigit():
+                quiet_out("pactl", "unload-module", module)
 
 
 # ---- playing
@@ -4284,7 +4633,7 @@ def deck_play_laptop(song, start_at=0):
 
 def deck_status(deck):
     """Where the playing song is: {time, length, playing}, from its player."""
-    room = deck_where_room(deck)
+    room = deck_queue_room(deck)
     if room:
         position = sonos_call(room["ip"], "AVTransport", "GetPositionInfo", {"InstanceID": 0}) or {}
         state = (sonos_call(room["ip"], "AVTransport", "GetTransportInfo", {"InstanceID": 0}) or {}).get("CurrentTransportState", "")
@@ -4312,10 +4661,13 @@ def deck_status(deck):
 DECK_UNPLAYABLE_TRIES = 3     # songs in a row that won't play before the Deck stops
 
 
-def deck_start(deck, song=None, start_at=0, tries=0):
+def deck_start(deck, song=None, start_at=0, tries=0, natural=False, room_after=None):
     """Play song (or the next in the set) wherever the Deck plays. A song its
     app can't play is passed over for the next, so the Deck never sits
-    "playing" in silence."""
+    "playing" in silence. In a Sonos room, natural is the song before ending
+    by itself (the room still has the end of a streamed song to play), and
+    room_after is how long the room's own song has left (a streamed song
+    starts on the laptop that far ahead)."""
     was = deck.get("now") or deck.pop("was", None)
     was_playing = deck.get("playing")
     if song is None:
@@ -4331,6 +4683,8 @@ def deck_start(deck, song=None, start_at=0, tries=0):
     deck["paused"] = False
     deck["silent"] = None
     room = deck_where_room(deck)
+    if room and deck_streams(deck, song):
+        return deck_start_streamed(deck, room, song, was, was_playing, start_at, tries, room_after)
     if room:
         sn = sonos_apple_sn()
         if not sn:
@@ -4341,13 +4695,26 @@ def deck_start(deck, song=None, start_at=0, tries=0):
         pushed = deck.get("pushed") or []
         on_queue = (sonos_call(room["ip"], "AVTransport", "GetMediaInfo", {"InstanceID": 0}) or {}).get(
             "CurrentURI", "").startswith("x-rincon-queue:")
+        streamed_before = was_playing and was and was.get("uid") != song["uid"] and deck_streams(deck, was)
+        if streamed_before and natural and start_at <= 2:
+            # A streamed song just ended on the laptop: the room is a few
+            # seconds behind, so it plays the end of it before its queue starts.
+            deck_quiet(was)
+            deck["pushed"], deck["pushedFrom"] = [], 1
+            wait = max(0.5, deck_stream_lag() - DECK_STREAM_QUEUE_EARLY)
+            deck_room_switch_soon(deck, "queue", wait)
+            toast(f"Playing in {room['name']}", f"{song['title']} · {song['artist']}", art=song.get("thumb", ""))
+            deck["expect"] = {"uid": song["uid"], "since": time.time() + wait}
+            deck_watch()
+            return True
         if start_at <= 2 and on_queue and song["uid"] in pushed and sonos_call(
                 room["ip"], "AVTransport", "Seek",
                 {"InstanceID": 0, "Unit": "TRACK_NR", "Target": (deck.get("pushedFrom") or 1) + pushed.index(song["uid"])}) is not None:
             # Already in the room's queue (Next, or a song further on): jump to it.
             sonos_call(room["ip"], "AVTransport", "Play", {"InstanceID": 0, "Speed": 1})
         else:
-            deck["pushed"] = deck_sonos_push(room, [song] + deck["set"], sn, start_at)
+            deck["roomSwitch"] = None
+            deck["pushed"] = deck_sonos_push(room, deck_queue_run(deck, [song] + deck["set"]), sn, start_at)
             deck["pushedFrom"] = 1
             if deck.get("crossfade"):
                 sonos_call(room["ip"], "AVTransport", "SetCrossfadeMode", {"InstanceID": 0, "CrossfadeMode": 1})
@@ -4355,6 +4722,8 @@ def deck_start(deck, song=None, start_at=0, tries=0):
             if laptop and laptop["playing"] and media_command("pause") != "tab":
                 quiet_out("busctl", "--user", "call", laptop["player"], "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", "Pause")
         deck_sonos_soon()
+        if streamed_before:
+            deck_quiet(was)         # skipped off a streamed song: the laptop stops it
         if song["uid"] not in deck["pushed"]:
             toast(f"{song['title']} isn't on Apple Music", "Sonos plays the Deck from Apple Music; skipped it", glyph="󰀦")
         toast(f"Playing in {room['name']}", f"{song['title']} · {song['artist']}", art=sonos_now(room)["track"].get("art", ""))
@@ -4372,6 +4741,53 @@ def deck_start(deck, song=None, start_at=0, tries=0):
             played = deck_play_laptop(song, start_at)
         if played is False:
             return deck_unplayable(deck, song, was, tries)
+    deck["expect"] = {"uid": song["uid"], "since": time.time()}
+    deck_watch()
+    return True
+
+
+def deck_start_streamed(deck, room, song, was, was_playing, start_at, tries, room_after):
+    """deck_start for a song the room hears through the live stream: it plays
+    on the laptop (into the silent output), and the room listens. room_after:
+    the room's own song has that long left, so it switches over then; it
+    starts at once otherwise (or keeps listening, if it already is)."""
+    switch_at = time.time() + room_after if room_after else 0
+    info = deck_stream_ensure()
+    if not info:
+        deck["playing"] = False
+        toast("The room can't hear the laptop", "The live stream didn't start: see deck-stream in the Deck's check", glyph="󰀦")
+        return False
+    # Moving an already playing song into a room: it carries on, no restart.
+    carrying = was and was.get("uid") == song["uid"] and was_playing \
+        and song_key((laptop_track() or {}).get("title", "")) == song_key(song["title"])
+    deck_stream_route(DECK_STREAM_SINK)
+    if not carrying:
+        write_atomic(DECK_STREAM_MARK, f"{time.time():.2f}\n")
+        other = was and was_playing and was.get("uid") != song["uid"] and deck_streams(deck, was) \
+            and was.get("service") != song.get("service")
+        if other and deck_can_quiet(was):
+            played = deck_play_laptop(song, start_at)
+            deck_quiet(was)
+        else:
+            if other:
+                deck_quiet(was)
+            played = deck_play_laptop(song, start_at)
+        if played is False:
+            return deck_unplayable(deck, song, was, tries)
+    # Chrome may open a new sound stream as the song starts: catch it at
+    # once, so the laptop's own speaker doesn't let a moment out.
+    caught = time.time() + DECK_STREAM_CATCH
+    while time.time() < caught:
+        deck_stream_route(DECK_STREAM_SINK)
+        time.sleep(0.1)
+    deck["pushed"], deck["pushedFrom"] = [], 1
+    after = switch_at - time.time() if switch_at else 0
+    if after > 0.5:
+        deck_room_switch_soon(deck, "live", after)
+    elif not deck_room_on_live(room, info):
+        deck["roomSwitch"] = None
+        deck_room_live(room, info)
+    toast(f"Playing in {room['name']}", f"{song['title']} · {song['artist']}", art=song.get("thumb", ""))
     deck["expect"] = {"uid": song["uid"], "since": time.time()}
     deck_watch()
     return True
@@ -4495,9 +4911,11 @@ def deck_tick(last):
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     if (deck.get("voiceUntil") or 0) > time.time():
         return last         # a Sonos room is saying a dedication: don't follow its queue meanwhile
+    if deck_switch_pending(deck):
+        return last         # the room is switching between its queue and the live stream
     status = deck_status(deck)
     write_atomic(DECK_NOW, json.dumps({**status, "uid": deck["now"]["uid"], "at": time.time()}) + "\n")
-    room = deck_where_room(deck)
+    room = deck_queue_room(deck)
     if room:
         # The room plays the queue itself: follow which song it's on.
         index = status.get("track", 0) - deck.get("pushedFrom", 1)
@@ -4522,6 +4940,20 @@ def deck_tick(last):
                 deck_update(lambda d: d.update(spoken=((d.get("spoken") or []) + [rid])[-200:]))
                 subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "say", coming["uid"], "--before"], stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        # The last of a run of queued songs, and the next one streams: start
+        # it on the laptop a few seconds early, and the room switches over
+        # to the live stream as its song ends (from the song's first beat).
+        coming = deck["set"][0] if deck["set"] else None
+        if coming and deck_streams(deck, coming) and pushed and index == len(pushed) - 1 and left <= 90:
+            deck_stream_soon()
+        if coming and deck_streams(deck, coming) and pushed and index == len(pushed) - 1 \
+                and deck.get("handoff") != deck["now"]["uid"] and status.get("playing") and status.get("length") \
+                and left <= DECK_STREAM_PREROLL.get(coming.get("service"), 6.0) + 2.5:
+            uid = deck["now"]["uid"]
+            deck_update(lambda d: d.update(handoff=uid))
+            deck_update(lambda d: deck_start(d, room_after=max(0.0, left))
+                        if d.get("playing") and (d.get("now") or {}).get("uid") == uid else None)
+            return None
         # Near the end of what the room was given: give it the next songs.
         if pushed and index >= len(pushed) - 3 and len(deck["set"]) > len(pushed) - 1 - max(index, 0):
             deck_sonos_soon()
@@ -4543,7 +4975,7 @@ def deck_tick(last):
         deck_update(lambda d: d.update(handoff=song["uid"]))
         was = deck_handoff(song, left)
         if was is not None:
-            deck_update(lambda d: deck_start(d) if same(d) else None)
+            deck_update(lambda d: deck_start(d, natural=True) if same(d) else None)
             deck_app_volume(song, was)
             deck_fade_mark(None)
             return None
@@ -4563,7 +4995,7 @@ def deck_tick(last):
     # Only if the song judged is still the Deck's (same): pressing Next (or
     # Previous, or playing a song) while this looked would otherwise skip again.
     if ran_out or stopped or not last.get("length"):
-        deck_update(lambda d: deck_start(d) if same(d) else None)        # the song finished: next
+        deck_update(lambda d: deck_start(d, natural=True) if same(d) else None)        # the song finished: next
     else:
         # You played something else; or nothing plays at all (a Beatport page
         # Chrome wouldn't start), when the Deck counts as paused, so Play tries again.
@@ -5240,10 +5672,17 @@ def deck_settle_due(deck):
 def deck_pause(d):
     d["playing"] = False
     d["paused"] = bool(d.get("now"))      # the play key carries on with the Deck
-    room = deck_where_room(d)
+    room = deck_queue_room(d)
     if room:
         sonos_call(room["ip"], "AVTransport", "Pause", {"InstanceID": 0})
-    elif d.get("now", {}) and d["now"].get("service") == "applemusic":
+        return
+    streamed = deck_where_room(d)
+    if streamed:
+        # The room is a few seconds behind the laptop: hush it now, so the
+        # pause is heard at once, then stop the song on the laptop.
+        d["roomSwitch"] = None
+        sonos_call(streamed["ip"], "GroupRenderingControl", "SetGroupMute", {"InstanceID": 0, "DesiredMute": 1}, timeout=3)
+    if d.get("now", {}) and d["now"].get("service") == "applemusic":
         am_bridge({"action": "pause"}, timeout=4)
     else:
         media_command("pause")
@@ -5504,6 +5943,12 @@ def deck_ready():
         answer = sonos_call(room["ip"], "AVTransport", "GetTransportInfo", {"InstanceID": 0}, timeout=2) if room else None
         out.append({"key": "sonos", "ok": answer is not None,
                     "text": f"{room['name']} answers" if answer is not None else "The Sonos room isn't answering"})
+        if deck.get("roomStream", True) and any(deck_streams(deck, s) for s in [deck.get("now")] + deck["set"] if s):
+            open_port = ufw_allows(DECK_STREAM_PORT)
+            out.append({"key": "stream", "ok": True if open_port else None,
+                        "text": "The room can hear Beatport and YouTube Music songs from the laptop" if open_port
+                        else f"Streamed songs borrow the requests port: sudo ufw allow from 192.168.0.0/16 to any port "
+                             f"{DECK_STREAM_PORT} proto tcp"})
     else:
         out.append({"key": "sonos", "ok": None, "text": "Playing on the laptop"})
     awake = STAY_AWAKE.exists()
@@ -6267,7 +6712,7 @@ def deck_say(uid, before=False):
     song = (deck["set"][0] if before and deck["set"] else deck.get("now")) or {}
     if song.get("uid") != uid or not deck.get("voice", True):
         return False
-    room = deck_where_room(deck)
+    room = deck_queue_room(deck)
     if before and not room:
         return False
     wav = deck_voice_clip(song, voice=deck_voice_name(deck))
@@ -6295,7 +6740,7 @@ def deck_announce(name, text, voice, moment=None):
     if not wav.is_file() and not voice_speak(text, voice, wav):
         return False
     length = clip_seconds(wav)
-    room = deck_where_room(deck) if deck.get("playing") else None
+    room = deck_queue_room(deck) if deck.get("playing") else None
     if room:
         mp3 = voice_mp3(wav)
         position = sonos_call(room["ip"], "AVTransport", "GetPositionInfo", {"InstanceID": 0}) or {}
@@ -6371,7 +6816,7 @@ def deck_soft_ok(deck):
     """The playing song can fade: on the laptop, in an app whose volume
     Baseline reaches, with no voice clip dipping it."""
     song = deck.get("now") or {}
-    return bool(song) and not deck_where_room(deck) and song.get("service") in {"applemusic", "ytmusic"} \
+    return bool(song) and not deck_queue_room(deck) and song.get("service") in {"applemusic", "ytmusic"} \
         and not DECK_DUCK.exists()
 
 
@@ -6947,6 +7392,14 @@ def deck_command(settings, args):
         deck_build(settings, minutes, "", seed=seed, replace=not deck_read()["set"])
     elif action == "sonos-sync":
         deck_sonos_sync()
+    elif action == "stream" and len(args) == 1:
+        deck_stream_serve()
+    elif action == "room-switch" and len(args) == 4 and args[1] in {"live", "queue", "unmute"} \
+            and re.fullmatch(r"\d+(\.\d+)?", args[3]):
+        deck_room_switch(args[1], args[2], float(args[3]))
+    elif action == "room-stream" and len(args) == 2 and args[1] in {"on", "off"}:
+        # Off: a Sonos room plays every song from Apple Music (as before the stream).
+        deck_update(lambda d: d.update(roomStream=args[1] == "on"))
     elif action == "next-up":
         deck_whats_next()
     elif action == "songs" and len(args) == 3 and args[1] in DECK_SERVICES:
@@ -7357,13 +7810,27 @@ def deck_build(settings, minutes, brief, start="", replace=False, seed=None):
     toast(f"Your set is ready: {total} songs", f"{found[0]['title']} → {found[-1]['title']}", glyph="✦")
 
 
+def deck_room_has(deck, room):
+    """Is the room on its queue, at the Deck's song?"""
+    uri = (sonos_call(room["ip"], "AVTransport", "GetMediaInfo", {"InstanceID": 0}) or {}).get("CurrentURI", "")
+    track = int((sonos_call(room["ip"], "AVTransport", "GetPositionInfo", {"InstanceID": 0}) or {}).get("Track") or 0)
+    pushed, at = deck.get("pushed") or [], track - (deck.get("pushedFrom") or 1)
+    return uri.startswith("x-rincon-queue:") and 0 <= at < len(pushed) and pushed[at] == (deck.get("now") or {}).get("uid")
+
+
 def deck_resume(deck):
     """Carry on with the Deck's song where it was paused. On the laptop the
     app may have moved on to something else meanwhile (the Deck played in a
     room, or you played something): then the Deck's song starts again from
     where it was, rather than whatever the app had."""
-    room = deck_where_room(deck)
+    room = deck_queue_room(deck)
     song = deck["now"]
+    if room and not deck_room_has(deck, room):
+        # The room's queue isn't the Deck's (it was picked while paused, or
+        # played something else meanwhile): start the song there afresh.
+        mark = read_json(DECK_NOW, {})
+        deck_start(deck, song, start_at=mark.get("time", 0) if mark.get("uid") == song["uid"] else 0)
+        return
     if room:
         sonos_call(room["ip"], "AVTransport", "Play", {"InstanceID": 0, "Speed": 1})
     elif song.get("service") == "applemusic" and \
@@ -7374,6 +7841,17 @@ def deck_resume(deck):
     else:
         mark = read_json(DECK_NOW, {})
         deck_play_laptop(song, start_at=mark.get("time", 0) if mark.get("uid") == song["uid"] else 0)
+    streamed = deck_where_room(deck)
+    if streamed and not room:
+        # Streaming to a room: it listens again, and comes off mute once the
+        # song has reached it (it's a few seconds behind).
+        info = deck_stream_ensure()
+        if info:
+            deck_stream_route(DECK_STREAM_SINK)
+            if not deck_room_on_live(streamed, info):
+                deck_room_live(streamed, info)
+            else:
+                deck_room_switch_soon(deck, "unmute", deck_stream_lag(info))
     deck["expect"] = {"uid": deck["now"]["uid"], "since": time.time()}
     deck_watch()
 
@@ -7408,6 +7886,7 @@ def deck_where(target, settings=None):
         status = deck_status(d) if d.get("now") and d["playing"] else {"time": 0}
         if before:
             sonos_call(before["ip"], "AVTransport", "Pause", {"InstanceID": 0})
+            sonos_call(before["ip"], "GroupRenderingControl", "SetGroupMute", {"InstanceID": 0, "DesiredMute": 0}, timeout=3)
         d["where"] = {"kind": "sonos", "room": room["id"]} if room else {"kind": "laptop"}
         if d.get("now") and d["playing"]:
             deck_start(d, d["now"], start_at=status.get("time", 0))

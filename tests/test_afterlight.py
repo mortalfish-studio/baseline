@@ -1274,6 +1274,142 @@ class DeckPlaylistTests(TempCase):
         self.assertEqual(al.deck_sonos_plan(["b", "c"], 5, 9, "b", ["c"]), (0, ["c"]))               # lost track: redo
 
 
+class DeckStreamTests(TempCase):
+    """Mixing services in a Sonos room: Apple Music songs from the room's
+    queue, Beatport and YouTube Music songs played on the laptop and heard
+    through the live stream."""
+
+    def setUp(self):
+        super().setUp()
+        self.patch("DECK", self.tmp / "deck.json")
+        self.patch("DECK_LOCK", self.tmp / "deck.lock")
+        self.room = {"ip": "192.168.1.10", "id": "RINCON_X", "name": "Quiet Room"}
+        self.calls, self.played, self.quieted, self.switches = [], [], [], []
+        self.uri = "x-rincon-queue:RINCON_X#0"
+        def call(ip, service, action, args=None, timeout=2.5):
+            self.calls.append((action, dict(args or {})))
+            return {"CurrentURI": self.uri} if action == "GetMediaInfo" else {}
+        self.patch("sonos_call", call)
+        self.patch("sonos_rooms", lambda refresh=False: [self.room])
+        self.patch("sonos_apple_sn", lambda: "13")
+        self.patch("sonos_now", lambda room: {"track": {}})
+        self.patch("toast", lambda *a, **k: None)
+        self.patch("deck_watch", lambda: None)
+        self.patch("deck_sonos_soon", lambda: None)
+        self.patch("laptop_track", lambda: None)
+        self.patch("deck_stream_ensure", lambda wait=6: {"port": 8766, "token": "abc"})
+        self.patch("deck_stream_route", lambda sink, back=None: None)
+        self.patch("DECK_STREAM_MARK", self.tmp / "deck-stream-mark")
+        self.patch("DECK_STREAM_CATCH", 0)
+        self.patch("deck_stream_info", lambda: {"port": 8766, "token": "abc", "lag": 6.0})
+        self.patch("lan_address", lambda: "192.168.1.5")
+        self.patch("deck_play_laptop", lambda song, start_at=0: self.played.append(song["uid"]))
+        self.patch("deck_quiet", lambda song: self.quieted.append(song["uid"]))
+        self.patch("deck_can_quiet", lambda song: True)
+        self.patch("media_command", lambda *a: "tab")
+        real = al.deck_room_switch_soon
+        def soon(d, to, after):
+            self.switches.append((to, round(after, 1)))
+            d["roomSwitch"] = {"to": to, "uid": (d.get("now") or {}).get("uid", ""), "at": 0}
+        self.patch("deck_room_switch_soon", soon)
+        self.real_switch_soon = real
+
+    def song(self, uid, service):
+        return {"uid": uid, "service": service, "id": uid, "title": uid, "artist": "", "video": uid}
+
+    def deck(self, now, rest, **more):
+        return {**al.DECK_EMPTY, "now": now, "set": rest, "playing": True,
+                "where": {"kind": "sonos", "room": "RINCON_X"}, **more}
+
+    def actions(self, name):
+        return [args for action, args in self.calls if action == name]
+
+    def test_a_queue_holds_only_the_run_of_apple_songs(self):
+        a, b, y, c = self.song("a", "applemusic"), self.song("b", "applemusic"), self.song("y", "ytmusic"), self.song("c", "applemusic")
+        deck = self.deck(None, [])
+        self.assertEqual([s["uid"] for s in al.deck_queue_run(deck, [a, b, y, c])], ["a", "b"])
+        self.assertTrue(al.deck_streams(deck, y) and not al.deck_streams(deck, a))
+        # With the stream off, every song goes to the room as Apple Music (as before).
+        self.assertFalse(al.deck_streams({**deck, "roomStream": False}, y))
+        self.assertEqual(len(al.deck_queue_run({**deck, "roomStream": False}, [a, y, c])), 3)
+
+    def test_a_streamed_song_plays_on_the_laptop_and_the_room_listens(self):
+        y = self.song("y", "beatport")
+        deck = self.deck(None, [y], playing=False)
+        self.assertTrue(al.deck_start(deck))
+        self.assertEqual(self.played, ["y"])
+        uris = [args["CurrentURI"] for args in self.actions("SetAVTransportURI")]
+        self.assertEqual(uris, ["x-rincon-mp3radio://192.168.1.5:8766/live/abc.mp3"])
+        self.assertEqual(self.actions("RemoveAllTracksFromQueue"), [])     # the queue isn't touched
+        self.assertIsNone(al.deck_queue_room(deck))                        # the Deck follows the laptop now
+
+    def test_the_room_keeps_listening_from_one_streamed_song_to_the_next(self):
+        self.uri = "x-rincon-mp3radio://192.168.1.5:8766/live/abc.mp3"
+        y, z = self.song("y", "ytmusic"), self.song("z", "beatport")
+        deck = self.deck(y, [z])
+        self.assertTrue(al.deck_start(deck, natural=True))
+        self.assertEqual((self.played, self.quieted), (["z"], ["y"]))     # another app: the last one stops
+        self.assertEqual(self.actions("SetAVTransportURI"), [])
+
+    def test_from_the_queue_to_a_streamed_song_the_laptop_starts_early(self):
+        a, y = self.song("a", "applemusic"), self.song("y", "ytmusic")
+        deck = self.deck(a, [y], pushed=["a"])
+        self.assertTrue(al.deck_start(deck, room_after=4.2))
+        self.assertEqual(self.played, ["y"])
+        self.assertEqual(self.switches, [("live", 4.2)])                    # the room switches as its song ends
+        self.assertTrue((self.tmp / "deck-stream-mark").exists())          # the room hears it from its start
+        self.assertEqual(self.actions("SetAVTransportURI"), [])
+
+    def test_a_streamed_song_ending_lets_the_room_finish_it_before_the_queue(self):
+        self.uri = "x-rincon-mp3radio://192.168.1.5:8766/live/abc.mp3"
+        y, a, b = self.song("y", "ytmusic"), self.song("a", "applemusic"), self.song("b", "applemusic")
+        deck = self.deck(y, [a, b])
+        self.assertTrue(al.deck_start(deck, natural=True))
+        self.assertEqual(self.quieted, ["y"])
+        self.assertEqual(self.switches, [("queue", 6.0 - al.DECK_STREAM_QUEUE_EARLY)])    # the measured lag
+        self.assertEqual(self.actions("AddURIToQueue"), [])                 # not yet: the room is still playing y
+        self.assertTrue(al.deck_switch_pending({**deck, "roomSwitch": {"at": time.time() + 3}}))
+
+    def test_skipping_off_a_streamed_song_goes_to_the_queue_at_once(self):
+        self.patch("deck_apple_id", lambda song: song["id"])
+        self.uri = "x-rincon-mp3radio://192.168.1.5:8766/live/abc.mp3"
+        y, a, z = self.song("y", "ytmusic"), self.song("a", "applemusic"), self.song("z", "ytmusic")
+        deck = self.deck(y, [a, z])
+        self.assertTrue(al.deck_start(deck))
+        self.assertEqual(self.switches, [])
+        queued = [args["EnqueuedURI"] for args in self.actions("AddURIToQueue")]
+        self.assertEqual(len(queued), 1)                                      # a only: z streams after it
+        self.assertEqual(deck["pushed"], ["a"])
+        self.assertIn("y", self.quieted)
+
+    def test_pausing_a_streamed_song_hushes_the_room_at_once(self):
+        y = self.song("y", "ytmusic")
+        deck = self.deck(y, [])
+        al.deck_pause(deck)
+        self.assertEqual(self.actions("SetGroupMute"), [{"InstanceID": 0, "DesiredMute": 1}])
+        self.assertEqual(self.actions("Pause"), [])            # the room keeps listening; the laptop pauses
+
+    def test_play_in_a_room_picked_while_paused_starts_the_decks_song(self):
+        # The room's queue still has its own songs: Play mustn't just resume them.
+        self.patch("deck_apple_id", lambda song: song["id"])
+        a = self.song("a", "applemusic")
+        deck = self.deck(a, [], playing=True, pushed=["old"], pushedFrom=13)
+        al.deck_resume(deck)
+        self.assertEqual(len(self.actions("AddURIToQueue")), 1)
+        self.assertEqual(deck["pushed"], ["a"])
+
+    def test_the_firewall_rule_for_the_stream(self):
+        rules = self.tmp / "user.rules"
+        rules.write_text("-A ufw-user-input -p tcp --dport 8765 -s 192.168.89.0/24 -j ACCEPT\n")
+        self.patch("quiet_out", lambda *a, **k: "active\n")
+        real = al.Path
+        self.patch("Path", lambda p, *rest: rules if p == "/etc/ufw/user.rules" else real(p, *rest))
+        self.assertTrue(al.ufw_allows(8765))
+        self.assertFalse(al.ufw_allows(8766))
+        self.patch("quiet_out", lambda *a, **k: "inactive\n")
+        self.assertTrue(al.ufw_allows(8766))
+
+
 class DeckAndPlayerTabTests(TempCase):
     """The Deck's room and Baseline's Sonos room (the Player tab, the volume
     keys) are the same room, whichever one you change."""
