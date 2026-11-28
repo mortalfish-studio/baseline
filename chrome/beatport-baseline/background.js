@@ -292,6 +292,33 @@ async function beatportExport(op) {
   } catch (error) { log("beatport export " + step + " " + error); return { ok: false, error: step + ": " + String(error).slice(0, 120) }; }
 }
 
+// Clear away the playlists Baseline's own tests made in your Beatport
+// library (named exactly "Baseline test - delete me", or with an en dash),
+// and nothing else.
+const TEST_PLAYLIST = /^Baseline test [-–] delete me$/;
+async function beatportTidyTests() {
+  try {
+    const session = await (await fetch("https://www.beatport.com/api/auth/session", { credentials: "include", signal: AbortSignal.timeout(10000) })).json();
+    const token = session && session.token && !session.token.anon ? session.token.accessToken : "";
+    if (!token) return { ok: false, error: "signed out" };
+    const headers = { "Authorization": `Bearer ${token}` };
+    const found = [];
+    for (let page = 1; page <= 10; page += 1) {
+      const reply = await fetch(`https://api.beatport.com/v4/my/playlists/?per_page=100&page=${page}`, { headers, signal: AbortSignal.timeout(15000) });
+      const body = await reply.json().catch(() => ({}));
+      for (const p of body.results || []) if (TEST_PLAYLIST.test(String(p.name || ""))) found.push(p.id);
+      if (!body.next) break;
+    }
+    let gone = 0;
+    for (const id of found) {
+      const reply = await fetch(`https://api.beatport.com/v4/my/playlists/${Number(id)}/`, { method: "DELETE", headers, signal: AbortSignal.timeout(15000) });
+      if (reply.ok) gone += 1;
+    }
+    log(`beatport tidy: ${gone} of ${found.length} test playlists removed`);
+    return { ok: true, found: found.length, removed: gone };
+  } catch (error) { return { ok: false, error: String(error).slice(0, 120) }; }
+}
+
 async function beatportTab() {
   return (await beatportTabs())[0] || null;
 }
@@ -492,6 +519,7 @@ async function handle(message) {
     // Read or press something on the open Beatport (or, with site
     // "ytmusic", YouTube Music) page (see bridge.js).
     if ((message.op || {}).type === "bp-export") return await beatportExport(message.op);
+    if ((message.op || {}).type === "bp-tidy-tests") return await beatportTidyTests();
     const tab = message.site === "ytmusic" ? await ytmusicTab() : await beatportTab();
     if (!tab) return { ok: false, error: "no Beatport tab" };
     return await askPage(tab, message.op || {});

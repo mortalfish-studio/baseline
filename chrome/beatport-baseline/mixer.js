@@ -48,6 +48,21 @@
     const lp = node(() => ctx.createBiquadFilter(), (n) => { n.type = "lowpass"; n.frequency.value = 22000; n.Q.value = 0.9; });
     const gain = ctx.createGain();
     source.connect(low).connect(mid).connect(high).connect(hp).connect(lp).connect(gain).connect(ctx.destination);
+    // An echo send, like a DJ mixer's: taken before the level, so the old
+    // song's last beats can ring on, in time, after it's gone.
+    const echoSend = ctx.createGain();
+    echoSend.gain.value = 0;
+    const delay = ctx.createDelay(4);
+    delay.delayTime.value = 0.24;
+    const feedback = ctx.createGain();
+    feedback.gain.value = 0.5;
+    const echoTone = node(() => ctx.createBiquadFilter(), (n) => { n.type = "bandpass"; n.frequency.value = 1400; n.Q.value = 0.5; });
+    lp.connect(echoSend).connect(delay).connect(echoTone).connect(feedback).connect(delay);
+    echoTone.connect(ctx.destination);
+    // How loud the song is as it comes (before any of this), to match levels.
+    const raw = ctx.createAnalyser();
+    raw.fftSize = 2048;
+    source.connect(raw);
     const kickFilter = node(() => ctx.createBiquadFilter(), (n) => { n.type = "lowpass"; n.frequency.value = 140; });
     const kick = ctx.createAnalyser();
     kick.fftSize = 512;
@@ -55,10 +70,14 @@
     const level = ctx.createAnalyser();
     level.fftSize = 1024;
     gain.connect(level);
-    strip = { el, ctx, source, gain, kick, kickFilter, level, params: { gain: gain.gain, low: low.gain, mid: mid.gain, high: high.gain, hp: hp.frequency, lp: lp.frequency } };
+    strip = { el, ctx, source, gain, kick, kickFilter, level, raw, delay,
+              params: { gain: gain.gain, low: low.gain, mid: mid.gain, high: high.gain, hp: hp.frequency, lp: lp.frequency,
+                        hpq: hp.Q, lpq: lp.Q, echo: echoSend.gain } };
     return strip;
   }
-  const NEUTRAL = { gain: 1, low: 0, mid: 0, high: 0, hp: 10, lp: 22000 };
+  const NEUTRAL = { gain: 1, low: 0, mid: 0, high: 0, hp: 10, lp: 22000, hpq: 0.9, lpq: 0.9, echo: 0 };
+  const LEVELS = new Set(["gain", "echo"]);
+  const RANGE = { hpq: [0.5, 6], lpq: [0.5, 6] };
   const FREQ = new Set(["hp", "lp"]);
 
   // ---- Where the beats fall. The kick band's energy is taken block by block
@@ -135,7 +154,19 @@
     const hint = 60 / Number(op.bpm);
     if (!(hint > 0.2 && hint < 2)) return { ok: false, error: "bpm" };
     const seconds = Math.max(6, Math.min(30, Number(op.seconds) || 12));
+    // Loudness alongside: the mean power of the song as it comes, a few times a second.
+    let power = 0, reads = 0;
+    const buf = new Float32Array(s.raw.fftSize);
+    const meter = setInterval(() => {
+      if (s.el.paused) return;
+      s.raw.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (const v of buf) sum += v * v;
+      power += sum / buf.length; reads += 1;
+    }, 150);
     const { rows, maps, rate } = await listen(s, seconds);
+    clearInterval(meter);
+    const loud = reads && power > 0 ? Math.round(10 * Math.log10(power / reads) * 10) / 10 : null;
     if (rows.length < 200 || maps.length < 5) return { ok: false, error: "silent" };
     const { dt, t0, n, rise, top } = rises(rows, s.ctx.sampleRate);
     if (!(top > 0)) return { ok: false, error: "silent" };
@@ -176,13 +207,14 @@
     if (offset < 0) offset += beat;
     return {
       ok: true, offset: Math.round(offset * 10000) / 10000, period: Math.round(beat * 100000) / 100000,
-      bpm: Math.round(6000 / beat) / 100, sure: Math.round(Math.hypot(x, y) / weight * 100) / 100,
+      bpm: Math.round(6000 / beat) / 100, sure: Math.round(Math.hypot(x, y) / weight * 100) / 100, loud,
     };
   }
 
   // ---- A schedule: each lane a list of [ms on the shared clock, value].
-  function automate(lanes) {
+  function automate(lanes, echoTime) {
     const s = arm();
+    if (Number(echoTime) > 0.05) s.delay.delayTime.value = Math.min(2, Number(echoTime));
     const nowCtx = s.ctx.currentTime, nowWall = wall();
     const at = (ms) => Math.max(nowCtx, nowCtx + (ms - nowWall) / 1000);
     for (const [name, points] of Object.entries(lanes || {})) {
@@ -194,7 +226,9 @@
         const value = Number(raw);
         if (!Number.isFinite(value) || !Number.isFinite(Number(ms))) continue;
         if (FREQ.has(name)) p.exponentialRampToValueAtTime(Math.max(10, Math.min(22000, value)), at(ms));
-        else p.linearRampToValueAtTime(name === "gain" ? Math.max(0, Math.min(1.5, value)) : Math.max(-40, Math.min(9, value)), at(ms));
+        else if (LEVELS.has(name)) p.linearRampToValueAtTime(Math.max(0, Math.min(1.5, value)), at(ms));
+        else if (RANGE[name]) p.linearRampToValueAtTime(Math.max(RANGE[name][0], Math.min(RANGE[name][1], value)), at(ms));
+        else p.linearRampToValueAtTime(Math.max(-40, Math.min(9, value)), at(ms));
       }
     }
   }
@@ -267,7 +301,7 @@
     lock(op);
     s.el.currentTime = Math.max(0, Number(op.time) - preroll / 1000 * (Number(op.rate) || 1));
     await s.el.play();
-    automate(op.lanes || {});
+    automate(op.lanes || {}, op.echo);
     return { ok: true };
   }
 
@@ -277,7 +311,8 @@
     if (!strip) return { ok: true };
     const s = strip;
     const until = wall() + Math.max(0.05, Number(op.seconds) || 0.05) * 1000;
-    automate(Object.fromEntries(Object.entries(NEUTRAL).map(([k, v]) => [k, [[until, v]]])));
+    const home = { ...NEUTRAL, gain: Math.max(0.3, Math.min(1.5, Number(op.gain) || 1)) };
+    automate(Object.fromEntries(Object.entries(home).map(([k, v]) => [k, [[until, v]]])));
     if (follow) { clearInterval(follow.timer); follow.timer = null; }
     const from = s.el.playbackRate, start = wall(), span = until - start;
     const glide = setInterval(() => {
@@ -326,7 +361,7 @@
       else if (op.type === "grid") reply = await grid(op);
       else if (op.type === "cue") reply = await cue(op);
       else if (op.type === "go") reply = await go(op);
-      else if (op.type === "automate") { automate(op.lanes || {}); reply = { ok: true }; }
+      else if (op.type === "automate") { automate(op.lanes || {}, op.echo); reply = { ok: true }; }
       else if (op.type === "lock") { lock(op); reply = { ok: true }; }
       else if (op.type === "envelope") reply = await envelope(op);
       else if (op.type === "shift") {

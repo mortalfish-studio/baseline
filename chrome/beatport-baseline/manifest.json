@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Baseline for Beatport",
-  "version": "1.13.1",
+  "version": "1.13.3",
   "description": "Lets the Baseline panel drive Beatport, YouTube Music and Apple Music: switch charts, playlists and artists in place, start them playing, list your playlists, add tracks to <3, and keep one thing playing at a time.",
   "permissions": [
     "nativeMessaging",

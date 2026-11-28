@@ -835,11 +835,10 @@ Item {
   readonly property string mixChosen: mixStyles.indexOf(deck.mixStyle || "") >= 0 ? deck.mixStyle : ""
   property string mixPeek: ""          // a style under the pointer in the Mix card
   readonly property string mixShown: mixPeek !== "" ? mixPeek : mixChosen !== "" ? mixChosen : "swap"
-  readonly property string mixButtonGlyph: mixing ? (mixChosen !== "" ? mixGlyph(mixChosen) : "󰘭") : inSonos ? "󰡍" : "∿"
+  readonly property string mixButtonGlyph: mixing && mixChosen !== "" ? mixGlyph(mixChosen) : "󰘭"
   readonly property string mixButtonText: strings.t("deck.mixButton").arg(
       mixing ? (mixChosen !== "" ? strings.t("deck.mixStyle." + mixChosen) : strings.t("deck.mixAuto"))
-      : inSonos ? (deck.crossfade ? strings.t("deck.crossfade") : strings.t("deck.mixHard"))
-      : deck.softSkip === false ? strings.t("deck.mixHard") : strings.t("deck.soft"))
+      : deck.crossfade !== false ? strings.t("deck.crossfade") : strings.t("deck.mixStraight"))
   // Where the takeover falls in the mix under way, 0-1.
   readonly property real mixSwap: mixTimed && (mixInfo.takeover || 0) > 0
                                   ? Math.max(0, Math.min(1, (mixInfo.takeover * 1000 - mixInfo.startMs) / (mixInfo.endMs - mixInfo.startMs))) : -1
@@ -2129,16 +2128,19 @@ Item {
                     onClicked: root.playPause()
                   }
                   ActionButton { icon: "󰒭"; text: strings.t("deck.next"); tone: root.teal; enabled: (root.deck.set || []).length > 0; onClicked: root.skip() }
-                  // Playing above; the set and the night below the bar.
-                  Rectangle { width: 1; height: 30; color: Util.alpha(root.ink, 0.18) }
-                  ActionButton { icon: "✦"; text: strings.t("deck.fill"); enabled: !root.locked; onClicked: root.runLong(["deck", "fill", "--service", root.service]) }
+                  // Mix now: into the next song at the next phrase, like a DJ would.
                   ActionButton {
-                    icon: "󰘶"
-                    text: strings.t("deck.shape")
-                    tone: root.shapeOpen ? root.amber : root.teal
-                    enabled: (root.deck.set || []).length > 1 && !root.locked
-                    onClicked: { root.shapeOpen = !root.shapeOpen; root.autodjOpen = false; root.mixOpen = false; root.saving = false; root.filterOpen = false }
+                    id: mixNowButton
+                    visible: !!root.deck.mixReady && !root.mixLive
+                    icon: "󰘭"; text: strings.t("deck.mixNowButton")
+                    onClicked: { root.deck = Object.assign({}, root.deck, { mixReady: false }); root.run(["deck", "mixes", "now"]) }
+                    HoverHandler {
+                      onHoveredChanged: root.hint(mixNowButton, strings.t("deck.mixNowTip").arg(
+                        (root.deck.set || []).length ? root.titleParts(root.deck.set[0].title).main : ""), hovered)
+                    }
                   }
+                  // Playing above; how it plays on, below.
+                  Rectangle { width: 1; height: 30; color: Util.alpha(root.ink, 0.18) }
                   // Auto-DJ: with three songs left, the agent adds more that carry the night on.
                   ActionButton {
                     icon: "∞"
@@ -2231,10 +2233,20 @@ Item {
               // flows (Fix the bumps; pinned songs stay, Undo puts it back). Hidden
               // when locked, like Shape.
               HeadLink {
+                visible: root.selectedUids.length === 0 && !root.locked
+                glyph: "✦"; text: strings.t("deck.fill"); tip: strings.t("deck.fillTip")
+                onTapped: root.runLong(["deck", "fill", "--service", root.service])
+              }
+              HeadLink {
+                visible: root.selectedUids.length === 0 && (root.deck.set || []).length > 1 && !root.locked
+                glyph: "󰘶"; text: strings.t("deck.shape"); on: root.shapeOpen
+                onTapped: { root.shapeOpen = !root.shapeOpen; root.autodjOpen = false; root.mixOpen = false; root.saving = false; root.filterOpen = false }
+              }
+              HeadLink {
                 // Not again once it's as smooth as it goes (what's left would change the set's shape).
                 visible: root.selectedUids.length === 0 && root.bumps > 0 && !root.locked
                          && (root.deck.smoothed || []).join() !== (root.deck.set || []).map(s => s.uid).join()
-                glyph: "󰘖"; on: true
+                glyph: "󰘖"
                 text: strings.tn("deck.smoothIt", root.bumps).arg(root.bumps)
                 tip: strings.t("deck.smoothItTip")
                 onTapped: root.run(["deck", "shape", "bumps"])
@@ -2270,30 +2282,20 @@ Item {
               }
             }
             // Shape the set: reorder it by tempo, key and energy (pinned songs stay).
-            Flow {
+            DeckPanel {
               Layout.fillWidth: true
-              visible: root.shapeOpen
-              spacing: 8
-              Label { text: strings.t("deck.shapeHint"); font.pixelSize: Style.font.caption; opacity: 0.6; height: 30; verticalAlignment: Text.AlignVCenter }
-              Repeater {
-                model: root.shapes
-                delegate: Rectangle {
-                  required property var modelData
-                  implicitWidth: chipRow.implicitWidth + 18
-                  implicitHeight: 30
-                  radius: 15
-                  color: chipHover.hovered ? Util.alpha(root.amber, 0.18) : Util.alpha(root.amber, 0.06)
-                  border.width: 1
-                  border.color: Util.alpha(root.amber, chipHover.hovered ? 0.9 : 0.45)
-                  Row {
-                    id: chipRow
-                    anchors.centerIn: parent
-                    spacing: 6
-                    Label { text: modelData.glyph; font.family: "Iosevka Nerd Font Propo"; color: root.amber }
-                    Label { text: modelData.label; font.pixelSize: Style.font.caption; color: root.ink }
-                  }
-                  HoverHandler { id: chipHover; cursorShape: Qt.PointingHandCursor }
-                  TapHandler {
+              open: root.shapeOpen
+              glyph: "󰘶"; title: strings.t("deck.shape"); subtitle: strings.t("deck.shapeAbout")
+              tone: root.amber; ink: root.ink
+              onClosed: root.shapeOpen = false
+              Flow {
+                Layout.fillWidth: true
+                spacing: 8
+                Repeater {
+                  model: root.shapes
+                  delegate: DjChip {
+                    required property var modelData
+                    glyph: modelData.glyph; text: modelData.label
                     onTapped: {
                       root.run(modelData.key === "shuffle" ? ["deck", "shuffle"] : ["deck", "shape", modelData.key])
                       root.shapeOpen = false
@@ -2304,53 +2306,46 @@ Item {
             }
             // Auto-DJ, all in one place: on or off, the way it takes the night,
             // somewhere new to head for, and whether it tidies its songs.
-            Rectangle {
+            DeckPanel {
               Layout.fillWidth: true
-              visible: root.autodjOpen
-              implicitHeight: djCol.implicitHeight + 24
-              radius: Style.cornerRadius > 0 ? 8 : 0
-              color: Util.alpha(root.amber, 0.04)
-              border.width: 1; border.color: Util.alpha(root.amber, 0.45)
-              ColumnLayout {
-                id: djCol
-                x: 14; y: 12
-                width: parent.width - 28
-                spacing: 10
-                RowLayout {
-                  Layout.fillWidth: true
-                  spacing: 8
-                  Label { text: "∞  " + strings.t("deck.autodj").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.amber }
-                  DjChip { text: strings.t("deck.autodjOn"); on: !!root.deck.autodj; onTapped: root.run(["deck", "autodj", "on"]) }
-                  DjChip { text: strings.t("deck.autodjOff"); on: !root.deck.autodj; onTapped: root.run(["deck", "autodj", "off"]) }
-                  Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: strings.t("deck.autodjAbout"); font.pixelSize: Style.font.caption; opacity: 0.55 }
-                  RoundButton { glyph: "󰅖"; onClicked: root.autodjOpen = false }
-                }
-                Flow {
-                  Layout.fillWidth: true
-                  spacing: 8
-                  Label { text: strings.t("deck.autodjDirection"); font.pixelSize: Style.font.caption; color: root.teal; height: 30; verticalAlignment: Text.AlignVCenter; width: 120 }
-                  Repeater {
-                    model: [
-                      { key: "none", label: strings.t("deck.autodjFollow"), glyph: "∞" },
-                      { key: "arc", label: strings.t("deck.autodjDirArc"), glyph: "󱗿" },
-                      { key: "energy", label: strings.t("deck.autodjDirEnergy"), glyph: "󱐋" },
-                      { key: "tempo", label: strings.t("deck.autodjDirTempo"), glyph: "󰓅" },
-                      { key: "harmonic", label: strings.t("deck.autodjDirHarmonic"), glyph: "󰽰" },
-                      { key: "smooth", label: strings.t("deck.autodjDirSmooth"), glyph: "󰾆" }
-                    ]
-                    delegate: DjChip {
-                      required property var modelData
-                      glyph: modelData.glyph; text: modelData.label
-                      on: (root.deck.direction || "none") === modelData.key
-                      onTapped: root.run(["deck", "autodj", "direction", modelData.key])
-                    }
+              open: root.autodjOpen
+              glyph: "∞"; title: strings.t("deck.autodj"); subtitle: strings.t("deck.autodjAbout")
+              tone: root.amber; ink: root.ink
+              switchable: true; on: !!root.deck.autodj
+              onToggled: {
+                const on = !root.deck.autodj
+                root.deck = Object.assign({}, root.deck, { autodj: on })
+                root.run(["deck", "autodj", on ? "on" : "off"])
+              }
+              onClosed: root.autodjOpen = false
+              RowLayout {
+                spacing: 0
+                PanelLabel { text: strings.t("deck.autodjDirection") }
+                Segmented {
+                  tone: root.amber; ink: root.ink
+                  dim: !root.deck.autodj
+                  current: root.deck.direction || "none"
+                  model: [
+                    { key: "none", label: strings.t("deck.autodjFollow"), glyph: "∞" },
+                    { key: "arc", label: strings.t("deck.autodjDirArc"), glyph: "󱗿" },
+                    { key: "energy", label: strings.t("deck.autodjDirEnergy"), glyph: "󱐋" },
+                    { key: "tempo", label: strings.t("deck.autodjDirTempo"), glyph: "󰓅" },
+                    { key: "harmonic", label: strings.t("deck.autodjDirHarmonic"), glyph: "󰽰" },
+                    { key: "smooth", label: strings.t("deck.autodjDirSmooth"), glyph: "󰾆" }
+                  ]
+                  onPicked: function(key) {
+                    root.deck = Object.assign({}, root.deck, { direction: key })
+                    root.run(["deck", "autodj", "direction", key])
                   }
                 }
+              }
+              RowLayout {
+                visible: !root.locked
+                spacing: 0
+                PanelLabel { Layout.alignment: Qt.AlignTop; Layout.topMargin: 8; text: strings.t("deck.towardLabel") }
                 Flow {
                   Layout.fillWidth: true
-                  visible: !root.locked
                   spacing: 8
-                  Label { text: strings.t("deck.towardLabel"); font.pixelSize: Style.font.caption; color: root.teal; height: 30; verticalAlignment: Text.AlignVCenter; width: 120 }
                   Repeater {
                     model: root.towardPresets
                     delegate: DjChip {
@@ -2361,14 +2356,15 @@ Item {
                     }
                   }
                   Rectangle {
-                    width: 260; height: 30
-                    radius: 15
+                    width: 260; height: 32
+                    radius: 16
                     color: Util.alpha(root.ink, 0.04)
-                    border.width: 1; border.color: towardInput.activeFocus ? root.teal : Util.alpha(root.teal, 0.45)
+                    border.width: 1; border.color: towardInput.activeFocus ? root.amber : Util.alpha(root.ink, 0.14)
+                    Behavior on border.color { ColorAnimation { duration: Style.duration(140) } }
                     TextInput {
                       id: towardInput
                       anchors.left: parent.left; anchors.right: towardGo.left
-                      anchors.leftMargin: 12; anchors.rightMargin: 6
+                      anchors.leftMargin: 14; anchors.rightMargin: 6
                       anchors.verticalCenter: parent.verticalCenter
                       color: root.ink; clip: true
                       font.family: Style.font.family; font.pixelSize: Style.font.caption
@@ -2378,17 +2374,25 @@ Item {
                     }
                     HeadLink {
                       id: towardGo
-                      anchors.right: parent.right; anchors.rightMargin: 8
+                      anchors.right: parent.right; anchors.rightMargin: 10
                       anchors.verticalCenter: parent.verticalCenter
-                      text: strings.t("deck.towardGo")
+                      glyph: "󰁔"
                       onTapped: towardInput.accepted()
                     }
                   }
                 }
-                // What it's doing right now: finding songs (a pulsing ∞), or where it's heading.
+              }
+              // What it's doing right now: finding songs (a pulsing ∞), or where it's heading.
+              Rectangle {
+                Layout.fillWidth: true
+                visible: !!root.djBusy || root.towardLabel !== ""
+                implicitHeight: busyRow.implicitHeight + 16
+                radius: 8
+                color: Util.alpha(root.amber, 0.06)
                 RowLayout {
-                  visible: !!root.djBusy || root.towardLabel !== ""
-                  Layout.fillWidth: true
+                  id: busyRow
+                  x: 14; width: parent.width - 28
+                  anchors.verticalCenter: parent.verticalCenter
                   spacing: 10
                   Label {
                     text: "∞"; color: root.amber; font.pixelSize: Style.font.body + 2
@@ -2411,142 +2415,164 @@ Item {
                     onTapped: root.run(["deck", "autodj", "toward", "off"])
                   }
                 }
-                // Auto-DJ tidies its own songs once their real tempos are in (on unless you turn it off).
-                HeadLink {
-                  glyph: root.deck.autoTidy !== false ? "󰄲" : "󰄱"
-                  text: strings.t("deck.autoTidy")
-                  tip: strings.t("deck.autoTidyTip")
-                  onTapped: root.run(["deck", "autodj", "tidy", root.deck.autoTidy !== false ? "off" : "on"])
+              }
+              // Auto-DJ tidies its own songs once their real tempos are in (on unless you turn it off).
+              RowLayout {
+                spacing: 0
+                PanelLabel { text: strings.t("deck.autodjTidyLabel") }
+                OnOff {
+                  tone: root.amber; ink: root.ink
+                  on: root.deck.autoTidy !== false
+                  onToggled: {
+                    const on = root.deck.autoTidy === false
+                    root.deck = Object.assign({}, root.deck, { autoTidy: on })
+                    root.run(["deck", "autodj", "tidy", on ? "on" : "off"])
+                  }
                 }
+                Label { Layout.leftMargin: 12; Layout.fillWidth: true; text: strings.t("deck.autoTidyTip"); font.pixelSize: Style.font.caption; opacity: 0.55; wrapMode: Text.Wrap }
               }
             }
             // Mix, all in one place: how Beatport songs mix into each other (the
-            // style, drawn, and how long), and how every other change goes.
-            Rectangle {
+            // style, drawn, and how long), and what Next, Back and Pause do.
+            DeckPanel {
               Layout.fillWidth: true
-              visible: root.mixOpen
-              implicitHeight: mixCol.implicitHeight + 24
-              radius: Style.cornerRadius > 0 ? 8 : 0
-              color: Util.alpha(root.teal, 0.035)
-              border.width: 1; border.color: Util.alpha(root.teal, 0.45)
-              ColumnLayout {
-                id: mixCol
-                x: 14; y: 12
-                width: parent.width - 28
-                spacing: 10
-                RowLayout {
-                  Layout.fillWidth: true
-                  spacing: 8
-                  Label { text: "󰘭  " + strings.t("deck.mixes").toUpperCase(); font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal }
-                  Label {
-                    Layout.fillWidth: true; Layout.leftMargin: 10
-                    text: root.canMix ? strings.t("deck.mixIntro") : ""
-                    font.pixelSize: Style.font.caption; opacity: 0.55
-                    elide: Text.ElideRight
-                  }
-                  RoundButton { glyph: "󰅖"; onClicked: { root.mixOpen = false; root.mixPeek = "" } }
-                }
-                // The style: off, picked per seam, or one for every seam.
-                Flow {
-                  Layout.fillWidth: true
-                  visible: root.canMix
-                  spacing: 8
-                  Label { text: strings.t("deck.mixStyleLabel"); font.pixelSize: Style.font.caption; color: root.teal; height: 30; verticalAlignment: Text.AlignVCenter; width: 120 }
-                  DjChip { text: strings.t("deck.mixOff"); on: !root.mixing; onTapped: { root.deck = Object.assign({}, root.deck, { mixes: false }); root.run(["deck", "mixes", "off"]) } }
-                  DjChip {
-                    glyph: "󰘭"; text: strings.t("deck.mixAuto"); on: root.mixing && root.mixChosen === ""
-                    onHoveredChanged: root.mixPeek = hovered ? "auto" : ""
-                    onTapped: { root.deck = Object.assign({}, root.deck, { mixes: true, mixStyle: null }); root.run(["deck", "mixes", "style", "auto"]) }
-                  }
-                  Repeater {
-                    model: root.mixStyles
-                    delegate: DjChip {
-                      required property string modelData
-                      glyph: root.mixGlyph(modelData)
-                      text: strings.t("deck.mixStyle." + modelData)
-                      on: root.mixing && root.mixChosen === modelData
-                      onHoveredChanged: root.mixPeek = hovered ? modelData : (root.mixPeek === modelData ? "" : root.mixPeek)
-                      onTapped: { root.deck = Object.assign({}, root.deck, { mixes: true, mixStyle: modelData }); root.run(["deck", "mixes", "style", modelData]) }
-                    }
+              open: root.mixOpen
+              glyph: "󰘭"; title: strings.t("deck.mixes")
+              subtitle: root.canMix ? strings.t("deck.mixIntro") : strings.t("deck.mixIntroNone")
+              tone: root.teal; ink: root.ink
+              switchable: root.canMix; on: root.mixing
+              onToggled: {
+                const on = !root.mixing
+                root.deck = Object.assign({}, root.deck, { mixes: on })
+                root.run(["deck", "mixes", on ? "on" : "off"])
+              }
+              onClosed: { root.mixOpen = false; root.mixPeek = "" }
+              RowLayout {
+                visible: root.canMix
+                spacing: 0
+                PanelLabel { text: strings.t("deck.mixStyleLabel") }
+                Segmented {
+                  id: styleSeg
+                  tone: root.teal; ink: root.ink
+                  dim: !root.mixing
+                  current: root.mixChosen !== "" ? root.mixChosen : "auto"
+                  model: [{ key: "auto", label: strings.t("deck.mixAuto"), glyph: "󰘭" }].concat(
+                         root.mixStyles.map(k => ({ key: k, label: strings.t("deck.mixStyle." + k), glyph: root.mixGlyph(k) })))
+                  onHoveredKeyChanged: root.mixPeek = hoveredKey
+                  onPicked: function(key) {
+                    root.deck = Object.assign({}, root.deck, { mixes: true, mixStyle: key === "auto" ? null : key })
+                    root.run(["deck", "mixes", "style", key])
                   }
                 }
-                // What that style does, drawn: the bass and the melody of the song
-                // going out (amber) and the one coming in (teal), across the mix.
-                RowLayout {
-                  Layout.fillWidth: true
-                  visible: root.canMix && (root.mixing || root.mixPeek !== "")
-                  spacing: 16
-                  MixShape {
-                    // The lanes start under the chips; BASS and MELODY sit to their left.
-                    Layout.leftMargin: 128 - gutter
-                    Layout.preferredWidth: gutter + 440
-                    Layout.preferredHeight: 72
-                    readonly property var drawn: ((root.deck.mixShapes || {})[root.mixShown === "auto" ? "swap" : root.mixShown]) || null
-                    curves: drawn
-                    swap: drawn ? drawn.swap : -1
-                    bassLabel: strings.t("deck.mixBass"); topLabel: strings.t("deck.mixTop")
-                    outColor: root.amber; inColor: root.teal; ink: root.ink
-                  }
-                  ColumnLayout {
-                    Layout.fillWidth: true
-                    Layout.alignment: Qt.AlignTop
-                    spacing: 6
-                    Row {
-                      spacing: 14
-                      Row { spacing: 6; Rectangle { width: 14; height: 3; radius: 1.5; color: root.amber; anchors.verticalCenter: parent.verticalCenter }
-                            Label { text: strings.t("deck.mixGoing"); font.pixelSize: Style.font.caption; opacity: 0.7 } }
-                      Row { spacing: 6; Rectangle { width: 14; height: 3; radius: 1.5; color: root.teal; anchors.verticalCenter: parent.verticalCenter }
-                            Label { text: strings.t("deck.mixComing"); font.pixelSize: Style.font.caption; opacity: 0.7 } }
+              }
+              // What that style does, drawn (or the mix under way, live): the bass
+              // and the melody of the song going out and the one coming in.
+              RowLayout {
+                visible: root.canMix
+                spacing: 0
+                Item { implicitWidth: 150; implicitHeight: 1 }
+                Rectangle {
+                  id: previewTile
+                  Layout.preferredWidth: Math.max(styleSeg.implicitWidth, 640)
+                  implicitHeight: previewRow.implicitHeight + 28
+                  radius: 10
+                  color: Util.alpha(root.ink, 0.03)
+                  border.width: 1; border.color: Util.alpha(root.ink, 0.08)
+                  opacity: root.mixing || root.mixPeek !== "" ? 1 : 0.5
+                  Behavior on opacity { NumberAnimation { duration: Style.duration(180) } }
+                  readonly property string shown: root.mixLive ? root.mixKind(root.mixInfo.style) : root.mixShown === "auto" ? "swap" : root.mixShown
+                  RowLayout {
+                    id: previewRow
+                    x: 16; y: 14
+                    width: parent.width - 32
+                    spacing: 22
+                    MixShape {
+                      Layout.preferredWidth: 330; Layout.preferredHeight: 84
+                      readonly property var drawn: ((root.deck.mixShapes || {})[previewTile.shown]) || null
+                      curves: root.mixLive && root.mixInfo.curves ? root.mixInfo.curves : drawn
+                      swap: root.mixLive ? root.mixSwap : drawn ? drawn.swap : -1
+                      playhead: root.mixLive && root.mixTimed ? root.mixShare : -1
+                      bassLabel: strings.t("deck.mixBass"); topLabel: strings.t("deck.mixTop")
+                      outColor: root.amber; inColor: root.teal; ink: root.ink
                     }
-                    Label {
+                    ColumnLayout {
                       Layout.fillWidth: true
-                      wrapMode: Text.Wrap
-                      text: strings.t("deck.mixAbout." + (root.mixPeek !== "" ? root.mixPeek : root.mixChosen !== "" ? root.mixChosen : "auto"))
-                      font.pixelSize: Style.font.caption
-                      color: root.ink
+                      Layout.alignment: Qt.AlignTop
+                      spacing: 8
+                      Label {
+                        Layout.fillWidth: true
+                        text: root.mixLive ? root.mixLine
+                              : root.mixGlyph(previewTile.shown) + "  " + strings.t("deck.mixStyle." + previewTile.shown)
+                              + (root.mixShown === "auto" ? "  ·  " + strings.t("deck.mixAuto") : "")
+                        font.family: "Iosevka Nerd Font Propo"
+                        font.pixelSize: Style.font.body; font.bold: true
+                        color: root.mixTone(previewTile.shown)
+                      }
+                      Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        text: strings.t("deck.mixAbout." + (root.mixPeek !== "" ? root.mixPeek : root.mixChosen !== "" ? root.mixChosen : "auto"))
+                        font.pixelSize: Style.font.caption
+                        opacity: 0.8
+                      }
+                      Row {
+                        spacing: 16
+                        Row { spacing: 6; Rectangle { width: 14; height: 3; radius: 1.5; color: root.amber; anchors.verticalCenter: parent.verticalCenter }
+                              Label { text: strings.t("deck.mixGoing"); font.pixelSize: Style.font.caption; opacity: 0.6 } }
+                        Row { spacing: 6; Rectangle { width: 14; height: 3; radius: 1.5; color: root.teal; anchors.verticalCenter: parent.verticalCenter }
+                              Label { text: strings.t("deck.mixComing"); font.pixelSize: Style.font.caption; opacity: 0.6 } }
+                      }
                     }
                   }
                 }
-                // How long: as suits the songs, or 8, 16 or 32 bars.
-                Flow {
-                  Layout.fillWidth: true
-                  visible: root.mixing
-                  spacing: 8
-                  Label { text: strings.t("deck.mixLength"); font.pixelSize: Style.font.caption; color: root.teal; height: 30; verticalAlignment: Text.AlignVCenter; width: 120 }
-                  Repeater {
-                    model: [0, 8, 16, 32]
-                    delegate: DjChip {
-                      required property int modelData
-                      text: modelData === 0 ? strings.t("deck.mixAuto") : strings.tn("deck.mixBars", modelData).arg(modelData)
-                      on: (root.deck.mixBars || 0) === modelData
-                      onTapped: { root.deck = Object.assign({}, root.deck, { mixBars: modelData }); root.run(["deck", "mixes", "bars", String(modelData)]) }
-                    }
-                  }
-                  Label { text: strings.t("deck.mixLengthAbout"); font.pixelSize: Style.font.caption; opacity: 0.55; height: 30; verticalAlignment: Text.AlignVCenter }
-                }
-                // Not the mixes: what Next, Back and Pause do on the laptop (fade or
-                // cut), or whether a Sonos room crossfades its own songs.
-                Flow {
-                  Layout.fillWidth: true
-                  spacing: 8
-                  Label { text: root.inSonos ? strings.t("deck.mixRoomLabel") : strings.t("deck.mixSkipLabel"); font.pixelSize: Style.font.caption; color: root.teal; height: 30; verticalAlignment: Text.AlignVCenter; width: 120 }
-                  DjChip {
-                    text: root.inSonos ? strings.t("deck.mixCrossfade") : strings.t("deck.mixFade")
-                    on: root.inSonos ? !!root.deck.crossfade : root.deck.softSkip !== false
-                    onTapped: if (root.inSonos) root.run(["deck", "crossfade", "on"])
-                              else { root.deck = Object.assign({}, root.deck, { softSkip: true }); root.run(["deck", "soft-skip", "on"]) }
-                  }
-                  DjChip {
-                    text: root.inSonos ? strings.t("deck.mixStraight") : strings.t("deck.mixCutNow")
-                    on: root.inSonos ? !root.deck.crossfade : root.deck.softSkip === false
-                    onTapped: if (root.inSonos) root.run(["deck", "crossfade", "off"])
-                              else { root.deck = Object.assign({}, root.deck, { softSkip: false }); root.run(["deck", "soft-skip", "off"]) }
-                  }
-                  Label {
-                    text: root.inSonos ? strings.t("deck.mixRoomAbout") : strings.t("deck.mixSkipAbout")
-                    font.pixelSize: Style.font.caption; opacity: 0.55; height: 30; verticalAlignment: Text.AlignVCenter
+              }
+              RowLayout {
+                visible: root.canMix
+                spacing: 0
+                PanelLabel { text: strings.t("deck.mixLength") }
+                Segmented {
+                  tone: root.teal; ink: root.ink
+                  dim: !root.mixing
+                  current: String(root.deck.mixBars || 0)
+                  model: [0, 8, 16, 32].map(n => ({ key: String(n), label: n === 0 ? strings.t("deck.mixAuto") : strings.tn("deck.mixBars", n).arg(n) }))
+                  onPicked: function(key) {
+                    root.deck = Object.assign({}, root.deck, { mixBars: Number(key) })
+                    root.run(["deck", "mixes", "bars", key])
                   }
                 }
+                Label { Layout.leftMargin: 14; Layout.fillWidth: true; text: strings.t("deck.mixLengthAbout"); font.pixelSize: Style.font.caption; opacity: 0.5; elide: Text.ElideRight }
+              }
+              // Songs that aren't mixed: a crossfade or straight on, on the laptop and in a room.
+              RowLayout {
+                spacing: 0
+                PanelLabel { text: strings.t("deck.mixBetweenLabel") }
+                Segmented {
+                  tone: root.teal; ink: root.ink
+                  current: root.deck.crossfade !== false ? "soft" : "hard"
+                  model: [{ key: "soft", label: strings.t("deck.crossfade"), glyph: "󰡍" },
+                          { key: "hard", label: strings.t("deck.mixStraight") }]
+                  onPicked: function(key) {
+                    root.deck = Object.assign({}, root.deck, { crossfade: key === "soft" })
+                    root.run(["deck", "crossfade", key === "soft" ? "on" : "off"])
+                  }
+                }
+                Label { Layout.leftMargin: 14; Layout.fillWidth: true; text: root.inSonos ? strings.t("deck.mixRoomAbout") : strings.t("deck.mixBetweenAbout"); font.pixelSize: Style.font.caption; opacity: 0.5; elide: Text.ElideRight }
+              }
+              // What Next, Back and Pause do on the laptop: a quick fade, or at once.
+              RowLayout {
+                visible: !root.inSonos
+                spacing: 0
+                PanelLabel { text: strings.t("deck.mixSkipLabel") }
+                Segmented {
+                  tone: root.teal; ink: root.ink
+                  current: root.deck.softSkip !== false ? "soft" : "hard"
+                  model: [{ key: "soft", label: strings.t("deck.mixFade") }, { key: "hard", label: strings.t("deck.mixCutNow") }]
+                  onPicked: function(key) {
+                    root.deck = Object.assign({}, root.deck, { softSkip: key === "soft" })
+                    root.run(["deck", "soft-skip", key === "soft" ? "on" : "off"])
+                  }
+                }
+                Label { Layout.leftMargin: 14; Layout.fillWidth: true; text: strings.t("deck.mixSkipAbout"); font.pixelSize: Style.font.caption; opacity: 0.5; elide: Text.ElideRight }
               }
             }
             // Naming a set to save (what, and where), or finding a song in this one.
@@ -5219,26 +5245,39 @@ Item {
   // A cover that changes by dissolving: the new one loads out of sight, then
   // fades in over the old (settling from a touch larger), never a blank.
   // A choice in the Auto-DJ panel: lit when it's the one in use.
+  // A row's name in a Deck panel: small capitals in a column of their own.
+  component PanelLabel: Label {
+    Layout.preferredWidth: 150
+    Layout.alignment: Qt.AlignVCenter
+    text: ""
+    font.pixelSize: Style.font.caption - 1
+    font.letterSpacing: 1.6
+    font.capitalization: Font.AllUppercase
+    opacity: 0.5
+  }
+
+  // A choice to tap: quiet until the pointer's on it, lit when it's the one.
   component DjChip: Rectangle {
     id: chip
     property string text: ""
     property string glyph: ""
     property bool on: false
+    readonly property bool hovered: chipMouse.hovered
     signal tapped()
-    implicitWidth: chipLine.implicitWidth + 20
-    implicitHeight: 30
-    radius: 15
-    color: on ? Util.alpha(root.amber, 0.22) : chipMouse.hovered ? Util.alpha(root.teal, 0.14) : Util.alpha(root.teal, 0.05)
+    implicitWidth: chipLine.implicitWidth + 28
+    implicitHeight: 32
+    radius: 16
+    color: on ? Util.alpha(root.amber, 0.2) : chipMouse.hovered ? Util.alpha(root.ink, 0.08) : Util.alpha(root.ink, 0.035)
     border.width: 1
-    border.color: on ? root.amber : Util.alpha(root.teal, chipMouse.hovered ? 0.9 : 0.4)
+    border.color: on ? Util.alpha(root.amber, 0.85) : Util.alpha(root.ink, chipMouse.hovered ? 0.3 : 0.12)
+    Behavior on color { ColorAnimation { duration: Style.duration(140) } }
     Row {
       id: chipLine
       anchors.centerIn: parent
-      spacing: 6
-      Label { visible: chip.glyph !== ""; text: chip.glyph; font.family: "Iosevka Nerd Font Propo"; color: chip.on ? root.amber : root.teal }
-      Label { text: chip.text; font.pixelSize: Style.font.caption; color: root.ink; font.bold: chip.on }
+      spacing: 7
+      Label { visible: chip.glyph !== ""; text: chip.glyph; font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption + 1; color: chip.on ? root.amber : root.ink; opacity: chip.on ? 1 : 0.6; anchors.verticalCenter: parent.verticalCenter }
+      Label { text: chip.text; font.pixelSize: Style.font.caption; color: root.ink; font.bold: chip.on; opacity: chip.on || chipMouse.hovered ? 1 : 0.75; anchors.verticalCenter: parent.verticalCenter }
     }
-    readonly property bool hovered: chipMouse.hovered
     HoverHandler { id: chipMouse; cursorShape: Qt.PointingHandCursor }
     TapHandler { onTapped: chip.tapped() }
   }

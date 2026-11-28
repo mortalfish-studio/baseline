@@ -1909,6 +1909,42 @@ class MixTests(TempCase):
         al.deck_mix_set(deck, ["style", "auto"])
         self.assertEqual(al.deck_mix_choice(deck, "c"), (None, 8, False))
 
+    def test_mix_now_starts_at_the_next_eight_bars(self):
+        a = {"bpm": 125, "key": "8A", "length": 360}
+        b = {"bpm": 125, "key": "8A", "length": 360}
+        late = al.mix_plan(a, b, 360, 0.1, 0.0, 0.48, 0.48)
+        soon = al.mix_plan(a, b, 360, 0.1, 0.0, 0.48, 0.48, soonest=61.0)
+        self.assertGreater(late["start"], 250)
+        self.assertGreaterEqual(soon["start"], 61.0)
+        self.assertLess(soon["start"], 61.0 + 8 * 4 * 0.48 + 0.01)
+        self.assertAlmostEqual((soon["start"] - 0.1) / (8 * 4 * 0.48) % 1, 0, places=6)
+        # Too late for "now" to be any sooner: the usual place.
+        self.assertEqual(al.mix_plan(a, b, 360, 0.1, 0.0, 0.48, 0.48, soonest=355)["start"], late["start"])
+
+    def test_mix_evens_out_levels_gently(self):
+        self.assertEqual(al.mix_trim(-12, -12), 1.0)
+        self.assertAlmostEqual(al.mix_trim(-12, -24), 10 ** (3 / 20), places=3)        # capped at 3 dB
+        self.assertAlmostEqual(al.mix_trim(-12, -10), 10 ** (-1 / 20), places=3)       # half the difference
+        self.assertEqual(al.mix_trim(None, -10, 0.9), 0.9)
+        lanes = al.mix_scaled({"gain": [[0, 0], [4, 1]], "low": [[0, -26]]}, 0.8)
+        self.assertEqual(lanes["gain"], [[0, 0], [4, 0.8]])
+
+    def test_cut_echoes_out_and_filter_sings(self):
+        a, _, _ = al.mix_lanes("cut", 7.68, 0.48)
+        self.assertEqual(a["echo"][-1][1], 0)                     # the send closes on the downbeat; the tail rings on
+        self.assertGreater(max(v for _, v in a["echo"]), 0.5)
+        a, _, _ = al.mix_lanes("filter", 30.72, 0.48)
+        self.assertGreater(max(v for _, v in a["hpq"]), 2)
+
+    def test_mix_ready_needs_two_beatport_songs_playing(self):
+        bp = {"uid": "a", "service": "beatport"}
+        deck = {**al.DECK_EMPTY, "playing": True, "now": bp, "set": [{"uid": "b", "service": "beatport"}],
+                "where": {"kind": "laptop"}}
+        self.assertTrue(al.deck_mix_ready(deck))
+        self.assertFalse(al.deck_mix_ready({**deck, "playing": False}))
+        self.assertFalse(al.deck_mix_ready({**deck, "set": [{"uid": "b", "service": "applemusic"}]}))
+        self.assertFalse(al.deck_mix_ready({**deck, "mixNow": {"from": "a", "stage": "mixing", "at": al.time.time()}}))
+
     def test_the_gap_between_two_decks_beats(self):
         beat, dt = 0.48, 5.0
         def env(offset):
