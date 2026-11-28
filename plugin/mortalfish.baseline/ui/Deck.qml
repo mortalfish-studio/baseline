@@ -2438,7 +2438,12 @@ Item {
                   Layout.fillWidth: true
                   spacing: 8
                   Label { text: "󰘭  " + strings.t("deck.mixes").toUpperCase(); font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal }
-                  Item { Layout.fillWidth: true }
+                  Label {
+                    Layout.fillWidth: true; Layout.leftMargin: 10
+                    text: root.canMix ? strings.t("deck.mixIntro") : ""
+                    font.pixelSize: Style.font.caption; opacity: 0.55
+                    elide: Text.ElideRight
+                  }
                   RoundButton { glyph: "󰅖"; onClicked: { root.mixOpen = false; root.mixPeek = "" } }
                 }
                 // The style: off, picked per seam, or one for every seam.
@@ -2519,24 +2524,27 @@ Item {
                   }
                   Label { text: strings.t("deck.mixLengthAbout"); font.pixelSize: Style.font.caption; opacity: 0.55; height: 30; verticalAlignment: Text.AlignVCenter }
                 }
-                // Every other change: soft fades or hard cuts here, Sonos's own crossfade there.
+                // Not the mixes: what Next, Back and Pause do on the laptop (fade or
+                // cut), or whether a Sonos room crossfades its own songs.
                 Flow {
                   Layout.fillWidth: true
                   spacing: 8
-                  Label { text: root.canMix ? strings.t("deck.mixOthers") : strings.t("deck.mixBetween"); font.pixelSize: Style.font.caption; color: root.teal; height: 30; verticalAlignment: Text.AlignVCenter; width: 120 }
+                  Label { text: root.inSonos ? strings.t("deck.mixRoomLabel") : strings.t("deck.mixSkipLabel"); font.pixelSize: Style.font.caption; color: root.teal; height: 30; verticalAlignment: Text.AlignVCenter; width: 120 }
                   DjChip {
-                    glyph: root.inSonos ? "󰡍" : "∿"
-                    text: root.inSonos ? strings.t("deck.mixCrossfade") : strings.t("deck.mixSoft")
+                    text: root.inSonos ? strings.t("deck.mixCrossfade") : strings.t("deck.mixFade")
                     on: root.inSonos ? !!root.deck.crossfade : root.deck.softSkip !== false
                     onTapped: if (root.inSonos) root.run(["deck", "crossfade", "on"])
                               else { root.deck = Object.assign({}, root.deck, { softSkip: true }); root.run(["deck", "soft-skip", "on"]) }
                   }
                   DjChip {
-                    glyph: "󰆐"
-                    text: strings.t("deck.mixHard")
+                    text: root.inSonos ? strings.t("deck.mixStraight") : strings.t("deck.mixCutNow")
                     on: root.inSonos ? !root.deck.crossfade : root.deck.softSkip === false
                     onTapped: if (root.inSonos) root.run(["deck", "crossfade", "off"])
                               else { root.deck = Object.assign({}, root.deck, { softSkip: false }); root.run(["deck", "soft-skip", "off"]) }
+                  }
+                  Label {
+                    text: root.inSonos ? strings.t("deck.mixRoomAbout") : strings.t("deck.mixSkipAbout")
+                    font.pixelSize: Style.font.caption; opacity: 0.55; height: 30; verticalAlignment: Text.AlignVCenter
                   }
                 }
               }
@@ -2978,12 +2986,12 @@ Item {
                     Rectangle {
                       anchors.verticalCenter: parent.verticalCenter
                       x: 40; width: Math.max(0, pill.x - 8 - 40); height: 1
-                      color: Util.alpha(seam.tone, seam.live ? 0.5 : 0.2)
+                      color: Util.alpha(seam.tone, seam.live ? 0.5 : 0.1)
                     }
                     Rectangle {
                       anchors.verticalCenter: parent.verticalCenter
                       x: pill.x + pill.width + 8; width: Math.max(0, seam.width - 8 - x); height: 1
-                      color: Util.alpha(seam.tone, seam.live ? 0.5 : 0.2)
+                      color: Util.alpha(seam.tone, seam.live ? 0.5 : 0.1)
                     }
                     Rectangle {
                       id: pill
@@ -3010,12 +3018,13 @@ Item {
                         anchors.centerIn: parent
                         text: root.mixGlyph(seam.style) + "  " + (seam.live && root.mixHeard
                               ? strings.t("deck.mixBar").arg(root.mixBar).arg(seam.bars)
-                              : strings.t("deck.mixStyle." + seam.style) + " · " + strings.tn("deck.mixBars", seam.bars).arg(seam.bars)).toUpperCase()
+                              : strings.t("deck.mixStyle." + seam.style)
+                                + (pillHover.hovered || seam.live ? " · " + strings.tn("deck.mixBars", seam.bars).arg(seam.bars) : "")).toUpperCase()
                         font.family: "Iosevka Nerd Font Propo"
                         font.pixelSize: 10
                         font.letterSpacing: 1.2
                         color: seam.tone
-                        opacity: seam.live ? 1 : 0.8
+                        opacity: seam.live || pillHover.hovered ? 1 : seam.picked ? 0.85 : 0.6
                       }
                     }
                   }
