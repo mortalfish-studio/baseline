@@ -837,6 +837,7 @@
   "deck.mixButton": "Mix · %1",
   "deck.mixBetween": "Between songs",
   "deck.mixAuto": "Auto",
+  "deck.mixAutoShows": "Auto  ·  mostly %1",
   "deck.mixLength": "Length",
   "deck.mixView": "Close-up",
   "deck.mixViewStacked": "Stacked",

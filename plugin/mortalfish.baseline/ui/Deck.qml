@@ -2194,7 +2194,7 @@ Item {
                   }
                   Label {
                     visible: mixRow.shown
-                    Layout.maximumWidth: mixRow.width * 0.55
+                    Layout.maximumWidth: mixRow.width * 0.6
                     text: root.mixLive ? root.mixLine : !root.nextSong ? ""
                           : root.nextMixed ? ((root.deck.mixAt || 0) > 0
                               ? strings.t("deck.mixPlannedAt").arg(strings.t("deck.mixStyle." + root.nextStyle))
@@ -2203,10 +2203,11 @@ Item {
                                   .arg(root.titleParts(root.nextSong.title).main))
                           : strings.t(root.deck.crossfade !== false ? "deck.nextCrossfade" : "deck.nextStraight")
                               .arg(root.titleParts(root.nextSong.title).main)
-                    font.pixelSize: Style.font.caption
+                    // The line to read through a mix: a size up, and full strength.
+                    font.pixelSize: Style.font.caption + (root.mixLive ? 2 : 0)
                     font.letterSpacing: 0.5
                     color: mixRow.tone
-                    opacity: root.mixLive ? 1 : 0.75
+                    opacity: root.mixLive ? 1 : 0.85
                     elide: Text.ElideRight
                   }
                 }
@@ -2316,8 +2317,34 @@ Item {
                       readonly property var d: root.otherDeck
                       readonly property bool preview: !!d && !!d.preview
                       readonly property bool shown: !!d
-                      implicitHeight: shown ? 30 : 0
+                      // Under a waveform the lane is always there (so nothing moves when the set empties).
+                      implicitHeight: shown || progressBox.waved ? 30 : 0
                       clip: true
+                      // The sound, live, in the lane's free stretch before the next song
+                      // comes in (the whole lane when nothing's next): the waveform took
+                      // the bars' place above, so they live here, quietly.
+                      DeckVisualizer {
+                        id: laneViz
+                        readonly property bool wanted: progressBox.waved && !root.mixClose && (!otherLane.d || otherLane.preview) && width >= 160
+                        x: 0
+                        width: !otherLane.d || !otherWave.visible ? parent.width - (otherLane.d ? 40 : 0) : Math.max(0, otherWave.x - 16)
+                        height: parent.height
+                        visible: opacity > 0.01
+                        opacity: wanted ? 0.5 : 0
+                        Behavior on opacity { NumberAnimation { duration: Style.duration(400); easing.type: Easing.OutCubic } }
+                        active: wanted && root.seen && !!root.now && !root.stageOn
+                        playing: root.deck.playing
+                        live: !root.inSonos
+                        mic: root.deck.micViz === true
+                        amber: root.amber; teal: root.teal; ground: root.ground
+                      }
+                      // Where the next song comes in: a mark at the start of its wave.
+                      Rectangle {
+                        visible: otherLane.preview && otherWave.visible
+                        x: otherWave.x - 1; y: 2
+                        width: 2; height: parent.height - 4; radius: 1
+                        color: otherLane.tone; opacity: 0.85
+                      }
                       readonly property color tone: preview || root.mixOutgoing ? root.teal : root.amber
                       readonly property real pxPerSecond: root.pos.length > 0 ? width / root.pos.length * (root.mixOutgoing ? 1 : (root.mixInfo.rate || 1)) : 0
                       // Waiting: where it will come in on this song's clock (the mix planned,
@@ -2327,7 +2354,7 @@ Item {
                       WaveStrip {
                         id: otherWave
                         visible: ready && progressBox.waved
-                        opacity: otherLane.preview ? 0.45 : 1
+                        opacity: otherLane.preview ? 0.7 : 1
                         x: !otherLane.d ? 0 : otherLane.preview ? otherLane.waitAt * otherLane.width / decks.len
                            : decks.headX - otherLane.d.live / otherLane.d.rate * otherLane.pxPerSecond
                         width: !otherLane.d ? 0 : otherLane.d.len / (otherLane.d.rate || 1) * Math.max(otherLane.pxPerSecond, 0.001)
@@ -2771,8 +2798,9 @@ Item {
                       Label {
                         Layout.fillWidth: true
                         text: root.mixLive ? root.mixLine
-                              : root.mixGlyph(previewTile.shown) + "  " + strings.t("deck.mixStyle." + previewTile.shown)
-                              + (root.mixShown === "auto" ? "  ·  " + strings.t("deck.mixAuto") : "")
+                              : root.mixGlyph(previewTile.shown) + "  "
+                              + (root.mixPeek === "" && root.mixChosen === "" ? strings.t("deck.mixAutoShows").arg(strings.t("deck.mixStyle." + previewTile.shown))
+                                                                              : strings.t("deck.mixStyle." + previewTile.shown))
                         font.family: "Iosevka Nerd Font Propo"
                         font.pixelSize: Style.font.body; font.bold: true
                         color: root.mixTone(previewTile.shown)
