@@ -185,11 +185,29 @@ Item {
     onTextChanged: {
       try {
         const v = JSON.parse(text)
+        // Still the song a mix just handed over from: the new one's clock comes from the mix.
+        if (v.uid && root.now && v.uid !== root.now.uid && root.mixClockFor(root.now) >= 0) return root.handOverClock()
         root.pos = v
         root.shownTime = v.time || 0
       } catch (error) {}
     }
   }
+  // Where the song a mix brought in is, from the mix's own plan (-1 when it
+  // didn't come from one): the watcher reports the old song for a moment after
+  // the takeover, and the clock shouldn't show its time under the new title.
+  function mixClockFor(song) {
+    const m = mixInfo
+    if (!song || !m || m.to !== song.uid || !(m.startMs > 0)) return -1
+    const u = (Date.now() - m.startMs) / 1000
+    return u < (m.enter || 0) ? -1 : (m.entry || 0) + (u - (m.enter || 0)) * (m.rate || 1)
+  }
+  function handOverClock() {
+    const t = mixClockFor(now)
+    if (t < 0) return
+    pos = { time: t, length: lengthOf(now), playing: true, uid: now.uid, at: Date.now() / 1000 }
+    shownTime = t
+  }
+  onNowChanged: if (now && pos.uid && pos.uid !== now.uid) handOverClock()
   // Who's working: written by afterlight around each question. QML can't
   // check the pids, so anything older than a quarter of an hour is stale.
   Commons.WatchedFile {
@@ -4287,8 +4305,11 @@ Item {
               id: stageZoom
               Layout.fillWidth: true
               Layout.topMargin: 10
-              Layout.preferredHeight: visible ? topHeight + seamHeight + bottomHeight : 0
-              visible: stageView.visible && root.mixClose && !!root.zoomHeld && (root.zoomHeld.a.env || []).length > 1
+              Layout.preferredHeight: topHeight + seamHeight + bottomHeight
+              readonly property bool wanted: stageView.visible && root.mixClose && !!root.zoomHeld && (root.zoomHeld.a.env || []).length > 1
+              visible: opacity > 0.01
+              opacity: wanted ? 1 : 0
+              Behavior on opacity { NumberAnimation { duration: Style.duration(wanted ? 600 : 900); easing.type: Easing.OutCubic } }
               zoom: 1
               span: 32
               topHeight: 52; seamHeight: 14; bottomHeight: 52

@@ -8,7 +8,8 @@ import qs.Commons as Commons
 // through (so a bass swap shows as one song's lower half draining while the
 // other's fills). The beats each song was heard to have tick across it; the
 // two combs line up when the mix is in time. Once the old song has drained
-// away at the mix's end, the new one glides up into the top row.
+// away at the mix's end, the new one glides up into the top row, taking on
+// the playing song's colour as it goes.
 //
 // Everything runs off the wall clock and the mix's own plan (deck.mixNow), so
 // it moves smoothly every frame. `zoom` eases it in from the whole song (as the
@@ -154,13 +155,16 @@ Canvas {
     g.globalAlpha = 1 - gone
     ribbon(rowA, view.outColor, view.envA, view.lenA, "a", songA)
     g.globalAlpha = 1
-    ribbon(rowB, view.inColor, view.envB, view.lenB, "b", songB)
+    // As it rises it takes on the playing song's colour, so the hand-back to the overview doesn't flash.
+    const colorB = Qt.rgba(lerp(view.inColor.r, view.outColor.r, swapT), lerp(view.inColor.g, view.outColor.g, swapT),
+                           lerp(view.inColor.b, view.outColor.b, swapT), 1)
+    ribbon(rowB, colorB, view.envB, view.lenB, "b", songB)
     const grids = m.grids || {}
     g.globalAlpha = 1 - gone
     comb(rowA, view.outColor, grids.a, t => t, a => a, songA)
     g.globalAlpha = 1
     // The new song's beats, from its own seconds to the window's and back.
-    comb(rowB, view.inColor, grids.b, t => from + enter + (t - entry) / rate, a => entry + (a - from - enter) * rate, songB)
+    comb(rowB, colorB, grids.b, t => from + enter + (t - entry) / rate, a => entry + (a - from - enter) * rate, songB)
 
     // The needle: now, through both decks.
     g.fillStyle = rgba(view.ink, 0.08)

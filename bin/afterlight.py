@@ -3218,11 +3218,13 @@ def addon_reload():
     return False
 
 
-def beatport_open(url, play=False):
+def beatport_open(url, play=False, focus=True):
     """Open a Beatport page in the Beatport app; the new window replaces the
     old one, so there's only ever one player. With play, the Baseline for
     Beatport extension (repo chrome/) presses the page's Play button. When
-    the extension's bridge is up, the page loads in place instead."""
+    the extension's bridge is up, the page loads in place instead. Without
+    focus (the Deck playing a song by itself), a new window never takes you
+    away from where you are."""
     if not BEATPORT_URL.match(url):
         sys.exit("Not a Beatport link.")
     if play:
@@ -3245,6 +3247,7 @@ def beatport_open(url, play=False):
     if play:
         url = url.split("#")[0] + "#baseline-play"
     before = set(beatport_windows())
+    here = active_workspace()
     subprocess.Popen(["/opt/google/chrome/google-chrome", "--profile-directory=Default", f"--app-id={BEATPORT_APP}",
                       f"--app-launch-url-for-shortcuts-menu-item={url}"],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -3254,9 +3257,23 @@ def beatport_open(url, play=False):
         if new:
             for address in before:
                 run("hyprctl", "dispatch", f'hl.dsp.window.close({{ window = "address:{address}" }})')
-            run("hyprctl", "dispatch", f'hl.dsp.focus({{ window = "address:{new[0]}" }})')
+            if focus:
+                run("hyprctl", "dispatch", f'hl.dsp.focus({{ window = "address:{new[0]}" }})')
+            elif here is not None and active_workspace() != here:
+                run("hyprctl", "dispatch", f'hl.dsp.focus({{ workspace = "{here}" }})')
             return
-    run("hyprctl", "dispatch", 'hl.dsp.focus({ workspace = "6" })')
+    if focus:
+        run("hyprctl", "dispatch", 'hl.dsp.focus({ workspace = "6" })')
+    elif here is not None and active_workspace() != here:
+        run("hyprctl", "dispatch", f'hl.dsp.focus({{ workspace = "{here}" }})')
+
+
+def active_workspace():
+    """The workspace you're on (its number), or None."""
+    try:
+        return int(json.loads(out("hyprctl", "activeworkspace", "-j") or "{}")["id"])
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 def beatport_pin_clipboard(settings):
@@ -4904,7 +4921,7 @@ def deck_play_laptop(song, start_at=0):
         # Load the track's page now; press its Play in the background, so the
         # Deck isn't held up while the page loads.
         url = beatport_track_url(song)
-        beatport_open(url)
+        beatport_open(url, focus=False)
         subprocess.Popen([str(REPO / "bin/afterlight"), "beatport", "press", url], stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         return
