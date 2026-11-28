@@ -717,7 +717,7 @@ BarWidget {
   TrackToast { id: trackToast }
   // Music messages from afterlight (Send to Sonos, the Grok agent's Sonos
   // replies) in the same popup: afterlight writes toast.json.
-  property real toastSeen: Date.now() / 1000      // older ones (from before start-up) aren't shown
+  property double toastSeen: Date.now() / 1000      // older ones (from before start-up) aren't shown
   Commons.WatchedFile {
     path: Quickshell.env("HOME") + "/.local/state/afterlight/toast.json"
     onTextChanged: {

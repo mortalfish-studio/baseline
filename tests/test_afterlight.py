@@ -74,6 +74,10 @@ class TempCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         self.addCleanup(self._tmp.cleanup)
+        # No test touches the real agents' notes, log or choices.
+        for name, file in (("AGENTS_FILE", "deck-agents.json"), ("AGENT_LOG", "agent-calls.jsonl"),
+                           ("AGENT_NOW", "agents-now.json"), ("DECK_PREP", "deck-prep.json")):
+            self.patch(name, self.tmp / file)
 
     def patch(self, name, value):
         patcher = mock.patch.object(al, name, value)
@@ -635,6 +639,77 @@ class DeckTests(TempCase):
         self.assertTrue(asked["shape"])
         self.assertEqual([s["chapter"] for s in d["set"]], ["Warm up", "Build"])
         self.assertEqual(al.deck_with_details(d)["set"][1]["energy"], 7)
+
+    def test_prep_pools_the_scouts_checks_the_catalogue_and_lets_the_judge_order(self):
+        asked = []
+        scouts = {"digger": [{"t": "Lady", "a": "Modjo"}, {"t": "Made Up", "a": "Nobody"}],
+                  "connector": [{"t": "Lady", "a": "Modjo (radio edit)"}, {"t": "Finally", "a": "CeCe Peniston", "e": 8}],
+                  "crowd": [{"t": "Finally", "a": "CeCe Peniston"}, {"t": "Music Sounds Better", "a": "Stardust"}]}
+        def ask(prompt, tier="fast", job="", web=False, timeout=60, turns=1, agent=None):
+            asked.append((tier, job, agent))
+            if tier == "scout":
+                angle = next(a for a in al.SCOUT_ANGLES if al.SCOUT_ANGLES[a] in prompt)
+                return {"songs": scouts[angle]}
+            self.assertIn("named by digger, connector", prompt)        # the judge sees who agreed
+            self.assertNotIn("Made Up", prompt)                         # and only real songs
+            return {"set": [{"n": 3, "c": "Warm up", "w": "opener"}, {"n": 1, "c": "Peak", "w": "the peak"},
+                            {"n": 99}, {"n": 1}], "note": "A warm, rising night."}
+        self.patch("agent_ask", ask)
+        self.patch("agents_installed", lambda: ["grok", "claude", "codex"])
+        self.patch("AGENTS_FILE", self.tmp / "deck-agents.json")
+        al.agents_set("scout", "mix")
+        self.patch("find_songs", lambda service, wanted: [
+            (i, None if i["t"] == "Made Up" else self.apple(n, i["t"], i["a"])) for n, i in enumerate(wanted)])
+        with mock.patch("shutil.which", return_value="/usr/bin/x"):
+            al.deck_command({"music": {"service": "applemusic"}}, ["build", "60", "disco", "--replace", "--deep"])
+        # Three scouts at once, each on a different agent; then one judge.
+        self.assertEqual(sorted(a for t, j, a in asked if t == "scout"), ["claude", "codex", "grok"])
+        self.assertEqual([j for t, j, a in asked if t == "judge"], ["judging"])
+        d = al.deck_read()
+        self.assertEqual([(s["title"], s["chapter"], s["why"]) for s in d["set"]],
+                         [("Music Sounds Better", "Warm up", "opener"), ("Lady", "Peak", "the peak")])
+        report = json.loads((self.tmp / "deck-prep.json").read_text())
+        self.assertEqual(report["pool"], 4)
+        self.assertEqual(report["agreed"], 2)
+        self.assertEqual({s["angle"]: (s["ideas"], s["real"], s["kept"]) for s in report["scouts"]},
+                         {"digger": (2, 1, 1), "connector": (2, 2, 1), "crowd": (2, 2, 1)})
+        self.assertEqual(report["judge"]["note"], "A warm, rising night.")
+
+    def test_prep_judge_that_times_out_gets_a_stand_in(self):
+        asked = []
+        def ask(prompt, tier="fast", job="", web=False, timeout=60, turns=1, agent=None):
+            asked.append((tier, job))
+            if tier == "scout":
+                return {"songs": [{"t": "A", "a": "One"}, {"t": "B", "a": "Two"}]}
+            return None if tier == "judge" else {"set": [{"n": 2}, {"n": 1}]}
+        self.patch("agent_ask", ask)
+        self.patch("find_songs", lambda service, wanted: [(i, self.apple(n, i["t"], i["a"])) for n, i in enumerate(wanted)])
+        with mock.patch("shutil.which", return_value="/usr/bin/x"):
+            al.deck_command({"music": {"service": "applemusic"}}, ["build", "30", "x", "--replace", "--deep"])
+        self.assertEqual(asked[-2:], [("judge", "judging"), ("fast", "judging")])
+        self.assertEqual([s["title"] for s in al.deck_read()["set"]], ["B", "A"])
+        self.assertTrue(json.loads((self.tmp / "deck-prep.json").read_text())["judge"]["stoodIn"])
+
+    def test_finding_a_song_prefers_the_original_version(self):
+        hits = [{"kind": "song", "title": "Le Freak (Live)", "subtitle": "Chic • Live", "id": "1"},
+                {"kind": "song", "title": "Le Freak (Instrumental)", "subtitle": "Chic • X", "id": "2"},
+                {"kind": "song", "title": "Le Freak", "subtitle": "Chic • C'est Chic", "id": "3"}]
+        self.patch("am_songs", lambda words: hits)
+        [(idea, match)] = al.find_songs("applemusic", [{"t": "Le Freak", "a": "Chic"}])
+        self.assertEqual(match["id"], "3")
+        [(idea, match)] = al.find_songs("applemusic", [{"t": "Le Freak (Live)", "a": "Chic"}])
+        self.assertEqual(match["id"], "1")
+
+    def test_prep_without_a_verdict_keeps_what_the_scouts_agreed_on(self):
+        def ask(prompt, tier="fast", job="", web=False, timeout=60, turns=1, agent=None):
+            if job == "judging":
+                return None             # the judge and its stand-in both fail
+            return {"songs": [{"t": "Solo", "a": "One"}] + ([{"t": "Both", "a": "Two"}] if "crate digger" in prompt or "mixing DJ" in prompt else [])}
+        self.patch("agent_ask", ask)
+        self.patch("find_songs", lambda service, wanted: [(i, self.apple(n, i["t"], i["a"])) for n, i in enumerate(wanted)])
+        with mock.patch("shutil.which", return_value="/usr/bin/x"):
+            al.deck_command({"music": {"service": "applemusic"}}, ["build", "30", "x", "--replace", "--deep"])
+        self.assertEqual([s["title"] for s in al.deck_read()["set"]], ["Solo", "Both"])
 
     def test_build_from_a_picked_song_opens_with_it(self):
         asked = {}

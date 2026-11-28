@@ -3879,7 +3879,7 @@ CHAPTERS = ("Warm up", "Build", "Peak", "Wind down")
 # with every tool off but web search where a job needs it. Sonos control
 # stays with Grok (its Sonos connection), whatever is picked here.
 
-AGENTS_FILE = STATE.parent / "agents.json"          # {"fast": "grok", "scout": "claude", "judge": "claude"}
+AGENTS_FILE = STATE.parent / "deck-agents.json"             # {"fast": "grok", "scout": "claude", "judge": "claude"}
 AGENT_LOG = STATE.parent / "agent-calls.jsonl"      # each question: when, the job, agent, model, seconds, ok
 AGENT_NOW = STATE.parent / "agents-now.json"        # the questions being worked on now (the Deck's waveform)
 AGENT_TIERS = ("fast", "scout", "judge")
@@ -3904,7 +3904,20 @@ def agent_choices():
     saved = read_json(AGENTS_FILE, {})
     saved = saved if isinstance(saved, dict) else {}
     default = "grok" if "grok" in have else (have[0] if have else None)
-    return {tier: saved.get(tier) if saved.get(tier) in have else default for tier in AGENT_TIERS}
+    choices = {tier: saved.get(tier) if saved.get(tier) in have else default for tier in AGENT_TIERS}
+    if saved.get("scout") == "mix" and len(have) > 1:
+        choices["scout"] = "mix"
+    return choices
+
+
+def scout_agents(count):
+    """Who digs: the scouts' agent for every angle, or with "mix", each
+    installed agent in turn, so their notes come from different minds."""
+    choice = agent_for("scout")
+    if choice != "mix":
+        return [choice] * count
+    have = agents_installed()
+    return [have[n % len(have)] for n in range(count)]
 
 
 def agent_for(tier="fast"):
@@ -3913,9 +3926,11 @@ def agent_for(tier="fast"):
 
 def agents_set(tier, agent):
     """Pick the agent for a tier (deck agents use <tier> <agent>)."""
-    if tier not in AGENT_TIERS or agent not in AGENT_MODELS:
-        sys.exit(f"Usage: afterlight deck agents use {'|'.join(AGENT_TIERS)} {'|'.join(AGENT_MODELS)}")
-    if agent not in agents_installed():
+    if tier not in AGENT_TIERS or (agent not in AGENT_MODELS and not (tier == "scout" and agent == "mix")):
+        sys.exit(f"Usage: afterlight deck agents use {'|'.join(AGENT_TIERS)} {'|'.join(AGENT_MODELS)} (scouts: or mix)")
+    if agent == "mix" and len(agents_installed()) < 2:
+        sys.exit("Mixing scouts needs two agents installed.")
+    if agent != "mix" and agent not in agents_installed():
         sys.exit(f"{AGENT_NAMES[agent]} isn't installed (omarchy agent account add {agent}).")
     saved = read_json(AGENTS_FILE, {})
     saved = saved if isinstance(saved, dict) else {}
@@ -3927,8 +3942,10 @@ def agents_state():
     """For the Deck: what's installed, what's picked, and who's working now."""
     choices = agent_choices()
     return {"installed": agents_installed(), "use": choices,
-            "models": {tier: AGENT_MODELS[a][tier][0] for tier, a in choices.items() if a},
-            "now": agent_working(), "record": agent_record()}
+            "models": {tier: AGENT_MODELS[a][tier][0] if a in AGENT_MODELS else
+                       " + ".join(AGENT_MODELS[b][tier][0] for b in agents_installed())
+                       for tier, a in choices.items() if a},
+            "now": agent_working(), "record": agent_record(), "prep": read_json(DECK_PREP, {})}
 
 
 def agent_record(last=300):
@@ -4071,6 +4088,9 @@ def grok_ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False, job
     return {"songs": songs, "q": searches}
 
 
+ODD_VERSIONS = ("live", "instrumental", "karaoke", "acapella", "a cappella", "tribute", "cover", "8-bit", "lullaby")
+
+
 def find_songs(service, ideas):
     """Each of Grok's ideas looked up on the service at once: [(idea, best song or None)]."""
     from concurrent.futures import ThreadPoolExecutor
@@ -4081,6 +4101,9 @@ def find_songs(service, ideas):
         except (OSError, ValueError):
             return idea, None
         same = [i for i in results if song_key(i["title"]) == song_key(idea["t"])]
+        # The version people know first: not a live take, instrumental or karaoke one, unless that was asked for.
+        odd = lambda i: any(w in i["title"].lower() and w not in idea["t"].lower() for w in ODD_VERSIONS)
+        same.sort(key=odd)
         artist = set(song_key(idea["a"]).split())
         by = lambda i: set(song_key(str(i.get("subtitle", "")).split(" • ")[0]).split())
         # The artist Grok named, not a cover or a tribute act.
@@ -4134,6 +4157,7 @@ APPLE_SID = 204                 # Apple Music's service number on Sonos
 DECK_HISTORY = 300              # songs kept in what's played (a whole night)
 SONOS_AHEAD = 30                # songs put in a room's queue at a time (topped up as it plays)
 DECK_SERVICES = {"applemusic", "ytmusic", "beatport"}
+DECK_SERVICE_NAMES = {"applemusic": "Apple Music", "ytmusic": "YouTube Music", "beatport": "Beatport"}
 
 
 def deck_read():
@@ -7584,10 +7608,11 @@ def deck_command(settings, args):
         if value("--seed"):
             seed = deck_seed((settings.get("music") or {}).get("service", "ytmusic"), value("--seed"))
         words = [a for i, a in enumerate(args[2:], 2)
-                 if a not in {"--start", "--replace", "--seed"} and args[i - 1] not in {"--start", "--seed"}]
+                 if a not in {"--start", "--replace", "--seed", "--deep"} and args[i - 1] not in {"--start", "--seed"}]
         if not words and not seed:
             sys.exit("Say what the set is for, or give it a song to start from (--seed).")
-        deck_build(settings, int(args[1]), " ".join(words), value("--start"), replace="--replace" in args, seed=seed)
+        build = deck_prep if "--deep" in args else deck_build
+        build(settings, int(args[1]), " ".join(words), value("--start"), replace="--replace" in args, seed=seed)
     elif action == "run":
         deck_run()
     else:
@@ -7596,7 +7621,7 @@ def deck_command(settings, args):
                  "save <name> [--played|--all]|sets|load <name> [--replace]|grab [--next]|find-add <words> [--next]|build-from-playing [minutes]|next-up|songs <service> <album or playlist json>|forget <name>|shape <tempo|smooth|energy|arc|harmonic|bumps>|autodj <on|off>|autodj from <service> <item json>|export <service> <name> [--played|--all|--saved|--tonight]|crossfade <on|off>|soft-skip <on|off>|sleep <minutes|song|off>|guests <on|off|forget>|request <take|drop> <id> [--next|--mix]|requests <clear|auto on|auto off|lastcall <minutes|off>>|lock <on|off>|details|"
                  "pin <uid>|shuffle|clear|play [uid]|pause|next|previous|where <laptop|room id>|rooms|join <room id>|"
                  "leave <room id>|everywhere|volume <room id> <0-100>|search <service> <words>|mine <service>|fill [--service <s>]|"
-                 "build <minutes> [what it's for] [--start <song>|--seed <item json>] [--replace] [--service <s>]|run]")
+                 "build <minutes> [what it's for] [--start <song>|--seed <item json>] [--replace] [--deep] [--service <s>]|run]")
 
 
 def deck_as_result(song):
@@ -7948,8 +7973,13 @@ def deck_build(settings, minutes, brief, start="", replace=False, seed=None):
                 deck_details_note(song, energy=idea["e"])
             found.append(song)
     if len(found) <= (1 if seed else 0):
-        toast("Grok couldn't build that set", "Try saying more about the mood or the music", glyph="󰀦")
+        toast(f"{AGENT_NAMES[agent_for('fast')]} couldn't build that set", "Try saying more about the mood or the music", glyph="󰀦")
         return
+    deck_build_land(found, replace)
+
+
+def deck_build_land(found, replace):
+    """A built set goes into the Deck: in place of the set, or before it."""
     def place(d):
         d["set"] = found + ([] if replace else d["set"])
         d["setGen"] = d.get("setGen", 0) + 1         # a new set: Auto-DJ's searches from before don't land
@@ -7957,8 +7987,167 @@ def deck_build(settings, minutes, brief, start="", replace=False, seed=None):
             d["pinned"] = []
     deck_edit(place)
     deck_after_edit()
-    total = sum(1 for _ in found)
-    toast(f"Your set is ready: {total} songs", f"{found[0]['title']} → {found[-1]['title']}", glyph="✦")
+    toast(f"Your set is ready: {len(found)} songs", f"{found[0]['title']} → {found[-1]['title']}", glyph="✦")
+
+
+# Prep: a set dug for properly. Scouts look from different angles at once
+# (on the scouts' agent, or each on a different one), their ideas are pooled
+# (a song more than one names gets their votes), every idea is looked up on
+# the music service (only real, playable songs go on), and the judge picks
+# and orders the set from what's left. Agreement is a hint, not proof: the
+# catalogue decides what's real. How each scout did is kept for tryouts.
+DECK_PREP = STATE.parent / "deck-prep.json"
+SCOUT_ANGLES = {
+    "digger": "You're a crate digger: find the deeper cuts, remixes and lesser-known gems a real fan would love, "
+              "still on streaming services. Avoid the obvious hits.",
+    "connector": "You're a mixing DJ: find songs that blend well into each other, with neighbouring tempos and "
+                 "compatible keys, so the set flows without bumps.",
+    "crowd": "You read the crowd: find the songs that get this room singing and moving, the ones people know and "
+             "are glad to hear.",
+}
+
+
+def deck_prep_ask(angle, base, count):
+    song = '{"t":"title","a":"artist","w":"why, max 30 chars","e":7,"b":118,"k":"8A"}'
+    return (f"Answer from your own knowledge; use no tools. {SCOUT_ANGLES[angle]} {base} "
+            f"Suggest {count} real songs (not in play order). Reply with ONLY compact JSON, no prose: "
+            '{"songs":[' + song + ']} where "e" is energy from 1 (calm) to 10 (peak), "b" tempo in BPM and '
+            '"k" the key on the Camelot wheel (1A to 12B); rough is fine.')
+
+
+def deck_prep_ideas(value):
+    """A scout's answer, cleaned like grok_ideas'."""
+    out = []
+    for x in (value or {}).get("songs", []) if isinstance(value, dict) else []:
+        if isinstance(x, dict) and x.get("t") and x.get("a"):
+            out.append({"t": clean_text(str(x["t"]), 100), "a": clean_text(str(x["a"]), 100),
+                        "w": clean_text(str(x.get("w", "")), 40),
+                        "e": x["e"] if isinstance(x.get("e"), int) and 1 <= x["e"] <= 10 else 0,
+                        "b": x["b"] if isinstance(x.get("b"), (int, float)) and 50 <= x["b"] <= 220 else 0,
+                        "k": x["k"] if camelot_ok(x.get("k")) else "", "c": ""})
+    return out[:40]
+
+
+def deck_prep_pool(answers):
+    """Every scout's ideas in one list, each song once, with who named it."""
+    pool = {}
+    for angle, ideas in answers:
+        for idea in ideas:
+            key = song_key(idea["t"]) + "|" + song_key(idea["a"]).split(" ")[0]
+            if key in pool:
+                if angle not in pool[key]["by"]:
+                    pool[key]["by"].append(angle)
+            else:
+                pool[key] = {**idea, "by": [angle]}
+    return sorted(pool.values(), key=lambda i: -len(i["by"]))
+
+
+def deck_prep_judge_ask(base, count, songs):
+    lines = []
+    for n, (idea, song) in enumerate(songs, 1):
+        notes = [f"named by {', '.join(idea['by'])}"]
+        notes += [f"~{round(idea['b'])} BPM"] if idea["b"] else []
+        notes += [idea["k"]] if idea["k"] else []
+        notes += [f"energy {idea['e']}"] if idea["e"] else []
+        lines.append(f"{n}. {song['title']} — {str(song.get('subtitle', '')).split(' • ')[0] or idea['a']} "
+                     f"({'; '.join(notes)})")
+    return ("Answer from your own knowledge; use no tools. You're the head DJ judging your scouts' finds. "
+            f"{base} Pick {count} of these songs and put them in play order: ease in, build, peak around two thirds "
+            "of the way, then wind down; neighbouring songs compatible in tempo and key; no artist twice in a row. "
+            "Songs several scouts named are promising but not automatically in: judge the fit. Candidates:\n"
+            + "\n".join(lines)
+            + '\nReply with ONLY compact JSON: {"set":[{"n":3,"c":"Warm up","w":"its job, max 30 chars"}],'
+              '"note":"one sentence on the set"} where "c" is one of "Warm up", "Build", "Peak", "Wind down".')
+
+
+def deck_prep(settings, minutes, brief, start="", replace=False, seed=None):
+    """Build a set the thorough way (deck build … --deep): scouts, the
+    catalogue, then the judge."""
+    from concurrent.futures import ThreadPoolExecutor
+    if not agent_for("scout") or not agent_for("judge"):
+        sys.exit("Prep needs an agent: Grok, Claude or Codex (omarchy agent account add).")
+    minutes = max(10, min(240, minutes))
+    count = max(5, min(45, round(minutes / 3.7)))
+    brief = brief.replace("»", "").strip()[:600]
+    start = start.replace("»", "").strip()[:120]
+    if seed:
+        start = ""
+        brief = brief or f"music that grows from {seed['title']} by {seed['artist']}"
+    base = (f"The set is about {minutes} minutes, for: «{brief}». "
+            + (f"It starts with «{start}». " if start else "")
+            + (f"It opens with «{deck_seed_words(seed)}», already chosen: don't list it; stay near its sound, era, "
+               "tempo and key. " if seed else ""))
+    angles = list(SCOUT_ANGLES)
+    agents = scout_agents(len(angles))
+    names = sorted({AGENT_NAMES[a] for a in agents})
+    toast(f"{len(angles)} scouts are digging…", f"{' + '.join(names)} · about {minutes} minutes: {brief[:50]}", glyph="✦")
+    report = {"at": int(time.time()), "brief": brief[:120], "minutes": minutes, "scouts": [], "judge": {}}
+
+    def dig(job):
+        angle, agent = job
+        started = time.time()
+        value = agent_ask(deck_prep_ask(angle, base, count + 4), tier="scout", job="scouting", timeout=240, agent=agent)
+        ideas = deck_prep_ideas(value)
+        report["scouts"].append({"angle": angle, "agent": agent, "model": AGENT_MODELS[agent]["scout"][0],
+                                 "seconds": round(time.time() - started, 1), "ideas": len(ideas)})
+        return angle, ideas
+    with ThreadPoolExecutor(max_workers=len(angles)) as pool:
+        answers = list(pool.map(dig, zip(angles, agents)))
+    ideas = deck_prep_pool(answers)
+    if not ideas:
+        toast("The scouts came back empty", "Try saying more about the mood or the music", glyph="󰀦")
+        return
+    service = (settings.get("music") or {}).get("service", "ytmusic")
+    seen = {song_key(seed["title"])} if seed else set()
+    real = []
+    for idea, match in find_songs(service, ideas[:60]):
+        if match and song_key(match["title"]) not in seen:
+            seen.add(song_key(match["title"]))
+            real.append((idea, match))
+    for scout in report["scouts"]:
+        scout["real"] = sum(1 for idea, _ in real if scout["angle"] in idea["by"])
+    agreed = sum(1 for idea, _ in real if len(idea["by"]) > 1)
+    toast(f"Comparing notes: {len(real)} of {len(ideas)} ideas are on {DECK_SERVICE_NAMES.get(service, service)}",
+          f"{agreed} named by more than one scout. {AGENT_NAMES[agent_for('judge')]} is judging…", glyph="✦")
+    if not real:
+        toast("None of the scouts' songs could be found", "Try another service or say more", glyph="󰀦")
+        return
+    judge = agent_for("judge")
+    started = time.time()
+    verdict = agent_ask(deck_prep_judge_ask(base, count, real), tier="judge", job="judging", timeout=240)
+    if not (isinstance(verdict, dict) and verdict.get("set")) and agent_for("fast"):
+        # The judge didn't answer in time: the quick model judges instead.
+        judge = agent_for("fast")
+        verdict = agent_ask(deck_prep_judge_ask(base, count, real), tier="fast", job="judging", timeout=120)
+        report["judge"]["stoodIn"] = True
+    picks = []
+    for pick in (verdict or {}).get("set", []) if isinstance(verdict, dict) else []:
+        n = pick.get("n") if isinstance(pick, dict) else None
+        if isinstance(n, int) and 1 <= n <= len(real) and n - 1 not in [p[0] for p in picks]:
+            picks.append((n - 1, pick.get("c") if pick.get("c") in CHAPTERS else "", clean_text(str(pick.get("w", "")), 40)))
+    stood_in = report["judge"].get("stoodIn", False)
+    report["judge"] = {"agent": judge, "model": AGENT_MODELS[judge]["fast" if stood_in else "judge"][0],
+                       "seconds": round(time.time() - started, 1), "ok": bool(picks), "stoodIn": stood_in, "note": clean_text(str((verdict or {}).get("note", "")), 200) if isinstance(verdict, dict) else ""}
+    if not picks:
+        # No verdict: the songs most scouts agreed on, in the order found.
+        picks = [(n, "", "") for n in range(min(count, len(real)))]
+    found = [{**seed, "from": "✦ " + brief[:50], "why": "your pick"}] if seed else []
+    for n, chapter, why in picks[:count]:
+        idea, match = real[n]
+        song = deck_item(service, match)
+        song["why"] = why or idea["w"]
+        song["from"] = "✦ " + brief[:50]
+        if chapter:
+            song["chapter"] = chapter
+        if idea["e"]:
+            deck_details_note(song, energy=idea["e"])
+        found.append(song)
+    for scout in report["scouts"]:
+        scout["kept"] = sum(1 for n, _, _ in picks[:count] if scout["angle"] in real[n][0]["by"])
+    report["agreed"] = agreed
+    report["pool"] = len(ideas)
+    write_atomic(DECK_PREP, json.dumps(report) + "\n")
+    deck_build_land(found, replace)
 
 
 def deck_room_has(deck, room):

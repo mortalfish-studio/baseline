@@ -5,7 +5,8 @@ import qs.Commons
 // Deck's questions, a soft waveform runs across the header, one line per
 // agent in its own colour, with who's doing what under it. Idle, it settles
 // into a faint flat line. Tapping it opens the agents card. It only draws
-// while something is working (or settling), and not at all off screen.
+// while something is working (or settling), and not at all off screen; with
+// animations off it steps once a second instead of moving smoothly.
 Item {
   id: wave
   property var working: []          // [{agent, tier, job, since}] from agents-now.json
@@ -17,13 +18,12 @@ Item {
   property var agentName: (agent) => agent
   signal tapped()
 
-  // Who's working now (each agent once), newest question first.
-  readonly property var agents: {
-    const seen = [], out = []
-    const list = (working || []).slice().sort((a, b) => (b.since || 0) - (a.since || 0))
-    for (const item of list) {
-      if (seen.indexOf(item.agent) < 0) { seen.push(item.agent); out.push(item) }
-    }
+  // The questions being worked on, oldest first: one line each (up to four).
+  readonly property var agents: (working || []).slice().sort((a, b) => (a.since || 0) - (b.since || 0)).slice(0, 4)
+  // Who's at it, each once.
+  readonly property var who: {
+    const out = []
+    for (const item of agents) if (out.indexOf(item.agent) < 0) out.push(item.agent)
     return out
   }
   readonly property bool busy: agents.length > 0
@@ -34,13 +34,16 @@ Item {
   property real level: busy ? 1 : 0
   Behavior on level { NumberAnimation { duration: Style.duration(busy ? 600 : 1400); easing.type: Easing.OutCubic } }
   property real t: 0
-  property real now: Date.now() / 1000
+  property double now: Date.now() / 1000      // double: a float would lose the seconds
+  // Smooth at 30 frames a second; with animations off, a calm step once a
+  // second (still plainly at work, and next to nothing to draw).
   Timer {
-    interval: 33
+    interval: wave.still ? 1000 : 33
     repeat: true
-    running: wave.active && !wave.still && (wave.busy || wave.level > 0.01)
-    onTriggered: { wave.t += 0.033; wave.now = Date.now() / 1000; canvas.requestPaint() }
+    running: wave.active && (wave.busy || (!wave.still && wave.level > 0.01))
+    onTriggered: { wave.t += wave.still ? 0.35 : 0.033; wave.now = Date.now() / 1000; canvas.requestPaint() }
   }
+  onBusyChanged: now = Date.now() / 1000
   onLevelChanged: canvas.requestPaint()
   onWidthChanged: canvas.requestPaint()
   onAgentsChanged: canvas.requestPaint()
@@ -99,16 +102,19 @@ Item {
     font.family: Style.font.family
     font.pixelSize: Style.font.caption
     font.letterSpacing: 1
-    color: wave.agents.length === 1 ? wave.colorOf(wave.agents[0].agent) : wave.ink
+    color: wave.who.length === 1 ? wave.colorOf(wave.who[0]) : wave.ink
     opacity: wave.busy ? 0.85 : (hover.hovered ? 0.5 : 0)
     Behavior on opacity { NumberAnimation { duration: Style.duration(220) } }
     text: {
-      if (!wave.busy) return wave.agentName("")
-      if (wave.agents.length > 1)
-        return wave.agents.map(a => wave.agentName(a.agent)).join("  ·  ")
+      // "Grok + Claude · digging for songs · 0:42" (from the first to start).
       const a = wave.agents[0]
+      if (!wave.busy || !a) return wave.agentName("")
+      const jobs = wave.agents.map(x => x.job)
+      const job = jobs.every(j => j === a.job) ? wave.jobText(a.job) : ""
       const secs = Math.max(0, Math.floor(wave.now - (a.since || wave.now)))
-      return wave.agentName(a.agent) + "  ·  " + wave.jobText(a.job) + "  ·  "
+      return wave.who.map(x => wave.agentName(x)).join(" + ")
+             + (wave.agents.length > wave.who.length ? " ×" + wave.agents.length : "")
+             + (job ? "  ·  " + job : "") + "  ·  "
              + Math.floor(secs / 60) + ":" + String(secs % 60).padStart(2, "0")
     }
   }

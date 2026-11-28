@@ -235,6 +235,15 @@ Item {
   function syncSet() {
     const want = deck.set || []
     const ids = want.map(s => s.uid)
+    // Mostly a new set (built, loaded, cleared): swap it in one go, rather
+    // than as dozens of row moves at once.
+    let kept = 0
+    for (let i = 0; i < setModel.count; i++) if (ids.indexOf(setModel.get(i).uid) >= 0) kept++
+    if (setModel.count > 0 && kept * 2 < Math.max(setModel.count, want.length)) {
+      setModel.clear()
+      for (const song of want) setModel.append(rowOf(song))
+      return
+    }
     for (let i = setModel.count - 1; i >= 0; i--) if (ids.indexOf(setModel.get(i).uid) < 0) setModel.remove(i)
     for (let i = 0; i < want.length; i++) {
       let at = -1
@@ -1052,10 +1061,12 @@ Item {
                   Label { Layout.preferredWidth: 280; elide: Text.ElideRight; text: tierRow.modelData.about; font.pixelSize: Style.font.caption; opacity: 0.5 }
                 }
                 Repeater {
-                  model: (root.deck.agents || {}).installed || []
+                  model: ((root.deck.agents || {}).installed || []).concat(
+                    tierRow.modelData.key === "scout" && ((root.deck.agents || {}).installed || []).length > 1 ? ["mix"] : [])
                   delegate: DjChip {
                     required property var modelData
-                    text: root.agentNames[modelData] || modelData
+                    glyph: modelData === "mix" ? "󰒝" : ""
+                    text: modelData === "mix" ? strings.t("deck.agentsMix") : (root.agentNames[modelData] || modelData)
                     on: tierRow.chosen === modelData
                     onTapped: if (!root.locked) root.run(["deck", "agents", "use", tierRow.modelData.key, modelData])
                   }
@@ -1075,6 +1086,38 @@ Item {
                       .arg(Commons.I18n.formatNumber(rec.seconds, 1)).arg(Math.round(rec.ok * 100))
                   }
                 }
+              }
+            }
+            // The last prep: how each scout did, and the judge's word on it.
+            ColumnLayout {
+              readonly property var prep: (root.deck.agents || {}).prep || {}
+              id: prepBox
+              visible: (prep.scouts || []).length > 0
+              Layout.fillWidth: true
+              spacing: 4
+              Rectangle { Layout.fillWidth: true; height: 1; color: Util.alpha(root.teal, 0.2) }
+              Label {
+                Layout.fillWidth: true; elide: Text.ElideRight
+                text: strings.t("deck.prepLast").arg(prepBox.prep.brief || "").arg(prepBox.prep.pool || 0).arg(prepBox.prep.agreed || 0)
+                font.pixelSize: Style.font.caption; color: root.teal
+              }
+              Repeater {
+                model: prepBox.prep.scouts || []
+                delegate: Label {
+                  required property var modelData
+                  text: strings.t("deck.prepScout").arg(strings.t("deck.angle." + modelData.angle)).arg(root.agentNames[modelData.agent] || modelData.agent)
+                    .arg(modelData.ideas || 0).arg(modelData.real || 0).arg(modelData.kept || 0)
+                    .arg(Commons.I18n.formatNumber(modelData.seconds || 0, 0))
+                  font.pixelSize: Style.font.caption; opacity: 0.7
+                }
+              }
+              Label {
+                visible: !!(prepBox.prep.judge || {}).agent
+                Layout.fillWidth: true; wrapMode: Text.Wrap
+                text: strings.t((prepBox.prep.judge || {}).stoodIn ? "deck.prepStandIn" : "deck.prepJudge").arg(root.agentNames[(prepBox.prep.judge || {}).agent] || "")
+                  .arg(Commons.I18n.formatNumber((prepBox.prep.judge || {}).seconds || 0, 0))
+                  + ((prepBox.prep.judge || {}).note ? "  “" + prepBox.prep.judge.note + "”" : "")
+                font.pixelSize: Style.font.caption; opacity: 0.7
               }
             }
             Label {
@@ -1228,6 +1271,7 @@ Item {
                 anchors.margins: 10
                 spacing: 8
                 property int minutes: 60
+                property bool deep: false
                 RowLayout {
                   Layout.fillWidth: true
                   Label { text: "✦  " + strings.t("deck.build").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.amber }
@@ -1302,6 +1346,13 @@ Item {
                     }
                   }
                   Item { Layout.fillWidth: true }
+                  // Prep: scouts dig from different angles, the judge picks.
+                  DjChip {
+                    glyph: "󰚩"; text: strings.t("deck.buildDeep"); on: build.deep
+                    onTapped: build.deep = !build.deep
+                    id: deepChip
+                    HoverHandler { onHoveredChanged: root.hint(deepChip, strings.t("deck.buildDeepTip"), hovered) }
+                  }
                   ActionButton {
                     icon: "✦"
                     text: strings.t("deck.buildGo")
@@ -1312,6 +1363,7 @@ Item {
                       if (root.seed) args.push("--seed", JSON.stringify(root.seed))
                       else if (root.now) args.push("--start", root.now.title + " by " + root.now.artist)
                       if ((root.deck.set || []).length === 0) args.push("--replace")
+                      if (build.deep) args.push("--deep")
                       args.push("--service", root.seed ? root.seedService : root.service)
                       root.runLong(args)
                       root.seed = null
@@ -2219,12 +2271,19 @@ Item {
                 model: setModel
                 boundsBehavior: Flickable.StopAtBounds
                 interactive: !root.dragging
-                move: Transition { NumberAnimation { properties: "y"; duration: Style.duration(260); easing.type: Easing.OutCubic } }
-                moveDisplaced: Transition { NumberAnimation { properties: "y"; duration: Style.duration(260); easing.type: Easing.OutCubic } }
-                displaced: Transition { NumberAnimation { properties: "y"; duration: Style.duration(220); easing.type: Easing.OutCubic } }
-                add: Transition {
-                  NumberAnimation { properties: "opacity"; from: 0; to: 1; duration: Style.duration(200) }
-                  NumberAnimation { properties: "scale"; from: 0.97; to: 1; duration: Style.duration(200); easing.type: Easing.OutCubic }
+                // Rows glide as the set changes; with animations off there are
+                // no transitions at all (zero-length ones can strand rows).
+                move: Style.reduceMotion ? null : rowMove
+                moveDisplaced: Style.reduceMotion ? null : rowMoveDisplaced
+                displaced: Style.reduceMotion ? null : rowDisplaced
+                add: Style.reduceMotion ? null : rowAdd
+                Transition { id: rowMove; NumberAnimation { properties: "y"; duration: 260; easing.type: Easing.OutCubic } }
+                Transition { id: rowMoveDisplaced; NumberAnimation { properties: "y"; duration: 260; easing.type: Easing.OutCubic } }
+                Transition { id: rowDisplaced; NumberAnimation { properties: "y"; duration: 220; easing.type: Easing.OutCubic } }
+                Transition {
+                  id: rowAdd
+                  NumberAnimation { properties: "opacity"; from: 0; to: 1; duration: 200 }
+                  NumberAnimation { properties: "scale"; from: 0.97; to: 1; duration: 200; easing.type: Easing.OutCubic }
                 }
 
                 // ---- under the last song: one that wouldn't play (crossed out,
@@ -2234,7 +2293,7 @@ Item {
                   width: setList.width
                   topPadding: 6
                   spacing: 6
-                  property real clock: Date.now() / 1000
+                  property double clock: Date.now() / 1000
                   readonly property var gone: root.deck.unplayable && tail.clock - (root.deck.unplayable.at || 0) < 60
                                               ? root.deck.unplayable : null
                   Timer {
@@ -2546,8 +2605,8 @@ Item {
                           Layout.fillWidth: true
                           // In plain words: what doesn't flow from the song before.
                           readonly property string reasons: [].concat(
-                              !ktChip.keyOk ? [strings.t("deck.clash").arg(slot.key).arg(ktChip.before.key)] : [],
-                              ktChip.jump ? [strings.t("deck.jump").arg(Math.round(ktChip.before.bpm)).arg(Math.round(slot.bpm))] : [],
+                              !ktChip.keyOk && ktChip.before ? [strings.t("deck.clash").arg(slot.key).arg(ktChip.before.key)] : [],
+                              ktChip.jump && ktChip.before ? [strings.t("deck.jump").arg(Math.round(ktChip.before.bpm)).arg(Math.round(slot.bpm))] : [],
                               row.warns.filter(w => w !== "key" && w !== "tempo").map(w => strings.t("deck.warn." + w))).join("  ·  ")
                           // Calm by default; hover a song to see what doesn't flow (or
                           // where it came from), ahead of the artist so it can't be cut off.
@@ -3016,7 +3075,7 @@ Item {
         }
         // A dedication being read out: shown across the stage meanwhile.
         readonly property var speaking: root.deck.speaking || null
-        property real clock: Date.now() / 1000
+        property double clock: Date.now() / 1000
         readonly property bool moment: !!speaking && clock < speaking.until + 0.4
         Timer {
           running: stageView.visible && !!stageView.speaking
@@ -3975,7 +4034,7 @@ Item {
         visible: opacity > 0 && root.stageOn
         property var queue: []
         property var item: ({})
-        property real seenAt: Date.now() / 1000
+        property double seenAt: Date.now() / 1000
         property real rise: 24
         transform: Translate { y: askPop.rise }
         function check() {

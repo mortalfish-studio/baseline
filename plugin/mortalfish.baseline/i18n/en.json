@@ -765,5 +765,17 @@
   "deck.agentJob.suggest": "suggesting songs",
   "deck.agentJob.ask": "answering",
   "deck.agentJob.ideas": "finding ideas",
-  "deck.agentJob.look-up": "looking it up"
+  "deck.agentJob.look-up": "looking it up",
+  "deck.buildDeep": "Dig deeper",
+  "deck.buildDeepTip": "Three scouts dig from different angles at once, every idea is checked on your music service, and the judge picks and orders the set. Slower, about two or three minutes.",
+  "deck.agentsMix": "Mix",
+  "deck.agentJob.scouting": "digging for songs",
+  "deck.agentJob.judging": "weighing the scouts' finds",
+  "deck.prepLast": "Last dig: «%1» · %2 ideas, %3 named by more than one scout",
+  "deck.prepScout": "%1 (%2): %3 ideas, %4 found, %5 kept · %6 s",
+  "deck.prepJudge": "Judge (%1): %2 s.",
+  "deck.angle.digger": "Crate digger",
+  "deck.angle.connector": "Mixer",
+  "deck.angle.crowd": "Crowd reader",
+  "deck.prepStandIn": "Judge: no answer in time, so %1's quick model stood in (%2 s)."
 }
