@@ -143,11 +143,11 @@ Canvas {
     band.addColorStop(0, rgba(view.outColor, 0.55))
     band.addColorStop(1, rgba(view.inColor, 0.55))
     g.fillStyle = band
-    g.fillRect(mx0, seamY - 1.5, Math.max(1, mx1 - mx0), 3)
+    g.fillRect(mx0, seamY - 1, Math.max(1, mx1 - mx0), 2)
     if (m.takeover) {
       const sx = xOf(from + (m.takeover * 1000 - m.startMs) / 1000)
       g.fillStyle = rgba(view.ink, 0.7)
-      g.fillRect(sx - 1, seamY - 5, 2, 10)
+      g.fillRect(sx - 1, seamY - 3, 2, 6)
     }
 
     ribbon(rowA, view.outColor, view.envA, view.lenA, "a", songA)

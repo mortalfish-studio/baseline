@@ -1978,31 +1978,34 @@ Item {
                   border.width: 2
                   border.color: nowDrop.containsDrag ? root.teal : Util.alpha(root.amber, root.deck.playing ? 0.9 : 0.35)
                 }
-                CrossCover { anchors.fill: parent; url: root.now ? root.now.thumb || "" : ""; size: 176; glyph: "󰎆"; radius: 12 }
-                // In a mix, the other song's cover in the corner: growing as the
-                // new one comes in, shrinking away as the old one goes.
+                // Through a mix, the song going out stays underneath until the new one has covered it.
+                CrossCover { anchors.fill: parent; url: root.mixLive && root.mixSongA ? root.mixSongA.thumb || "" : root.now ? root.now.thumb || "" : ""; size: 176; glyph: "󰎆"; radius: 12 }
+                // In a mix, the new song's cover: in the corner as it's lined up, then
+                // growing and fading in over the old one as the mix goes, until it's all there.
                 Item {
                   id: mixPip
-                  readonly property real share: !root.otherDeck || root.otherDeck.preview ? 0 : root.mixOutgoing ? 0.3 + 0.35 * root.mixShare : 0.45 * (1 - root.mixShare)
-                  visible: !!root.otherDeck && share > 0.02
-                  // Drawn once at its biggest and scaled, so the picture never reloads as it grows.
-                  width: 176 * 0.65; height: width
-                  x: 176 - width - 8; y: 176 - height - 8
+                  readonly property real p: root.mixHeard ? root.mixShare : 0
+                  readonly property real eased: p * p * (3 - 2 * p)
+                  readonly property real share: 0.32 + 0.68 * eased
+                  visible: root.mixLive && !!root.mixSongB
+                  anchors.fill: parent
                   transformOrigin: Item.BottomRight
-                  scale: share / 0.65
+                  // Drawn once at full size and scaled, so the picture never reloads as it grows.
+                  scale: share
+                  opacity: visible ? 0.92 + 0.08 * eased : 0
                   Behavior on scale { NumberAnimation { duration: Style.duration(400); easing.type: Easing.OutCubic } }
                   Rectangle {
-                    anchors.fill: parent; anchors.margins: -3
-                    radius: 10
+                    anchors.fill: parent; anchors.margins: -3 / mixPip.scale
+                    radius: 14
                     color: root.ground
-                    border.width: 2
-                    border.color: root.mixOutgoing ? root.teal : root.amber
+                    border.width: 2 / mixPip.scale
+                    border.color: Util.alpha(root.teal, 1 - mixPip.eased)
                   }
                   Cover {
                     anchors.fill: parent
-                    size: Math.round(176 * 0.65)
-                    radius: 8
-                    url: root.otherDeck ? (root.otherDeck.song.thumb || "") : ""
+                    size: 176
+                    radius: 12
+                    url: root.mixSongB ? (root.mixSongB.thumb || "") : ""
                   }
                 }
                 DropArea {
@@ -2063,12 +2066,43 @@ Item {
                       }
                     }
                   }
+                  // The clock, as a deck shows it: where it is, then what's left.
+                  Row {
+                    Layout.alignment: Qt.AlignTop | Qt.AlignRight
+                    Layout.topMargin: 4
+                    visible: !!root.now
+                    spacing: 12
+                    Label {
+                      text: root.clock(root.shownTime)
+                      font.pixelSize: 20; font.bold: true
+                    }
+                    Label {
+                      anchors.baseline: parent.children[0].baseline
+                      visible: root.pos.length > 0
+                      text: "−" + root.clock(root.nowLeft)
+                      font.pixelSize: 20
+                      color: root.teal
+                    }
+                    Label {
+                      anchors.baseline: parent.children[0].baseline
+                      visible: root.pos.length > 0
+                      text: "/ " + root.clock(root.pos.length)
+                      font.pixelSize: Style.font.caption
+                      opacity: 0.5
+                    }
+                  }
                 }
-                // Where it plays, and the clock.
+                // Where it plays, and how the next song comes in (what's next and when,
+                // then how the mix is going), beside its cover.
                 RowLayout {
+                  id: mixRow
                   Layout.fillWidth: true
                   Layout.topMargin: 2
-                  spacing: 12
+                  spacing: 10
+                  readonly property string style: root.mixLive && root.mixInfo.style ? root.mixKind(root.mixInfo.style)
+                                                  : root.mixLive ? (root.nextStyle || "swap") : root.nextStyle
+                  readonly property color tone: style !== "" ? root.mixTone(style) : root.ink
+                  readonly property bool shown: root.mixLive || otherLane.shown
                   Label {
                     Layout.fillWidth: true
                     text: root.now ? (root.whereId === "laptop" ? "󰌢  " + strings.t(root.deck.playing ? "hover.playingOn" : "deck.pausedOn").arg(root.whereName)
@@ -2089,15 +2123,44 @@ Item {
                     on: root.deck.micViz === true
                     onTapped: root.run(["deck", "mic", root.deck.micViz ? "off" : "on"])
                   }
-                  Label {
-                    visible: !!root.now
-                    text: root.clock(root.shownTime)
-                    font.pixelSize: Style.font.caption; font.bold: true
+                  Cover {
+                    visible: mixRow.shown
+                    Layout.preferredWidth: 20; Layout.preferredHeight: 20
+                    size: 20
+                    radius: 4
+                    url: otherLane.d ? (otherLane.d.song.thumb || "") : ""
+                    border.width: 1
+                    border.color: Util.alpha(otherLane.tone, 0.6)
                   }
                   Label {
-                    visible: !!root.now && root.pos.length > 0
-                    text: "−" + root.clock(root.nowLeft) + "  /  " + root.clock(root.pos.length)
-                    font.pixelSize: Style.font.caption; color: root.teal; opacity: 0.85
+                    visible: mixRow.shown
+                    text: mixRow.style !== "" ? root.mixGlyph(mixRow.style) : "󰒭"
+                    font.family: "Iosevka Nerd Font Propo"
+                    color: mixRow.tone
+                    opacity: root.mixLive ? 1 : 0.75
+                    SequentialAnimation on opacity {
+                      running: root.mixLive && root.mixInfo.stage === "cueing" && !Style.reduceMotion
+                      loops: Animation.Infinite
+                      NumberAnimation { to: 0.35; duration: Style.duration(700); easing.type: Easing.InOutSine }
+                      NumberAnimation { to: 1; duration: Style.duration(700); easing.type: Easing.InOutSine }
+                    }
+                  }
+                  Label {
+                    visible: mixRow.shown
+                    Layout.maximumWidth: mixRow.width * 0.55
+                    text: root.mixLive ? root.mixLine : !root.nextSong ? ""
+                          : root.nextMixed ? ((root.deck.mixAt || 0) > 0
+                              ? strings.t("deck.mixPlannedAt").arg(strings.t("deck.mixStyle." + root.nextStyle))
+                                  .arg(root.titleParts(root.nextSong.title).main).arg(root.clock(root.deck.mixAt))
+                              : strings.t("deck.mixPlannedEnd").arg(strings.t("deck.mixStyle." + root.nextStyle))
+                                  .arg(root.titleParts(root.nextSong.title).main))
+                          : strings.t(root.deck.crossfade !== false ? "deck.nextCrossfade" : "deck.nextStraight")
+                              .arg(root.titleParts(root.nextSong.title).main)
+                    font.pixelSize: Style.font.caption
+                    font.letterSpacing: 0.5
+                    color: mixRow.tone
+                    opacity: root.mixLive ? 1 : 0.75
+                    elide: Text.ElideRight
                   }
                 }
                 Label {
@@ -2191,34 +2254,11 @@ Item {
                         }
                       }
                     }
-                    // The seam: how the two songs cross, drawn right under where it
-                    // happens (faint while it's to come).
+                    // A breath between the two decks (the close-up draws the mix there).
                     Item {
                       id: seamStrip
                       Layout.fillWidth: true
-                      implicitHeight: otherLane.shown ? 20 : 0
-                      visible: otherLane.shown
-                      clip: true
-                      Rectangle {
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: parent.width; height: 1
-                        color: Util.alpha(root.ink, 0.06)
-                      }
-                      MixShape {
-                        readonly property var drawn: root.nextStyle !== "" ? ((root.deck.mixShapes || {})[root.nextStyle] || null) : null
-                        readonly property bool live: root.mixTimed && !!root.mixInfo.curves
-                        visible: root.bandSeconds > 0 && (live || !!drawn)
-                        opacity: live ? 1 : 0.5
-                        x: seamStrip.width * root.bandStart / decks.len
-                        width: Math.max(40, seamStrip.width * root.bandSeconds / decks.len)
-                        y: 2; height: seamStrip.height - 4
-                        labels: false
-                        curves: live ? root.mixInfo.curves : drawn
-                        swap: live ? root.mixSwap : drawn ? drawn.swap : -1
-                        playhead: -1
-                        outColor: root.amber; inColor: root.teal; ink: root.ink
-                        Behavior on x { enabled: !parent.live; NumberAnimation { duration: Style.duration(280); easing.type: Easing.OutCubic } }
-                      }
+                      implicitHeight: otherLane.shown ? 8 : 0
                     }
                     // Deck B: the other song. Waiting, its whole waveform, dim; once the
                     // mix is planned it slides onto the same clock, so both playheads
@@ -2294,55 +2334,6 @@ Item {
                     y: seamStrip.y; width: 1; height: seamStrip.height
                     color: root.ink
                     opacity: 0.55 * deckColumn.opacity
-                  }
-                }
-                // The mix in words, beside the other song's cover: between mixes what's
-                // next and when, then how the mix is going.
-                RowLayout {
-                  id: mixRow
-                  Layout.fillWidth: true
-                  Layout.topMargin: 6
-                  Layout.preferredHeight: 26
-                  visible: root.mixLive || otherLane.shown
-                  spacing: 10
-                  readonly property string style: root.mixLive && root.mixInfo.style ? root.mixKind(root.mixInfo.style)
-                                                  : root.mixLive ? (root.nextStyle || "swap") : root.nextStyle
-                  readonly property color tone: style !== "" ? root.mixTone(style) : root.ink
-                  Cover {
-                    Layout.preferredWidth: 24; Layout.preferredHeight: 24
-                    size: 24
-                    radius: 4
-                    url: otherLane.d ? (otherLane.d.song.thumb || "") : ""
-                    border.width: 1
-                    border.color: Util.alpha(otherLane.tone, 0.6)
-                  }
-                  Label {
-                    text: mixRow.style !== "" ? root.mixGlyph(mixRow.style) : "󰒭"
-                    font.family: "Iosevka Nerd Font Propo"
-                    color: mixRow.tone
-                    opacity: root.mixLive ? 1 : 0.75
-                    SequentialAnimation on opacity {
-                      running: root.mixLive && root.mixInfo.stage === "cueing" && !Style.reduceMotion
-                      loops: Animation.Infinite
-                      NumberAnimation { to: 0.35; duration: Style.duration(700); easing.type: Easing.InOutSine }
-                      NumberAnimation { to: 1; duration: Style.duration(700); easing.type: Easing.InOutSine }
-                    }
-                  }
-                  Label {
-                    Layout.fillWidth: true
-                    text: root.mixLive ? root.mixLine : !root.nextSong ? ""
-                          : root.nextMixed ? ((root.deck.mixAt || 0) > 0
-                              ? strings.t("deck.mixPlannedAt").arg(strings.t("deck.mixStyle." + root.nextStyle))
-                                  .arg(root.titleParts(root.nextSong.title).main).arg(root.clock(root.deck.mixAt))
-                              : strings.t("deck.mixPlannedEnd").arg(strings.t("deck.mixStyle." + root.nextStyle))
-                                  .arg(root.titleParts(root.nextSong.title).main))
-                          : strings.t(root.deck.crossfade !== false ? "deck.nextCrossfade" : "deck.nextStraight")
-                              .arg(root.titleParts(root.nextSong.title).main)
-                    font.pixelSize: Style.font.caption
-                    font.letterSpacing: 0.5
-                    color: mixRow.tone
-                    opacity: root.mixLive ? 1 : 0.75
-                    elide: Text.ElideRight
                   }
                 }
                 Flow {
