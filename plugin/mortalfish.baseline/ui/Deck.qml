@@ -2371,6 +2371,7 @@ Item {
                     lenA: root.zoomHeld ? Math.max(1, root.lengthOf(root.zoomHeld.a)) : 1
                     lenB: root.zoomHeld ? Math.max(1, root.lengthOf(root.zoomHeld.b)) : 1
                     outColor: root.amber; inColor: root.teal; ink: root.ink
+                    split: root.deck.mixView === "split"
                     topHeight: progressBox.height; seamHeight: seamStrip.height; bottomHeight: otherLane.height
                   }
                   // The needle: one line through both decks and the seam while they play together.
@@ -2809,6 +2810,23 @@ Item {
                   }
                 }
                 Label { Layout.leftMargin: 14; Layout.fillWidth: true; text: strings.t("deck.mixLengthAbout"); font.pixelSize: Style.font.caption; opacity: 0.5; elide: Text.ElideRight }
+              }
+              // How a mix's close-up shows the two songs: one above the other, or halves of one strip.
+              RowLayout {
+                visible: root.canMix
+                spacing: 0
+                PanelLabel { text: strings.t("deck.mixView") }
+                Segmented {
+                  tone: root.teal; ink: root.ink
+                  dim: !root.mixing
+                  current: root.deck.mixView === "split" ? "split" : "stacked"
+                  model: [{ key: "stacked", label: strings.t("deck.mixViewStacked") }, { key: "split", label: strings.t("deck.mixViewSplit") }]
+                  onPicked: function(key) {
+                    root.deck = Object.assign({}, root.deck, { mixView: key })
+                    root.run(["deck", "mixes", "view", key])
+                  }
+                }
+                Label { Layout.leftMargin: 14; Layout.fillWidth: true; text: strings.t("deck.mixViewAbout"); font.pixelSize: Style.font.caption; opacity: 0.5; elide: Text.ElideRight }
               }
               // Songs that aren't mixed: a crossfade or straight on, on the laptop and in a room.
               RowLayout {
@@ -4257,14 +4275,32 @@ Item {
             }
             Item { implicitHeight: 14; visible: !!root.now }
             Rectangle {
+              id: stageBar
               visible: !!root.now
               Layout.fillWidth: true
               height: 4; radius: 2
               color: Util.alpha(root.ink, 0.12)
+              readonly property real len: Math.max(1, root.pos.length || root.lengthOf(root.now))
+              // Where the mix will run (or runs), as on the Deck's waveform: a band
+              // in its style's colour under the progress, and a tick at the takeover.
+              Rectangle {
+                visible: root.bandSeconds > 0
+                x: parent.width * Math.max(0, Math.min(1, root.bandStart / stageBar.len))
+                width: Math.max(2, parent.width * Math.min(root.bandSeconds + Math.min(0, root.bandStart), stageBar.len - Math.max(0, root.bandStart)) / stageBar.len)
+                height: parent.height; radius: 2
+                color: Util.alpha(root.mixTone(root.mixInfo.style || root.nextStyle), root.mixHeard ? 0.55 : 0.3)
+                Behavior on color { ColorAnimation { duration: Style.duration(400) } }
+              }
               Rectangle {
                 height: parent.height; radius: 2
-                width: parent.width * Math.min(1, root.shownTime / Math.max(1, root.pos.length || root.lengthOf(root.now)))
+                width: parent.width * Math.min(1, root.shownTime / stageBar.len)
                 gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: root.amber } GradientStop { position: 1; color: root.teal } }
+              }
+              Rectangle {
+                visible: root.bandSeconds > 0 && root.bandStart + root.bandSwap > 0
+                x: parent.width * Math.min(1, (root.bandStart + root.bandSwap) / stageBar.len) - 1
+                y: -4; width: 2; height: parent.height + 8; radius: 1
+                color: root.ink; opacity: 0.7
               }
             }
             RowLayout {
@@ -4312,13 +4348,14 @@ Item {
               Behavior on opacity { NumberAnimation { duration: Style.duration(wanted ? 600 : 900); easing.type: Easing.OutCubic } }
               zoom: 1
               span: 32
-              topHeight: 52; seamHeight: 14; bottomHeight: 52
+              topHeight: Math.round(Math.max(48, Math.min(80, stageView.height * 0.065))); seamHeight: 16; bottomHeight: topHeight
               mix: root.zoomHeld ? root.zoomHeld.mix : ({})
               envA: root.zoomHeld ? (root.zoomHeld.a.env || []) : []
               envB: root.zoomHeld ? (root.zoomHeld.b.env || []) : []
               lenA: root.zoomHeld ? Math.max(1, root.lengthOf(root.zoomHeld.a)) : 1
               lenB: root.zoomHeld ? Math.max(1, root.lengthOf(root.zoomHeld.b)) : 1
               outColor: root.amber; inColor: root.teal; ink: root.ink
+              split: root.deck.mixView === "split"
             }
           }
         }

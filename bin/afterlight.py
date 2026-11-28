@@ -4286,7 +4286,7 @@ DECK_DETAILS_LOCK = STATE.parent / "deck-details.lock"
 DECK_UNDO = STATE.parent / "deck-undo.json"           # the set before each of the last changes
 DECK_SETS = STATE.parent / "deck-sets.json"           # sets you saved
 DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kind": "laptop"}, "playing": False,
-              "paused": False, "sleep": None, "crossfade": True, "mixes": True, "mixStyle": None, "mixBars": 0, "mixPicks": {},
+              "paused": False, "sleep": None, "crossfade": True, "mixes": True, "mixStyle": None, "mixBars": 0, "mixView": "stacked", "mixPicks": {},
               "mixNow": None, "mixDeck": None,
               "autodj": False, "autodjAt": 0, "handoff": "",
               "pushed": [], "pushedFrom": 1, "expect": None, "was": None, "updated": 0,
@@ -5354,19 +5354,23 @@ def mix_other(deck):
     return "b" if deck == "a" else "a"
 
 
-def mix_press_play(deck, length=0, wait=30):
+def mix_press_play(deck, length=0, wait=30, why=None):
     """Start the track on a deck's page, silently (it was opened quiet): its
     own Play, the first on the page (the smallest is often a
     recommendation's). The right song is the one as long as the catalogue
     says; another is paused and Play tried again as the page fills in.
-    Returns its player's state, or None."""
+    Returns its player's state, or None (and what went wrong in `why`)."""
     page = lambda op: beatport_bridge({"type": "deck", "deck": deck, "op": op}, timeout=5) or {}
+    note = why if why is not None else {}
+    note.update({"buttons": 0, "presses": 0, "wrong": []})
     deadline = time.time() + wait
     while time.time() < deadline:
         items = page({"type": "probe", "region": "page", "filter": "^play-button$"}).get("items", [])
         if not items:
             time.sleep(0.5)
             continue
+        note["buttons"] = len(items)
+        note["presses"] += 1
         page({"type": "click", "testid": "^play-button$", "region": "page", "first": True})
         for _ in range(16):
             time.sleep(0.5)
@@ -5375,6 +5379,7 @@ def mix_press_play(deck, length=0, wait=30):
             if media:
                 if not length or not media.get("duration") or abs(media["duration"] - length) <= MIX_LENGTH_SLACK:
                     return media
+                note["wrong"] = (note["wrong"] + [round(media["duration"])])[-4:]
                 mix_op(deck, {"type": "pause"})      # a recommendation started: try the track's own again
                 time.sleep(1)
                 break
@@ -5430,9 +5435,15 @@ def deck_mix_cue(a, b, live, idle, url_b, say, route=None, wanted=lambda: True, 
     if not loaded.get("ok"):
         say("couldn't load deck", idle, loaded)
         return None
-    media = mix_press_play(idle, b.get("length") or 0)
+    why = {}
+    media = mix_press_play(idle, b.get("length") or 0, why=why)
+    if not media and wanted():
+        # Once more from a fresh page: a page that loaded half-way never shows its Play.
+        say("couldn't start the song on deck, loading it again", idle, why)
+        loaded = beatport_bridge({"type": "deck", "deck": idle, "url": url_b + "#baseline-quiet"}, timeout=40) or {}
+        media = mix_press_play(idle, b.get("length") or 0, why=why) if loaded.get("ok") else None
     if not media:
-        say("couldn't start the song on deck", idle)
+        say("couldn't start the song on deck", idle, why)
         return None
     mix_op(idle, {"type": "cue", "time": 0, "rate": 1}, timeout=10)
     mix_op(idle, {"type": "play"})
@@ -5553,12 +5564,14 @@ def deck_mix_preview(deck):
 
 
 def deck_mix_set(d, args):
-    """deck mixes style <style|auto>, bars <0|8|16|32>, pick <uid> <style|auto>."""
+    """deck mixes style <style|auto>, bars <0|8|16|32>, view <stacked|split>, pick <uid> <style|auto>."""
     if args[:1] == ["style"] and len(args) == 2 and args[1] in MIX_STYLES + ("auto",):
         d["mixStyle"] = None if args[1] == "auto" else args[1]
         d["mixes"] = True
     elif args[:1] == ["bars"] and len(args) == 2 and args[1].isdigit() and int(args[1]) in MIX_LENGTHS:
         d["mixBars"] = int(args[1])
+    elif args[:1] == ["view"] and len(args) == 2 and args[1] in ("stacked", "split"):
+        d["mixView"] = args[1]
     elif args[:1] == ["pick"] and len(args) == 3 and args[2] in MIX_STYLES + ("auto",):
         picks = {u: v for u, v in (d.get("mixPicks") or {}).items()
                  if any(x["uid"] == u for x in d["set"])}          # only songs still to come
@@ -5647,11 +5660,14 @@ def deck_mix_pause(d):
 MIX_SYNC_BINS = 96
 
 
-def mix_gap(env_a, env_b, beat):
+def mix_gap(env_a, env_b, beat, within=None):
     """How far song b's beats fall after song a's (seconds, either way, up to
     half a beat) from both decks' kick-onset envelopes over the same moments
     (on the shared clock), and how sure: each folded onto the beat, then the
-    shift that lines the two up best. (0, 0) when either is empty."""
+    shift that lines the two up best. (0, 0) when either is empty. With
+    `within` (seconds), only shifts that small are looked at, and only a real
+    peak among them counts: once two songs are in time, a rolling off-beat
+    bassline can line up better half a beat away than the kicks do."""
     def fold(env):
         bins = [0.0] * MIX_SYNC_BINS
         for i, v in enumerate(env.get("rise") or []):
@@ -5666,7 +5682,14 @@ def mix_gap(env_a, env_b, beat):
         return 0.0, 0.0
     n = MIX_SYNC_BINS
     score = [sum(fa[k] * fb[(k + lag) % n] for k in range(n)) for lag in range(n)]
-    best = max(range(n), key=lambda lag: score[lag])
+    if within is not None:
+        reach = max(1, int(within / beat * n))
+        near = [lag % n for lag in range(-reach, reach + 1)]
+        best = max(near, key=lambda lag: score[lag])
+        if best in (near[0], near[-1]):
+            return 0.0, 0.0        # still climbing at the edge: no peak this close
+    else:
+        best = max(range(n), key=lambda lag: score[lag])
     left, mid, right = score[best - 1], score[best], score[(best + 1) % n]
     bend = 0.5 * (left - right) / (left - 2 * mid + right) if left - 2 * mid + right else 0
     lag = (best + max(-0.5, min(0.5, bend))) % n
@@ -5711,7 +5734,7 @@ def mix_resync(plan, old):
     first = gap if nudge else 0.0
     # Then again every 8 bars while both are heard, and if the beats keep
     # drifting the same way, the tempo was a touch off: put it right too.
-    rate, last = plan["rate"], (time.time() if sure >= MIX_SYNC_SURE else None)
+    rate, last, drift = plan["rate"], None, 0.0
     every = 8 * 4 * plan["beat"]
     end = plan["endMs"] / 1000 - MIX_SYNC_LISTEN / 2 - 2
     while time.time() + every / 2 + seconds < end:
@@ -5722,23 +5745,24 @@ def mix_resync(plan, old):
             t.start()
         for t in threads:
             t.join()
-        gap, sure = mix_gap(heard.get(old), heard.get(new), plan["beat"])
-        # Once in time, the beats can only drift a little in 8 bars: a big gap
-        # is the listening fooled (often by the old song's off-beat hats once
-        # its kick has gone), never a reason to jump.
+        gap, sure = mix_gap(heard.get(old), heard.get(new), plan["beat"], within=MIX_SYNC_DRIFT)
+        # Once in time, the beats can only drift a little in 8 bars, so only a
+        # small shift is looked for (a rolling off-beat bassline lines up best
+        # half a beat away), and a big one is never a reason to jump.
         if sure < MIX_SYNC_SURE or abs(gap) > MIX_SYNC_DRIFT:
             mix_log("sync again", {"gap ms": round(gap * 1000), "sure": round(sure, 2), "nudged": False})
-            last = None
+            last, drift = None, 0.0
             continue
         op = {"type": "shift", "seconds": round(gap * rate, 4)}
-        if last and abs(gap) >= MIX_SYNC_SMALL:
-            # b fell behind by gap over that time: it plays that much too slowly.
+        if last and abs(gap) >= MIX_SYNC_SMALL and drift * gap > 0:
+            # b fell behind by gap over that time, and did last time too: it plays
+            # that much too slowly (one reading alone may just be the listening).
             # Only ever a hair: a tempo heard right is out by well under 1%.
             rate = round(max(rate * (1 - MIX_SYNC_BEND), min(rate * (1 + MIX_SYNC_BEND), rate * (1 + gap / (time.time() - last)))), 5)
             op["rate"] = rate
         if abs(gap) >= MIX_SYNC_SMALL:
             mix_op(new, op)
-        last = time.time()
+        last, drift = time.time(), (gap if abs(gap) >= MIX_SYNC_SMALL else 0.0)
         mix_log("sync again", {"gap ms": round(gap * 1000), "sure": round(sure, 2), "rate": rate})
     return first
 
@@ -8750,7 +8774,7 @@ def deck_command(settings, args):
         print("Mixing into", deck_read()["set"][0]["title"], "at the next phrase.")
     elif action == "mixes" and len(args) >= 3:
         if not deck_update(lambda d: deck_mix_set(d, args[1:])):
-            sys.exit("deck mixes style <" + "|".join(MIX_STYLES) + "|auto> · bars <0|8|16|32> · pick <uid> <style|auto>")
+            sys.exit("deck mixes style <" + "|".join(MIX_STYLES) + "|auto> · bars <0|8|16|32> · view <stacked|split> · pick <uid> <style|auto>")
     elif action == "crossfade" and len(args) == 2 and args[1] in {"on", "off"}:
         deck_update(lambda d: deck_crossfade(d, args[1] == "on"))
     elif action == "sleep" and len(args) == 2:

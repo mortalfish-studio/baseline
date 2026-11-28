@@ -1965,6 +1965,24 @@ class MixTests(TempCase):
         self.assertEqual({p["land"] for p in picks}, {61.4, None})
         self.assertEqual(al.mix_points({}, "x"), {"out": None, "land": None})
 
+    def test_mix_gap_near_finds_the_kicks_past_an_offbeat_bassline(self):
+        beat, dt = 0.48, 5.0
+        def env(kick_at, kick, bass):
+            rise = [0] * 2000
+            for b in range(int(2000 * dt / 1000 / beat)):
+                for at, v in ((kick_at, kick), (kick_at + beat / 2, bass)):
+                    i = int(round((b * beat + at) * 1000 / dt))
+                    if 0 <= i < 2000:
+                        rise[i] = v
+            return {"t0": 0.0, "dt": dt, "rise": rise}
+        a = env(0.0, 300, 999)                  # the old song: its off-beat bass louder than its kick
+        b = env(0.02, 999, 100)                 # the new one 20 ms late, kick first
+        far, _ = al.mix_gap(a, b, beat)
+        self.assertGreater(abs(far), 0.15)                                     # anywhere: fooled by the bass
+        near, sure = al.mix_gap(a, b, beat, within=al.MIX_SYNC_DRIFT)
+        self.assertAlmostEqual(near, 0.02, delta=0.006)                        # near zero: the kicks
+        self.assertGreater(sure, 1)
+
     def test_resync_ignores_a_big_jump_and_bends_tempo_only_a_hair(self):
         clock = [1000.0]
         gaps = iter([(0.004, 2.0), (-0.205, 1.9), (0.02, 1.6), (0.03, 1.6)])   # start, then each 8 bars
@@ -1974,7 +1992,7 @@ class MixTests(TempCase):
         with mock.patch.object(al.time, "time", lambda: clock[0]), \
              mock.patch.object(al.time, "sleep", lambda t: clock.__setitem__(0, clock[0] + t)), \
              mock.patch.object(al, "mix_op", lambda deck, op, **k: sent.append((deck, op)) or {}), \
-             mock.patch.object(al, "mix_gap", lambda a, b, beat: next(gaps, (0.0, 0.0))), \
+             mock.patch.object(al, "mix_gap", lambda a, b, beat, within=None: next(gaps, (0.0, 0.0))), \
              mock.patch.object(al, "mix_log", lambda *a: None):
             al.mix_resync(plan, "a")
         shifts = [op for deck, op in sent if op.get("type") == "shift"]

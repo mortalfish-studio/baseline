@@ -71,7 +71,7 @@ Item {
       const s = bloom.spread()
       // From a corner card's worth until even its soft edge (the outer 40%) is past the far corner,
       // slow at first, so the old cover has gone only by the last bar or two.
-      disc.reach = bloom.size * (bloom.from + (2.45 - bloom.from) * Math.pow(s, 1.6))
+      disc.reach = bloom.size * (bloom.from + (2.45 - bloom.from) * s * s)
       // The picture: from the corner card's size, stretching out to the full square
       // a little ahead of the circle, so it has settled by the time it covers.
       const g = Math.min(1, s * 1.35)

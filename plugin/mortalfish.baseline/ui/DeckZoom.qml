@@ -29,6 +29,11 @@ Canvas {
   property real topHeight: 36
   property real seamHeight: 20
   property real bottomHeight: 30
+  // "split": the two songs share one strip, cut in half along the seam: the old
+  // song growing up from it, the new one hanging down, each with its bass as the
+  // solid inner band and its melody as the lighter outer one. At the end the new
+  // song turns over into the top half.
+  property bool split: false
 
   renderStrategy: Canvas.Cooperative
   FrameAnimation { running: view.visible && view.opacity > 0.01; onTriggered: view.requestPaint() }
@@ -84,6 +89,34 @@ Canvas {
     const songA = a => ({ t: a, v: a - from, on: a - from <= seconds, deck: "a", env: view.envA, len: view.lenA })
     const songB = a => { const v = a - from; return { t: entry + (v - enter) * rate, v: v, on: v >= enter, deck: "b", env: view.envB, len: view.lenB } }
 
+    // Split: one song as a mirror-half from the middle line, `dir` -1 up, +1 down
+    // (in between as it turns over): bass inside, melody outside.
+    const H = view.topHeight + view.seamHeight + view.bottomHeight, mid0 = H / 2, reach0 = H / 2 - 1
+    const half = (color, env, len, deck, at, dir) => {
+      const inner = [], outer = []
+      for (let x = 0; x <= W + 3; x += 3) {
+        const s = at(a0 + x / W * across)
+        const e = s.on ? loud(env, len, s.t) : 0
+        const b = e * level(deck, "bass", s.v) * 0.5, t = e * level(deck, "top", s.v) * 0.5
+        inner.push([x, mid0 + dir * Math.max(0.3, b * reach0)])
+        outer.push([x, mid0 + dir * Math.max(0.6, (b + t) * reach0)])
+      }
+      const band = (edge, base) => {
+        g.beginPath()
+        g.moveTo(edge[0][0], edge[0][1])
+        for (let i = 1; i < edge.length; i += 1) g.lineTo(edge[i][0], edge[i][1])
+        for (let i = base.length - 1; i >= 0; i -= 1) g.lineTo(base[i][0], base[i][1])
+        g.closePath()
+      }
+      const flat = inner.map(p => [p[0], mid0])
+      for (const [x0, w, lit] of [[0, Math.max(0, needle), true], [needle, W - needle, false]]) {
+        g.save()
+        g.beginPath(); g.rect(x0, 0, w, H); g.clip()
+        band(outer, inner); g.fillStyle = rgba(color, lit ? 0.55 : 0.18); g.fill()
+        band(inner, flat); g.fillStyle = rgba(color, lit ? 0.95 : 0.32); g.fill()
+        g.restore()
+      }
+    }
     const ribbon = (row, color, env, len, deck, at) => {
       const mid = row.y + row.h / 2, half = row.h / 2 - 1
       const top = [], bottom = []
@@ -137,7 +170,7 @@ Canvas {
 
     // The seam: the mix as a bar from the old song's colour to the new one's,
     // with a tick at the takeover.
-    const seamY = view.topHeight + view.seamHeight / 2
+    const seamY = view.split ? mid0 : view.topHeight + view.seamHeight / 2
     const mx0 = xOf(from), mx1 = xOf(from + seconds)
     g.fillStyle = rgba(view.ink, 0.06)
     g.fillRect(0, seamY - 0.5, W, 1)
@@ -152,6 +185,38 @@ Canvas {
       g.fillRect(sx - 1, seamY - 3, 2, 6)
     }
 
+    if (view.split) {
+      // The two halves, and between them the middle line; then the beats and the needle.
+      const colorB = Qt.rgba(lerp(view.inColor.r, view.outColor.r, swapT), lerp(view.inColor.g, view.outColor.g, swapT),
+                             lerp(view.inColor.b, view.outColor.b, swapT), 1)
+      g.globalAlpha = 1 - gone
+      half(view.outColor, view.envA, view.lenA, "a", songA, -1)
+      g.globalAlpha = 1
+      half(colorB, view.envB, view.lenB, "b", songB, lerp(1, -1, swapT))
+      g.fillStyle = rgba(view.ink, 0.12)
+      g.fillRect(0, mid0 - 0.5, W, 1)
+      const grids = m.grids || {}
+      const fade = Math.min(1, Math.max(0, (view.zoom - 0.4) / 0.4))
+      const ticks = (grid, toWindow, fromWindow, dir, color, alpha) => {
+        if (!grid || !(grid[1] > 0) || fade <= 0) return
+        const [first, period] = grid
+        const t0 = fromWindow(a0), t1 = fromWindow(a0 + across)
+        for (let k = Math.ceil((Math.min(t0, t1) - first) / period); first + k * period <= Math.max(t0, t1); k += 1) {
+          const x = xOf(toWindow(first + k * period))
+          const bar = ((k % 4) + 4) % 4 === 0
+          g.fillStyle = rgba(bar ? view.ink : color, (bar ? 0.5 : 0.22) * fade * alpha)
+          const len = bar ? 7 : 4
+          g.fillRect(x - 0.5, dir < 0 ? mid0 - len : mid0, 1, len)
+        }
+      }
+      ticks(grids.a, t => t, a => a, -1, view.outColor, 1 - gone)
+      ticks(grids.b, t => from + enter + (t - entry) / rate, a => entry + (a - from - enter) * rate, swapT > 0.5 ? -1 : 1, colorB, Math.abs(1 - 2 * swapT))
+      g.fillStyle = rgba(view.ink, 0.08)
+      g.fillRect(needle - 3, 0, 6, height)
+      g.fillStyle = rgba(view.ink, 0.9)
+      g.fillRect(needle - 0.75, 0, 1.5, height)
+      return
+    }
     g.globalAlpha = 1 - gone
     ribbon(rowA, view.outColor, view.envA, view.lenA, "a", songA)
     g.globalAlpha = 1
