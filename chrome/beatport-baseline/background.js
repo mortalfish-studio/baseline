@@ -377,6 +377,28 @@ async function scratchTab(url) {
 let deckBId = null;
 let mixingUntil = 0;           // while a mix runs, two songs may play at once
 
+// Beatport hides a track page's own Play in its narrow layout (a window
+// under about 1100 pixels wide, as when it's tiled beside others), so the
+// Deck's window is zoomed out, that tab alone, until the page is wide.
+const WIDE = 1100;
+async function keepWide(tab) {
+  try {
+    const win = await chrome.windows.get(tab.windowId);
+    const want = win.width && win.width < WIDE ? Math.max(0.5, Math.floor(win.width / WIDE * 100) / 100) : 1;
+    if (Math.abs((await chrome.tabs.getZoom(tab.id)) - want) < 0.01) return;
+    await chrome.tabs.setZoomSettings(tab.id, { scope: "per-tab" });
+    await chrome.tabs.setZoom(tab.id, want);
+    log(`beatport window ${win.width} wide: zoom ${want}`);
+  } catch (error) { log("zoom: " + String(error).slice(0, 120)); }
+}
+
+// Zoom resets as a tab loads a page, so it's put back each time the Beatport
+// app window finishes loading one.
+chrome.tabs.onUpdated.addListener((id, info, tab) => {
+  if (info.status !== "complete" || !/^https:\/\/www\.beatport\.com\//.test(tab.url || "")) return;
+  chrome.windows.get(tab.windowId).then((win) => { if (win.type === "app") keepWide(tab); }).catch(() => {});
+});
+
 async function deckTab(which, url) {
   let tab = null;
   if (which === "a") {
@@ -385,6 +407,7 @@ async function deckTab(which, url) {
       const win = await chrome.windows.get(t.windowId).catch(() => null);
       if (win && win.type === "app") { tab = t; break; }
     }
+    if (tab) await keepWide(tab);
     if (tab && url) tab = await chrome.tabs.update(tab.id, { url });
   } else {
     if (deckBId !== null) tab = await chrome.tabs.get(deckBId).catch(() => null);
@@ -495,6 +518,7 @@ async function handle(message) {
     if (typeof message.url !== "string" || !(BEATPORT.test(message.url) || YTMUSIC.test(message.url))) return { ok: false };
     const tab = YTMUSIC.test(message.url) ? await ytmusicTab() : await beatportTab();
     if (!tab) return { inPlace: false };
+    if (!YTMUSIC.test(message.url)) await keepWide(tab);
     const url = message.url.split("#")[0] + (message.play ? "#baseline-play" : "");
     await chrome.tabs.update(tab.id, { url });
     return { inPlace: true };

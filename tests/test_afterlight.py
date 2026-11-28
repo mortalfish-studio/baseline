@@ -1921,6 +1921,64 @@ class MixTests(TempCase):
         # Too late for "now" to be any sooner: the usual place.
         self.assertEqual(al.mix_plan(a, b, 360, 0.1, 0.0, 0.48, 0.48, soonest=355)["start"], late["start"])
 
+    def test_mix_takes_over_on_the_outro_and_lands_the_drop(self):
+        bar, eight = 4 * 0.48, 8 * 4 * 0.48
+        a = {"bpm": 125, "key": "8A", "length": 400, "out": 368.6, "title": "A (Extended Mix)"}
+        b = {"bpm": 125, "key": "8A", "length": 360, "land": 61.4, "title": "B (Extended Mix)"}
+        plan = al.mix_plan(a, b, 400, 0.1, 0.05, 0.48, 0.48, style="beat", notbefore=260)
+        takeover = plan["start"] + plan["swap"]
+        self.assertAlmostEqual((takeover - 0.1) / eight % 1, 0, places=6)          # on a phrase
+        self.assertLess(abs(takeover - 368.6), eight / 2 + 0.01)                  # where the outro begins
+        # The new song comes in by whole phrases, so its lift lands on the takeover.
+        self.assertAlmostEqual((plan["entry"] - 0.05) / eight % 1, 0, places=6)
+        self.assertLess(abs(plan["entry"] + plan["swap"] - 61.4), eight / 2 + 0.01)
+        # An outro too soon to reach (or no shape known): the usual place, from the first beat.
+        self.assertLess(plan["bars"], 32)                     # a long mix wouldn't fit in the outro: shorter
+        late = al.mix_plan({**a, "out": None}, {**b, "land": None}, 400, 0.1, 0.05, 0.48, 0.48, style="beat", bars=16)
+        self.assertEqual(al.mix_plan(a, b, 400, 0.1, 0.05, 0.48, 0.48, style="beat", bars=16, notbefore=380)["start"],
+                         late["start"])
+        # Asked for 32 bars: kept, at the usual place.
+        self.assertEqual(al.mix_plan(a, b, 400, 0.1, 0.05, 0.48, 0.48, style="beat", bars=32, notbefore=260)["bars"], 32)
+        self.assertEqual(late["entry"], 0.05)
+
+    def test_song_shape_finds_the_outro_and_the_lift(self):
+        # 125 bpm: 8 bars are 15.36 s. A quiet intro, a lift at 30.7 s, a full
+        # body, a breakdown, then a thinner outro from 307 s.
+        length, cols = 360, 1440
+        def height(t):
+            return 0.3 if t < 30.72 else 0.35 if 245.76 <= t < 261.12 else 0.5 if t >= 307.2 else 0.7
+        heights = [height(i / cols * length) for i in range(cols)]
+        shape = al.song_shape(heights, length, 125)
+        self.assertAlmostEqual(shape["outro"], 307.2, places=1)
+        self.assertAlmostEqual(shape["lift"], 30.7, places=1)
+        self.assertEqual(shape["turns"], [245.8])                                  # the breakdown
+        self.assertEqual(al.song_shape([0.6] * cols, length, 125), {"outro": None, "lift": None, "turns": []})
+        self.assertEqual(al.song_shape(None, length, 125), {"outro": None, "lift": None, "turns": []})
+
+    def test_mix_points_vary_but_hold_for_a_song(self):
+        shape = {"outro": 368.6, "lift": 61.4, "turns": [250.0, 300.0]}
+        picks = [al.mix_points(shape, f"song{i}") for i in range(60)]
+        self.assertEqual(al.mix_points(shape, "song7"), picks[7])                 # the same each time it's asked
+        outs = {p["out"] for p in picks}
+        self.assertTrue({368.6, 250.0, 300.0, None} <= outs)                         # every kind of place comes up
+        self.assertGreater(sum(p["out"] == 368.6 for p in picks), 15)               # the outro most
+        self.assertEqual({p["land"] for p in picks}, {61.4, None})
+        self.assertEqual(al.mix_points({}, "x"), {"out": None, "land": None})
+
+    def test_png_heights_reads_a_waveform(self):
+        import struct, zlib
+        w, h = 16, 8
+        rows = b"".join(b"\x00" + bytes((255 if y >= h - (x % 8) - 1 else 0) for x in range(w)) for y in range(h))
+        def chunk(kind, body):
+            return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+        png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0)) \
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+        heights = al.png_heights(png)
+        self.assertEqual(len(heights), w)
+        self.assertEqual(heights[0], 1 / 8)
+        self.assertEqual(heights[7], 1.0)
+        self.assertIsNone(al.png_heights(b"not a png"))
+
     def test_mix_evens_out_levels_gently(self):
         self.assertEqual(al.mix_trim(-12, -12), 1.0)
         self.assertAlmostEqual(al.mix_trim(-12, -24), 10 ** (3 / 20), places=3)        # capped at 3 dB
@@ -1935,6 +1993,19 @@ class MixTests(TempCase):
         self.assertGreater(max(v for _, v in a["echo"]), 0.5)
         a, _, _ = al.mix_lanes("filter", 30.72, 0.48)
         self.assertGreater(max(v for _, v in a["hpq"]), 2)
+
+    def test_baseline_room_follows_the_deck(self):
+        saved = []
+        with mock.patch.object(al, "save", lambda s: saved.append(True)), \
+             mock.patch.object(al, "SONOS_TARGET", self.tmp / "sonos-target"):
+            al.deck_update(lambda d: d.update(where={"kind": "laptop"}))
+            settings = {"sonos": {"on": True, "room": "RINCON_X"}}
+            self.assertTrue(al.where_in_step(settings))
+            self.assertFalse(settings["sonos"]["on"])
+            al.deck_update(lambda d: d.update(where={"kind": "sonos", "room": "RINCON_Y"}))
+            self.assertTrue(al.where_in_step(settings))
+            self.assertEqual((settings["sonos"]["on"], settings["sonos"]["room"]), (True, "RINCON_Y"))
+            self.assertFalse(al.where_in_step(settings))          # in step: nothing to do
 
     def test_mix_ready_needs_two_beatport_songs_playing(self):
         bp = {"uid": "a", "service": "beatport"}

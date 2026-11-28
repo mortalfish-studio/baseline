@@ -855,5 +855,9 @@
   "deck.mixLengthAbout": "Auto: 32 bars between two extended mixes, otherwise 16. A cut is always 4.",
   "deck.mixSoft": "Soft fades",
   "deck.mixHard": "Hard cuts",
-  "deck.mixCrossfade": "Sonos crossfade"
+  "deck.mixCrossfade": "Sonos crossfade",
+  "deck.mixPlannedAt": "%1 into %2 at %3",
+  "deck.mixPlannedEnd": "%1 into %2 near the end",
+  "deck.nextCrossfade": "Crossfades into %1",
+  "deck.nextStraight": "Then %1"
 }

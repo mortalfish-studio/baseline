@@ -43,6 +43,7 @@ import fcntl
 import hashlib
 import json
 import math
+import struct
 import os
 import random
 import re
@@ -52,6 +53,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import zlib
 from pathlib import Path
 
 HOME = Path.home()
@@ -2334,8 +2336,24 @@ def sonos_now(room):
             "canSkip": not track["title"] in {"TV", "Line-in"}}
 
 
+def where_in_step(settings):
+    """Baseline's room (the Player tab, the volume keys) and the Deck's are
+    one choice; each move sets both. Should they ever differ (the Deck's
+    state written some other way), Baseline follows the Deck, which is
+    where the music actually plays."""
+    where = deck_read().get("where") or {}
+    deck_room = where.get("room", "") if where.get("kind") == "sonos" else ""
+    sonos = settings.get("sonos") or {}
+    base_room = sonos.get("room", "") if sonos.get("on") else ""
+    if deck_room != base_room:
+        sonos_remember(settings, deck_room)
+        return True
+    return False
+
+
 def sonos_state(settings):
     """For the Player tab: rooms, which one is picked, and what it's doing."""
+    where_in_step(settings)
     rooms = sonos_rooms()
     picked = sonos_room(settings, rooms)
     on = bool((settings.get("sonos") or {}).get("on")) and picked is not None
@@ -5052,7 +5070,125 @@ def mix_lanes(style, seconds, beat):
     return a, b, s
 
 
-def mix_plan(a, b, length_a, offset_a, offset_b, beat_a=None, beat_b=None, style=None, bars=0, soonest=None):
+def png_heights(data):
+    """A waveform picture (a PNG, as Beatport draws one per track): per
+    column, how much of its height is drawn, 0-1. None if it isn't a PNG
+    this reads (8-bit or less, not interlaced)."""
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    pos, idat, trns, head = 8, b"", b"", None
+    while pos + 8 <= len(data):
+        n, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + n]
+        pos += 12 + n
+        if kind == b"IHDR":
+            head = struct.unpack(">IIBBBBB", body)
+        elif kind == b"IDAT":
+            idat += body
+        elif kind == b"tRNS":
+            trns = body
+    if not head:
+        return None
+    w, h, depth, ct, _, _, interlace = head
+    chans = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ct)
+    if not chans or depth > 8 or interlace or not 0 < w <= 4000 or not 0 < h <= 1000:
+        return None
+    try:
+        raw = zlib.decompress(idat)
+    except zlib.error:
+        return None
+    stride, bpp = (w * depth * chans + 7) // 8, max(1, depth * chans // 8)
+    if len(raw) < h * (stride + 1):
+        return None
+    def drawn(line, x):
+        if ct in (0, 3):
+            v = (line[x * depth // 8] >> (8 - depth - (x * depth) % 8)) & ((1 << depth) - 1)
+            return (trns[v] if v < len(trns) else 255) > 127 if ct == 3 else v > 0
+        return line[(x + 1) * chans - 1] > 127 if ct in (4, 6) else any(line[x * 3:x * 3 + 3])
+    counts, prev = [0] * w, bytearray(stride)
+    for y in range(h):
+        p = y * (stride + 1)
+        f, line = raw[p], bytearray(raw[p + 1:p + 1 + stride])
+        for i in range(stride):
+            a, b, c = (line[i - bpp] if i >= bpp else 0), prev[i], (prev[i - bpp] if i >= bpp else 0)
+            if f == 1:
+                line[i] = (line[i] + a) & 255
+            elif f == 2:
+                line[i] = (line[i] + b) & 255
+            elif f == 3:
+                line[i] = (line[i] + (a + b) // 2) & 255
+            elif f == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        for x in range(w):
+            counts[x] += drawn(line, x)
+        prev = line
+    return [c / h for c in counts]
+
+
+def song_shape(heights, length, bpm):
+    """Where a dance song's sections turn, from its waveform: "outro", when
+    the body ends and the drawn-out ending a DJ mixes over begins, and
+    "lift", the first lift after the intro (its drop), and "turns", the
+    breakdowns in its last stretch (more places a DJ could mix out). Seconds
+    into the song, on 8-bar blocks from its start (the mix snaps them to
+    the beats it hears), or None (empty) where there's no clear one."""
+    nothing = {"outro": None, "lift": None, "turns": []}
+    if not heights or not length or not bpm or length < 120:
+        return nothing
+    block = 8 * 4 * 60 / bpm
+    def level(t0, t1):
+        a, b = int(max(0, t0) / length * len(heights)), int(min(length, t1) / length * len(heights))
+        return sum(heights[a:b]) / (b - a) if b > a else 0
+    edges = [i * block for i in range(1, int(length // block) + 1)]
+    blocks = sorted(level(t - block, t) for t in edges)
+    body = blocks[len(blocks) * 3 // 4] if blocks else 0           # how full the song is when it's going
+    if body <= 0:
+        return nothing
+    outro = None
+    for t in reversed(edges):
+        if t < length * 0.6 or length - t < block:
+            continue
+        two = (level(t - 2 * block, t - block), level(t - block, t))
+        after = level(t, length - 4)
+        if after <= 0.85 * sum(two) / 2 and min(two) >= 0.8 * body:     # full right up to it, thinner after
+            outro = round(t, 1)
+            break
+    turns = []
+    for t in edges:
+        if t < length * 0.6 or t >= (outro or length - block):     # a song is played well over half way
+            continue
+        two = (level(t - 2 * block, t - block), level(t - block, t))
+        if level(t, t + block) <= 0.8 * sum(two) / 2 and min(two) >= 0.8 * body:
+            turns.append(round(t, 1))
+    lift = None
+    for t in edges:
+        if t > length * 0.4:
+            break
+        before, after = level(t - block, t), level(t, t + block)
+        if after >= 1.2 * before and after >= 0.8 * body:
+            lift = round(t, 1)
+            break
+    return {"outro": outro, "lift": lift, "turns": turns}
+
+
+def mix_points(details, uid):
+    """Where this play of a song mixes, picked from its shape so mixes
+    don't all fall the same way, the same each time it's asked (seeded by
+    the song's place in the set): "out", where the next song takes over
+    (mostly its outro, sometimes a breakdown, sometimes just near the end:
+    None), and "land", where in it the takeover lands when it comes in
+    (its lift, so the drop hits there; or None, its whole intro)."""
+    pick = random.Random(f"{uid}:mix")
+    outs = ([(details["outro"], 5)] if details.get("outro") else []) \
+        + [(t, 1.5) for t in (details.get("turns") or [])[-3:]] + [(None, 2)]
+    out = pick.choices([o for o, _ in outs], weights=[w for _, w in outs])[0]
+    land = details.get("lift") if details.get("lift") and pick.random() < 0.6 else None
+    return {"out": out, "land": land}
+
+
+def mix_plan(a, b, length_a, offset_a, offset_b, beat_a=None, beat_b=None, style=None, bars=0, soonest=None,
+             notbefore=None):
     """How song a goes into song b: the style, how many bars, where in a it
     starts (on a phrase), where b comes in (its first beat), b's tempo
     (a's, keylocked), how long it lasts, when b takes over, and the lanes
@@ -5060,30 +5196,62 @@ def mix_plan(a, b, length_a, offset_a, offset_b, beat_a=None, beat_b=None, style
     catalogue's tempo is only the fallback, as it's often rounded. style
     and bars force them (else they suit the songs). None when a is too
     short to mix out of. soonest (seconds into a) asks for the first 8-bar
-    phrase from then instead of the last one before the end: Mix now."""
+    phrase from then instead of the last one before the end: Mix now.
+
+    Otherwise it mixes like a DJ when the songs' shapes are known
+    (mix_points): the new song takes over at a["out"], the point picked in
+    the old one (its outro, or a breakdown), on the phrase, shortening the
+    mix if a long one wouldn't fit; and with b["land"] it comes in far
+    enough into its intro that its lift lands right there too. notbefore
+    (seconds into a) is the earliest the mix can start."""
     beat_a = beat_a or 60 / (a.get("bpm") or b.get("bpm") or 120)
     beat_b = beat_b or 60 / (b.get("bpm") or 60 / beat_a)
     style = style if style in MIX_STYLES else mix_style({**a, "bpm": 60 / beat_a}, {**b, "bpm": 60 / beat_b})
     beat = beat_a
     bar = 4 * beat
-    bars = mix_bars(a, b, style, bars)
-    seconds = bars * bar
-    phrase = 16 * bar
-    last = length_a - MIX_TAIL - seconds
-    if last < phrase:
-        return None
-    start = offset_a + int((last - offset_a) // phrase) * phrase
-    if soonest is not None:
-        eight = 8 * bar
-        early = offset_a + math.ceil((soonest - offset_a) / eight) * eight
-        start = early if early <= last else start
+    phrase, eight = 16 * bar, 8 * bar
     rate = round(beat_b / beat_a, 5) if style != "cut" else 1.0
-    lanes_a, lanes_b, swap = mix_lanes(style, seconds, beat)
-    return {"style": style, "bars": bars, "start": round(start, 3), "entry": round(offset_b, 3), "rate": rate,
+    def fit(n):
+        """A mix of n bars: (n, seconds, lanes a, lanes b, swap, the usual
+        start: the last phrase it fits before the end, the latest start)."""
+        seconds = n * bar
+        last = length_a - MIX_TAIL - seconds
+        if last < phrase:
+            return None
+        lanes_a, lanes_b, swap = mix_lanes(style, seconds, beat)
+        return [n, seconds, lanes_a, lanes_b, swap, offset_a + int((last - offset_a) // phrase) * phrase, last]
+    first = mix_bars(a, b, style, bars)
+    picked = fit(first)
+    if not picked:
+        return None
+    if soonest is not None:
+        early = offset_a + math.ceil((soonest - offset_a) / eight) * eight
+        picked[5] = early if early <= picked[6] else picked[5]
+    elif a.get("out"):
+        # The takeover on the point picked in the old song, on its phrase;
+        # a shorter mix if a long one would run past the end from there
+        # (unless the length was asked for).
+        for n in [first] + ([m for m in (16, 8) if m < first] if bars not in MIX_LENGTHS[1:] else []):
+            option = fit(n)
+            if not option:
+                continue
+            shaped = offset_a + round((a["out"] - offset_a) / eight) * eight - option[4]
+            if length_a * 0.4 <= shaped <= option[6] and (notbefore is None or shaped >= notbefore):
+                picked = option[:5] + [shaped, option[6]]
+                break
+    bars, seconds, lanes_a, lanes_b, swap, start, _ = picked
+    enter = seconds if style == "cut" else 0
+    entry = offset_b
+    if soonest is None and b.get("land") and start + swap < length_a:
+        # The new song's lift on the takeover: into its intro by whole phrases.
+        phrase_b = 8 * 4 * beat_b
+        k = math.floor((b["land"] - (swap - enter) * rate - offset_b) / phrase_b + 0.25)
+        entry = offset_b + max(0, k) * phrase_b
+    return {"style": style, "bars": bars, "start": round(start, 3), "entry": round(entry, 3), "rate": rate,
             "seconds": round(seconds, 3), "beat": round(beat, 4), "lanes": {"a": lanes_a, "b": lanes_b},
             "swap": round(swap, 3),
             # a cut brings b in on the downbeat after a's fade; otherwise b runs under a from the start
-            "enter": round(seconds if style == "cut" else 0, 3)}
+            "enter": round(enter, 3)}
 
 
 MIX_TRIM_DB = 3                # the most a mix evens out two songs' levels, either way
@@ -5251,12 +5419,16 @@ def deck_mix_cue(a, b, live, idle, url_b, say, route=None, wanted=lambda: True, 
     # Mix now: the first phrase from a little after the cueing's done.
     soonest = (look_a.get("time") or 0) + 10 if soon else None
     clear = lambda g: bool(g.get("ok")) and g.get("sure", 0) >= MIX_SURE
-    heard = lambda g, key: g.get(key) if clear(g) else None
+    # A style picked by hand blends even on a faint beat: then what was heard
+    # is still the best guess at where the beats fall (the re-sync mid-mix
+    # puts it right), far better than assuming the song's first instant.
+    heard = lambda g, key: g.get(key) if clear(g) or (chosen and g.get("ok")) else None
     # Beats that can't be lined up aren't blended: a cut on the downbeat
     # instead, unless this mix's style was picked by hand.
     plan = mix_plan(a, b, length_a, heard(grid_a, "offset") or 0, heard(grid_b, "offset") or 0,
                     heard(grid_a, "period"), heard(grid_b, "period"),
-                    style=style if chosen or (clear(grid_a) and clear(grid_b)) else "cut", bars=bars, soonest=soonest)
+                    style=style if chosen or (clear(grid_a) and clear(grid_b)) else "cut", bars=bars, soonest=soonest,
+                    notbefore=(look_a.get("time") or 0) + 10)
     if not plan:
         say("too short to mix out of", length_a)
         return None
@@ -5305,6 +5477,7 @@ def deck_mix_finish(plan, live_before):
 # Next stops it at once.
 
 MIX_LEAD = 150                 # seconds before the end a mix gets going (hearing both songs, cueing)
+MIX_LEAD_MOST = 300            # ...or earlier, for an outro that starts early, but never more than this
 MIX_STUCK = 300                # a mix not done by then is forgotten
 
 
@@ -5312,7 +5485,8 @@ def deck_mix_song(song, details=None):
     """A song as the mixer needs it: its tempo, key and length from the details."""
     details = details if details is not None else deck_details_read()
     known = details.get(deck_song_key(song), {})
-    return {**song, **{k: known[k] for k in ("bpm", "key", "length") if known.get(k)}}
+    return {**song, **{k: known[k] for k in ("bpm", "key", "length") if known.get(k)},
+            **{k: v for k, v in mix_points(known, song.get("uid", "")).items() if v}}
 
 
 def deck_mix_choice(deck, uid):
@@ -5368,8 +5542,13 @@ def deck_mix_due(deck, status):
         return False
     if deck_queue_room(deck) or (deck.get("sleep") or {}).get("song") or (deck.get("mixNow") or {}).get("from") == now["uid"]:
         return False
-    left = status.get("length", 0) - status.get("time", 0)
-    return bool(status.get("playing") and status.get("length", 0) > 150 and 20 < left <= MIX_LEAD)
+    length = status.get("length", 0)
+    left = length - status.get("time", 0)
+    # A song mixing out early (its outro, a breakdown) is heard in time to take over there
+    # (about a minute before it for the mix, a minute to hear and cue).
+    out = mix_points(deck_details_read().get(deck_song_key(now), {}), now.get("uid", ""))["out"] or 0
+    lead = min(MIX_LEAD_MOST, max(MIX_LEAD, length - out + 120)) if out else MIX_LEAD
+    return bool(status.get("playing") and length > 150 and 20 < left <= lead)
 
 
 def deck_mix_ready(deck):
@@ -5460,7 +5639,7 @@ def mix_gap(env_a, env_b, beat):
 
 
 MIX_SYNC_LISTEN = 10           # seconds both decks are heard together at the start of a mix
-MIX_SYNC_SURE = 1.4            # how clearly the two must line up to be nudged
+MIX_SYNC_SURE = 1.25            # how clearly the two must line up to be nudged
 MIX_SYNC_SMALL = 0.006         # seconds: closer than this is left be
 
 
@@ -5541,7 +5720,8 @@ def deck_mix_run():
         return
     takeover = plan["startMs"] / 1000 + plan["swap"]
     mark(stage="mixing", style=plan["style"], bars=plan["bars"], rate=plan["rate"], startMs=plan["startMs"],
-         endMs=plan["endMs"], takeover=takeover, live=plan["live"],
+         endMs=plan["endMs"], takeover=takeover, live=plan["live"], entry=plan["entry"], enter=plan["enter"],
+         fromAt=plan["start"],
          curves=mix_curves(plan["lanes"], plan["seconds"]))
     # Both songs heard together, the new one's beats nudged onto the old one's.
     mix_resync(plan, live)
@@ -5956,7 +6136,7 @@ def deck_run():
 # page, played in the Beatport app (on Sonos: the same song from Apple Music).
 
 def beatport_image(release, size=300):
-    for key in ("release_image_dynamic_uri", "image_dynamic_uri", "dynamic_uri"):
+    for key in ("release_image_dynamic_uri", "image_dynamic_uri", "dynamic_uri", "image_url"):
         uri = str((release or {}).get(key) or "")
         if "{w}x{h}" in uri and uri.startswith("https://"):
             return uri.replace("{w}x{h}", f"{size}x{size}")
@@ -6168,7 +6348,8 @@ def deck_with_details(deck):
     def fill(song):
         d = details.get(deck_song_key(song), {})
         return {**song, **{k: d[k] for k in ("length", "bpm", "key", "energy") if d.get(k)},
-                **({"thumb": d["art"]} if not song.get("thumb") and d.get("art") else {})}
+                **({"thumb": d["art"]} if not song.get("thumb") and d.get("art") else {}),
+                **({"wave": d["wave"]} if d.get("wave") else {})}
     deck["now"] = fill(deck["now"]) if deck.get("now") else None
     deck["set"] = [fill(s) for s in deck["set"]]
     deck["played"] = [fill(s) for s in deck["played"]]
@@ -6186,6 +6367,21 @@ def deck_with_details(deck):
     return deck
 
 
+def deck_song_shape(wave, length, bpm):
+    """{"outro", "lift"} for a Beatport song, from its waveform picture
+    (song_shape); both None when it can't be read."""
+    import urllib.request
+    heights = None
+    if wave.startswith("https://") and length and bpm:
+        try:
+            with urllib.request.urlopen(wave, timeout=20) as answer:
+                data = answer.read(500_001)
+            heights = png_heights(data) if len(data) <= 500_000 else None
+        except (OSError, ValueError):
+            heights = None
+    return song_shape(heights, length, bpm)
+
+
 def deck_details_wanted(deck, details=None):
     """Songs still missing a detail, not looked for in the last hour."""
     details = deck_details_read() if details is None else details
@@ -6197,7 +6393,8 @@ def deck_details_wanted(deck, details=None):
         unknown = not all(f in d for f in ("length", "bpm", "energy")) \
             or (not d.get("bpm") and not d.get("web") and song.get("service") != "beatport") \
             or (song.get("service") != "beatport" and "measured" not in d and not deck_details_exact(d) and measure_ready()) \
-            or (not song.get("thumb") and "art" not in d)                                      # no cover: Apple's
+            or (not song.get("thumb") and "art" not in d) \
+            or (song.get("service") == "beatport" and ("wave" not in d or "outro" not in d))
         if key and key not in seen and time.time() - d.get("looked", 0) > 3600 and unknown:
             seen.add(key)
             songs.append(song)
@@ -6369,8 +6566,24 @@ def deck_details_fill():
             for song, length in pool.map(yt_length, [s for s in wanting("length") if s["service"] == "ytmusic"][:60]):
                 if length is not None:
                     deck_details_note(song, length=length)
-        # Covers: a song that came without one gets Apple's, by title and artist.
-        for song in [s for s in songs if not s.get("thumb")][:30]:
+        # Beatport songs: the cover (when one didn't come with it) and the
+        # waveform, from the song's own track page.
+        for song in [s for s in songs if s.get("service") == "beatport" and s.get("id")][:20]:
+            had = deck_details_read().get(deck_song_key(song), {})
+            if song.get("thumb") and "wave" in had and "outro" in had:
+                continue
+            if song.get("thumb") and had.get("wave") and "outro" not in had:
+                deck_details_note(song, **deck_song_shape(had["wave"], had.get("length"), had.get("bpm")))
+                continue
+            track = beatport_next_data(beatport_track_url(song)).get("track") or {}
+            art = beatport_image(track.get("release") or {}) or beatport_image(track)
+            wave = str(track.get("track_waveform_url") or "")
+            wave = wave.replace("{w}x{h}", "1500x250") if wave.startswith("https://") and "{w}x{h}" in wave else ""
+            length = had.get("length") or round((track.get("length_ms") or 0) / 1000)
+            deck_details_note(song, **({"art": art} if art and not song.get("thumb") else {}), wave=wave,
+                              **deck_song_shape(wave, length, had.get("bpm") or track.get("bpm")))
+        # Covers: anything else without one gets Apple's, by title and artist.
+        for song in [s for s in songs if not s.get("thumb") and s.get("service") != "beatport"][:30]:
             try:
                 found = am_songs(f"{re.sub(r'[(\[][^)\]]*[)\]]', '', song['title']).strip()} {song.get('artist', '')}", limit=5)
             except (OSError, ValueError):
@@ -8198,6 +8411,9 @@ def deck_command(settings, args):
         shown["mixPlan"] = deck_mix_preview(shown)
         shown["mixShapes"] = mix_shapes()
         shown["mixReady"] = deck_mix_ready(shown)
+        # Where the song playing is set to mix out (seconds), for the waveform; None near the end.
+        shown["mixAt"] = mix_points(deck_details_read().get(deck_song_key(shown["now"]), {}),
+                                    shown["now"].get("uid", ""))["out"] if shown.get("now") else None
         print(json.dumps(shown))
         sys.stdout.flush()
         deck_details_soon(deck)
