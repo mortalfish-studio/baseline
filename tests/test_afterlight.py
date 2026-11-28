@@ -67,6 +67,10 @@ def tearDownModule():
     _STATE.cleanup()
 
 
+REAL_AGENT_ASK = al.agent_ask
+REAL_HOME = al.HOME
+
+
 class TempCase(unittest.TestCase):
     """A fresh temporary folder per test, removed afterwards."""
 
@@ -74,10 +78,31 @@ class TempCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         self.addCleanup(self._tmp.cleanup)
-        # No test touches the real agents' notes, log or choices.
+        # No test touches anything real: every path afterlight keeps under
+        # your home folder (state, settings, config) points into this test's
+        # folder instead (the repo stays), and starting afterlight itself in
+        # the background (a watcher, a Sonos sync) is only recorded.
+        self.home = self.tmp / "home"
+        for name, value in list(vars(al).items()):
+            if isinstance(value, Path) and value.is_absolute() and value.is_relative_to(REAL_HOME) \
+                    and not value.is_relative_to(al.REPO):
+                self.patch(name, self.home / value.relative_to(REAL_HOME))
+        self.spawned = []
+        real_popen = al.subprocess.Popen
+        def popen(argv, *args, **kwargs):
+            if any("afterlight" in str(a) for a in (argv if isinstance(argv, (list, tuple)) else [argv])[:2]):
+                self.spawned.append(argv)
+                return mock.Mock(pid=0, returncode=0, wait=lambda *a, **k: 0, poll=lambda: 0)
+            return real_popen(argv, *args, **kwargs)
+        patcher = mock.patch.object(al.subprocess, "Popen", popen)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         for name, file in (("AGENTS_FILE", "deck-agents.json"), ("AGENT_LOG", "agent-calls.jsonl"),
                            ("AGENT_NOW", "agents-now.json"), ("DECK_PREP", "deck-prep.json")):
             self.patch(name, self.tmp / file)
+        self.patch("KEYFINDER", self.tmp / "bin" / "baseline-keyfinder")
+        self.patch("measure_ready", lambda: False)         # no real measuring unless a test asks
+        self.patch("agent_ask", lambda *a, **kw: None)     # and no real agent is ever asked
 
     def patch(self, name, value):
         patcher = mock.patch.object(al, name, value)
@@ -699,6 +724,28 @@ class DeckTests(TempCase):
         self.assertEqual(match["id"], "3")
         [(idea, match)] = al.find_songs("applemusic", [{"t": "Le Freak (Live)", "a": "Chic"}])
         self.assertEqual(match["id"], "1")
+
+    def test_prep_goes_on_without_a_scout_that_lags(self):
+        import threading
+        release = threading.Event()
+        stopped = []
+        def ask(prompt, tier="fast", job="", web=False, timeout=60, turns=1, agent=None):
+            if tier == "scout" and "crate digger" in prompt:
+                release.wait(5)                     # the slow one
+                return {"songs": [{"t": "Late", "a": "Slow"}]}
+            if tier == "scout":
+                return {"songs": [{"t": "Quick", "a": "One"}]}
+            return {"set": [{"n": 1}]}
+        self.patch("agent_ask", ask)
+        self.patch("PREP_GRACE", 0.3)
+        self.patch("agent_stop", lambda agent: (stopped.append(agent), release.set()))
+        self.patch("find_songs", lambda service, wanted: [(i, self.apple(n, i["t"], i["a"])) for n, i in enumerate(wanted)])
+        with mock.patch("shutil.which", return_value="/usr/bin/x"):
+            al.deck_command({"music": {"service": "applemusic"}}, ["build", "30", "x", "--replace", "--deep"])
+        self.assertEqual([s["title"] for s in al.deck_read()["set"]], ["Quick"])
+        self.assertEqual(stopped, ["grok"])
+        report = json.loads((self.tmp / "deck-prep.json").read_text())
+        self.assertTrue(next(s for s in report["scouts"] if s["angle"] == "digger")["late"])
 
     def test_prep_without_a_verdict_keeps_what_the_scouts_agreed_on(self):
         def ask(prompt, tier="fast", job="", web=False, timeout=60, turns=1, agent=None):
@@ -1485,12 +1532,70 @@ class DeckStreamTests(TempCase):
         self.assertTrue(al.ufw_allows(8766))
 
 
+class IsolationTests(TempCase):
+    """Tests never touch the real Deck, settings or speakers' state."""
+
+    def test_every_home_path_points_into_the_test_folder(self):
+        for name, value in vars(al).items():
+            if isinstance(value, Path) and value.is_absolute() and not value.is_relative_to(al.REPO):
+                self.assertFalse(value.is_relative_to(REAL_HOME), name)
+        al.deck_sonos_soon()                                # would start a real sync
+        self.assertEqual(len(self.spawned), 1)
+
+
+class MeasureTests(TempCase):
+    """Tempo and key measured from a song's preview."""
+
+    def test_tempo_is_the_mean_of_the_gaps_that_agree(self):
+        beats = [i * 0.5 for i in range(20)]                       # 120 BPM
+        beats[10] += 0.2                                            # one stray beat
+        bpm, steady = al.beats_tempo(beats)
+        self.assertAlmostEqual(bpm, 120, delta=0.3)
+        self.assertGreater(steady, 0.85)
+        self.assertEqual(al.beats_tempo([0, 0.5, 1]), (0.0, 0.0))  # too few beats
+
+    def test_shaky_beat_keeps_the_key_but_not_the_tempo(self):
+        self.patch("DECK_DETAILS", self.tmp / "deck-details.json")
+        self.patch("DECK_DETAILS_LOCK", self.tmp / "deck-details.lock")
+        self.patch("measure_ready", lambda: True)
+        steady = {"service": "applemusic", "id": "1", "title": "A", "artist": "X"}
+        shaky = {"service": "applemusic", "id": "2", "title": "B", "artist": "Y"}
+        exact = {"service": "applemusic", "id": "3", "title": "C", "artist": "Z"}
+        al.deck_details_note(exact, bpm=124, key="8A")             # from Beatport, before the mark
+        got = {"1": {"bpm": 126, "steady": 0.95, "key": "3A"}, "2": {"bpm": 118, "steady": 0.6, "key": "4B"},
+               "3": {"bpm": 99, "steady": 1.0, "key": "1A"}}
+        self.patch("measure_song", lambda song: got[song["id"]])
+        al.deck_details_measure([steady, shaky, exact])
+        d = al.deck_details_read()
+        self.assertEqual((d["am:1"]["bpm"], d["am:1"]["key"], d["am:1"]["measured"]), (126, "3A", 1))
+        self.assertNotIn("bpm", d["am:2"])
+        self.assertEqual(d["am:2"]["key"], "4B")
+        self.assertEqual((d["am:3"]["bpm"], d["am:3"]["key"]), (124, "8A"))   # Beatport's stand
+
+    def test_the_web_never_overrides_a_measured_key(self):
+        self.patch("DECK_DETAILS", self.tmp / "deck-details.json")
+        self.patch("DECK_DETAILS_LOCK", self.tmp / "deck-details.lock")
+        song = {"service": "applemusic", "id": "1", "title": "A", "artist": "X"}
+        al.deck_details_note(song, measured=1, key="3A")
+        self.patch("grok_web_json", lambda prompt, **kw: {"s": [{"bpm": 125, "key": "C major"}]})
+        al.deck_details_web([song])
+        d = al.deck_details_read()["am:1"]
+        self.assertEqual((d["bpm"], d["key"], d["web"]), (125, "3A", True))
+
+    def test_preview_must_come_from_apple(self):
+        self.patch("am_lookup", lambda params: [{"previewUrl": "https://evil.example/a.m4a"}])
+        self.assertEqual(al.preview_url({"service": "applemusic", "id": "1", "title": "A"}), "")
+        self.patch("am_lookup", lambda params: [{"trackName": "A", "previewUrl": "https://audio-ssl.itunes.apple.com/x.m4a"}])
+        self.assertTrue(al.preview_url({"service": "ytmusic", "title": "A (Remastered)", "artist": "X"}).startswith("https://audio"))
+
+
 class AgentTests(TempCase):
     """Which agent answers: a tier per job, the agent's own program with its
     tools locked down, and every question noted and logged."""
 
     def setUp(self):
         super().setUp()
+        self.patch("agent_ask", REAL_AGENT_ASK)            # the real one, with its program stood in for
         self.patch("AGENTS_FILE", self.tmp / "agents.json")
         self.patch("AGENT_LOG", self.tmp / "agent-calls.jsonl")
         self.patch("AGENT_NOW", self.tmp / "agents-now.json")
@@ -1504,7 +1609,35 @@ class AgentTests(TempCase):
                 {"agent": "claude", "tier": "fast", "seconds": 4, "ok": False},
                 {"agent": "nobody", "tier": "fast", "seconds": 9, "ok": True}]
         log.write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n")
-        self.assertEqual(al.agent_record(), {"claude": {"fast": {"n": 2, "seconds": 3.0, "ok": 0.5}}})
+        self.assertEqual(al.agent_record(), {"claude": {"fast": {"n": 2, "seconds": 3.0, "ok": 0.5, "last": 0, "fit": "unreliable"}}})
+
+    def log(self, *rows):
+        (self.tmp / "agent-calls.jsonl").write_text("".join(
+            json.dumps({"at": int(time.time()), "agent": a, "tier": t, "seconds": secs, "ok": ok}) + "\n"
+            for a, t, secs, ok in rows))
+
+    def test_too_slow_or_unreliable_needs_two_questions(self):
+        self.log(("grok", "scout", 200, True), ("grok", "scout", 180, True), ("codex", "scout", 30, True),
+                 ("codex", "fast", 5, False), ("codex", "fast", 6, False), ("codex", "fast", 4, True))
+        record = al.agent_record()
+        self.assertEqual(record["grok"]["scout"]["fit"], "slow")
+        self.assertEqual(record["codex"]["scout"]["fit"], "ok")          # one question isn't enough to say
+        self.assertEqual(record["codex"]["fast"]["fit"], "unreliable")
+
+    def test_unchosen_jobs_go_to_the_quickest_fit_agent(self):
+        self.log(("grok", "fast", 15, True), ("grok", "fast", 16, True), ("claude", "fast", 5, True),
+                 ("claude", "fast", 6, True), ("codex", "fast", 2, False), ("codex", "fast", 3, False))
+        self.assertEqual(al.agent_choices()["fast"], "claude")
+        al.agents_set("fast", "grok")                                   # your choice stands
+        self.assertEqual(al.agent_choices()["fast"], "grok")
+        self.assertEqual(al.agent_choices()["judge"], "grok")           # no record: Grok first
+
+    def test_mix_leaves_out_a_slow_scout_until_a_week_passes(self):
+        self.log(("grok", "scout", 200, True), ("grok", "scout", 180, True))
+        al.agents_set("scout", "mix")
+        self.assertEqual(al.scout_agents(3), ["claude", "codex", "claude"])
+        with mock.patch.object(al.time, "time", return_value=time.time() + 8 * 86400):
+            self.assertIn("grok", al.scout_agents(3))
 
     def test_tiers_default_to_grok_and_keep_your_choice(self):
         self.assertEqual(al.agent_choices(), {"fast": "grok", "scout": "grok", "judge": "grok"})
@@ -1964,6 +2097,7 @@ class SuggestionTests(TempCase):
         self.assertEqual(started[0][-4:], ["music", "grok", "applemusic", "sunset playlist"])
 
     def test_grok_ideas_parse_and_run_without_tools(self):
+        self.patch("agent_ask", REAL_AGENT_ASK)            # the real one, with its program stood in for
         reply = 'Sure:\n{"songs":[{"t":"Lovely Day","a":"Bill Withers","w":"Sunny classic"},{"x":1}],"q":["golden hour",3]}'
         with mock.patch("subprocess.run", return_value=mock.Mock(stdout=reply)) as runner:
             self.patch("STATE", self.tmp / "state.json")

@@ -1052,6 +1052,24 @@ Item {
                 id: tierRow
                 required property var modelData
                 readonly property string chosen: ((root.deck.agents || {}).use || {})[modelData.key] || ""
+                function slotOf(agent) { return (((root.deck.agents || {}).record || {})[agent] || {})[modelData.key] }
+                function fitOf(agent) { return (slotOf(agent) || {}).fit || "ok" }
+                // Mix: who it leaves out. Otherwise: the chosen one's not fit, and who'd be quicker.
+                readonly property string warning: {
+                  const a = root.deck.agents || {}
+                  const budget = Math.round(((a.budget || {})[modelData.key] || 0))
+                  if (chosen === "mix") {
+                    const out = (a.installed || []).filter(x => fitOf(x) !== "ok")
+                      .map(x => (root.agentNames[x] || x) + " (" + strings.t(fitOf(x) === "slow" ? "deck.agentsFitSlow" : "deck.agentsFitUnreliable") + ")")
+                    return out.length ? strings.t("deck.agentsMixOut").arg(out.join(", ")) : ""
+                  }
+                  const fit = fitOf(chosen), best = (a.best || {})[modelData.key]
+                  if (fit === "ok") return ""
+                  const secs = Math.round((slotOf(chosen) || {}).seconds || 0)
+                  const instead = best && best !== chosen
+                    ? strings.t("deck.agentsInstead").arg(root.agentNames[best] || best).arg(Math.round((slotOf(best) || {}).seconds || 0)) : ""
+                  return (fit === "slow" ? strings.t("deck.agentsSlow").arg(secs).arg(budget) : strings.t("deck.agentsUnreliable")) + instead
+                }
                 Layout.fillWidth: true
                 spacing: 8
                 ColumnLayout {
@@ -1068,6 +1086,8 @@ Item {
                     glyph: modelData === "mix" ? "󰒝" : ""
                     text: modelData === "mix" ? strings.t("deck.agentsMix") : (root.agentNames[modelData] || modelData)
                     on: tierRow.chosen === modelData
+                    // Too slow or unreliable for this job (by its record): faded.
+                    opacity: tierRow.fitOf(modelData) === "ok" ? 1 : 0.45
                     onTapped: if (!root.locked) root.run(["deck", "agents", "use", tierRow.modelData.key, modelData])
                   }
                 }
@@ -1075,9 +1095,11 @@ Item {
                   Layout.fillWidth: true
                   horizontalAlignment: Text.AlignRight
                   elide: Text.ElideRight
-                  opacity: 0.55
                   font.pixelSize: Style.font.caption
+                  color: tierRow.warning !== "" ? root.amber : root.ink
+                  opacity: tierRow.warning !== "" ? 0.9 : 0.55
                   text: {
+                    if (tierRow.warning !== "") return tierRow.warning
                     const a = root.deck.agents || {}
                     const model = (a.models || {})[tierRow.modelData.key] || ""
                     const rec = ((a.record || {})[tierRow.chosen] || {})[tierRow.modelData.key]
@@ -1105,7 +1127,8 @@ Item {
                 model: prepBox.prep.scouts || []
                 delegate: Label {
                   required property var modelData
-                  text: strings.t("deck.prepScout").arg(strings.t("deck.angle." + modelData.angle)).arg(root.agentNames[modelData.agent] || modelData.agent)
+                  text: modelData.late ? strings.t("deck.prepLate").arg(strings.t("deck.angle." + modelData.angle)).arg(root.agentNames[modelData.agent] || modelData.agent)
+                    .arg(Commons.I18n.formatNumber(modelData.seconds || 0, 0)) : strings.t("deck.prepScout").arg(strings.t("deck.angle." + modelData.angle)).arg(root.agentNames[modelData.agent] || modelData.agent)
                     .arg(modelData.ideas || 0).arg(modelData.real || 0).arg(modelData.kept || 0)
                     .arg(Commons.I18n.formatNumber(modelData.seconds || 0, 0))
                   font.pixelSize: Style.font.caption; opacity: 0.7
@@ -2839,8 +2862,8 @@ Item {
                     Layout.fillWidth: true
                     spacing: 0
                     Label { text: strings.t("deck.nextIn").arg(Math.ceil(root.nowLeft)).toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.amber }
-                    Label { Layout.fillWidth: true; text: headsUp.nextSong ? headsUp.nextSong.title : ""; font.bold: true; font.pixelSize: Style.font.caption }
-                    Label { Layout.fillWidth: true; text: headsUp.nextSong ? headsUp.nextSong.artist : ""; font.pixelSize: Style.font.caption; opacity: 0.6 }
+                    Label { Layout.fillWidth: true; text: headsUp.nextSong ? headsUp.nextSong.title || "" : ""; font.bold: true; font.pixelSize: Style.font.caption }
+                    Label { Layout.fillWidth: true; text: headsUp.nextSong ? headsUp.nextSong.artist || "" : ""; font.pixelSize: Style.font.caption; opacity: 0.6 }
                   }
                   ColumnLayout {
                     spacing: 4
@@ -4858,7 +4881,7 @@ Item {
         Equalizer { on: tile.here && root.deck.playing; visible: tile.here && !!root.now }
         Label {
           Layout.fillWidth: true
-          text: tile.here ? (root.now ? (root.deck.playing ? root.now.title : strings.t("deck.paused")) : strings.t("deck.here"))
+          text: tile.here ? (root.now ? (root.deck.playing ? root.now.title || "" : strings.t("deck.paused")) : strings.t("deck.here"))
                 : tile.busy ? "●  " + strings.t("deck.busy")
                 : tileHover.hovered || root.dragging ? strings.t("deck.dropHere") : ""
           font.pixelSize: Style.font.caption

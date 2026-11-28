@@ -777,5 +777,12 @@
   "deck.angle.digger": "Crate digger",
   "deck.angle.connector": "Mixer",
   "deck.angle.crowd": "Crowd reader",
-  "deck.prepStandIn": "Judge: no answer in time, so %1's quick model stood in (%2 s)."
+  "deck.prepStandIn": "Judge: no answer in time, so %1's quick model stood in (%2 s).",
+  "deck.prepLate": "%1 (%2): still digging after %3 s, so the set went on without it",
+  "deck.agentsMixOut": "Mix leaves out %1 for now; another try after a week",
+  "deck.agentsSlow": "Too slow here: %1 s on average, against %2 s",
+  "deck.agentsUnreliable": "Unreliable here: too few usable answers",
+  "deck.agentsInstead": " · %1 takes %2 s",
+  "deck.agentsFitSlow": "slow",
+  "deck.agentsFitUnreliable": "unreliable"
 }

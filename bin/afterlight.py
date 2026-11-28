@@ -3904,7 +3904,10 @@ def agent_choices():
     saved = read_json(AGENTS_FILE, {})
     saved = saved if isinstance(saved, dict) else {}
     default = "grok" if "grok" in have else (have[0] if have else None)
-    choices = {tier: saved.get(tier) if saved.get(tier) in have else default for tier in AGENT_TIERS}
+    record = agent_record() if len(have) > 1 and any(saved.get(t) not in have for t in AGENT_TIERS) else {}
+    # Not chosen: the quickest agent that's fit for the job, by its record.
+    choices = {tier: saved.get(tier) if saved.get(tier) in have else (agent_best(tier, have, record) or default)
+               for tier in AGENT_TIERS}
     if saved.get("scout") == "mix" and len(have) > 1:
         choices["scout"] = "mix"
     return choices
@@ -3917,6 +3920,10 @@ def scout_agents(count):
     if choice != "mix":
         return [choice] * count
     have = agents_installed()
+    record = agent_record()
+    # Mix leaves out an agent that's too slow or unreliable for digging
+    # (it gets another try after a week).
+    have = [a for a in have if agent_suited(a, "scout", record)] or have
     return [have[n % len(have)] for n in range(count)]
 
 
@@ -3945,7 +3952,9 @@ def agents_state():
             "models": {tier: AGENT_MODELS[a][tier][0] if a in AGENT_MODELS else
                        " + ".join(AGENT_MODELS[b][tier][0] for b in agents_installed())
                        for tier, a in choices.items() if a},
-            "now": agent_working(), "record": agent_record(), "prep": read_json(DECK_PREP, {})}
+            "now": agent_working(), "record": agent_record(), "prep": read_json(DECK_PREP, {}),
+            "best": {tier: agent_best(tier, agents_installed()) for tier in AGENT_TIERS},
+            "budget": AGENT_BUDGET}
 
 
 def agent_record(last=300):
@@ -3963,15 +3972,48 @@ def agent_record(last=300):
             continue
         if entry.get("agent") not in AGENT_MODELS or entry.get("tier") not in AGENT_TIERS:
             continue
-        slot = record.setdefault(entry["agent"], {}).setdefault(entry["tier"], {"n": 0, "seconds": 0.0, "ok": 0})
+        slot = record.setdefault(entry["agent"], {}).setdefault(entry["tier"], {"n": 0, "seconds": 0.0, "ok": 0, "last": 0})
         slot["n"] += 1
+        slot["last"] = max(slot["last"], int(entry.get("at") or 0))
         slot["seconds"] += float(entry.get("seconds") or 0)
         slot["ok"] += bool(entry.get("ok"))
     for tiers in record.values():
-        for slot in tiers.values():
+        for tier, slot in tiers.items():
             slot["seconds"] = round(slot["seconds"] / slot["n"], 1)
             slot["ok"] = round(slot["ok"] / slot["n"], 2)
+            slot["fit"] = agent_fit(slot, tier)
     return record
+
+
+# How long each kind of job may take, on average, before an agent counts as
+# too slow for it; and how often it must answer usably.
+AGENT_BUDGET = {"fast": 30, "scout": 60, "judge": 120}
+AGENT_RELIABLE = 0.6
+AGENT_RETRY = 7 * 86400          # an agent left out gets another try after a week
+
+
+def agent_fit(slot, tier):
+    """"ok", "slow" or "unreliable" for a tier, from at least two questions."""
+    if not slot or slot.get("n", 0) < 2:
+        return "ok"
+    if slot["ok"] < AGENT_RELIABLE:
+        return "unreliable"
+    return "slow" if slot["seconds"] > AGENT_BUDGET[tier] else "ok"
+
+
+def agent_suited(agent, tier, record=None):
+    """Fit for the job, or left out long enough to deserve another try."""
+    slot = (record if record is not None else agent_record()).get(agent, {}).get(tier)
+    return agent_fit(slot, tier) == "ok" or time.time() - (slot or {}).get("last", 0) > AGENT_RETRY
+
+
+def agent_best(tier, have, record=None):
+    """The quickest agent that's fit for a tier (by its record), or None.
+    One without a record yet comes after those with a good one."""
+    record = agent_record() if record is None else record
+    fit = [a for a in have if agent_fit(record.get(a, {}).get(tier), tier) == "ok"]
+    timed = lambda a: (record.get(a, {}).get(tier) or {}).get("seconds") or AGENT_BUDGET[tier]
+    return min(fit, key=lambda a: (timed(a), a != "grok")) if fit else None
 
 
 def agent_working():
@@ -5459,6 +5501,7 @@ def deck_details_wanted(deck, details=None):
         d = details.get(key, {})
         unknown = not all(f in d for f in ("length", "bpm", "energy")) \
             or (not d.get("bpm") and not d.get("web") and song.get("service") != "beatport") \
+            or (song.get("service") != "beatport" and "measured" not in d and not deck_details_exact(d) and measure_ready()) \
             or (not song.get("thumb") and "art" not in d)                                      # no cover: Apple's
         if key and key not in seen and time.time() - d.get("looked", 0) > 3600 and unknown:
             seen.add(key)
@@ -5469,6 +5512,118 @@ def deck_details_wanted(deck, details=None):
 def grok_json(prompt, timeout=60, job="ask"):
     """One question to the fast agent with every tool off; its JSON answer or None."""
     return agent_ask(prompt, tier="fast", job=job, timeout=timeout)
+
+
+# Measured tempo and key: the song's 30-second preview from Apple's public
+# catalogue, its beats found with aubio (aubiotrack) and its key with
+# libkeyfinder (system/keyfinder.cpp, built on first use). Tested against
+# Beatport on 31 songs: tempo within 1 BPM whenever the beat was steady (22
+# of 23), key exact for 58% and a mixable neighbour for another 26%, against
+# 39% and 19% for an agent searching the web. So a measured key wins over the
+# web's, and a measured tempo counts only when the beat held steady.
+KEYFINDER = STATE.parent / "bin/baseline-keyfinder"
+MEASURE_STEADY = 0.85            # share of beat gaps that must agree for the tempo to count
+
+
+def keyfinder_tool():
+    """The key finder, built from system/keyfinder.cpp if it's missing or
+    older than its source; None without g++ or libkeyfinder."""
+    source = REPO / "system/keyfinder.cpp"
+    try:
+        if KEYFINDER.is_file() and KEYFINDER.stat().st_mtime >= source.stat().st_mtime:
+            return KEYFINDER
+    except OSError:
+        return None
+    if not shutil.which("g++") or not Path("/usr/include/keyfinder/keyfinder.h").is_file():
+        return None
+    KEYFINDER.parent.mkdir(parents=True, exist_ok=True)
+    built = subprocess.run(["g++", "-O2", "-o", str(KEYFINDER), str(source), "-lkeyfinder"],
+                           capture_output=True, timeout=120)
+    return KEYFINDER if built.returncode == 0 else None
+
+
+def deck_details_exact(details):
+    """Tempo and key from Beatport (exact, kept): marked so, or from before
+    the mark, a tempo that came neither from the web nor measuring."""
+    return bool(details.get("beatport") or (details.get("bpm") and not details.get("web") and "measured" not in details))
+
+
+def measure_ready():
+    return bool(shutil.which("aubiotrack") and shutil.which("ffmpeg") and keyfinder_tool())
+
+
+def preview_url(song):
+    """The song's 30-second preview on Apple's catalogue: by its id for Apple
+    Music songs, otherwise by title and artist."""
+    try:
+        if song.get("service") == "applemusic" and song.get("id"):
+            found = am_lookup({"id": str(song["id"])})
+        else:
+            title = re.sub(r"\s*[(\[][^)\]]*[)\]]", "", song["title"]).strip()
+            found = [r for r in am_lookup({"term": f"{title} {song.get('artist', '')}", "entity": "song", "limit": 8})
+                     if song_key(r.get("trackName", "")) == song_key(song["title"])]
+    except (OSError, ValueError):
+        return ""
+    url = next((r.get("previewUrl") for r in found if isinstance(r, dict) and r.get("previewUrl")), "")
+    return url if re.match(r"https://[\w.-]+\.apple\.com/", url) else ""
+
+
+def beats_tempo(times):
+    """Tempo from beat times: the mean of the gaps that agree with the median
+    (stray and missed beats dropped), and how steady it was (0-1)."""
+    gaps = [b - a for a, b in zip(times, times[1:]) if b > a]
+    if len(gaps) < 8:
+        return 0.0, 0.0
+    middle = sorted(gaps)[len(gaps) // 2]
+    good = [g for g in gaps if abs(g - middle) < 0.08 * middle]
+    return 60 / (sum(good) / len(good)), len(good) / len(gaps)
+
+
+def measure_song(song):
+    """{"bpm", "steady", "key"} measured from the song's preview, or None."""
+    import tempfile
+    import urllib.request
+    url = preview_url(song)
+    tool = keyfinder_tool()
+    if not url or not tool:
+        return None
+    with tempfile.TemporaryDirectory(prefix="baseline-measure-") as folder:
+        clip, wav = Path(folder) / "clip.m4a", Path(folder) / "clip.wav"
+        try:
+            with urllib.request.urlopen(url, timeout=20) as answer:
+                data = answer.read(4_000_001)
+            if len(data) > 4_000_000:
+                return None
+            clip.write_bytes(data)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(clip), "-t", "40", "-ac", "1", "-ar", "44100",
+                            str(wav)], check=True, capture_output=True, timeout=60)
+            pcm = subprocess.run(["ffmpeg", "-v", "error", "-i", str(wav), "-f", "f32le", "-"],
+                                 check=True, capture_output=True, timeout=60).stdout
+            key = subprocess.run([str(tool)], input=pcm, capture_output=True, timeout=60).stdout.decode().strip()
+            times = [float(x) for x in subprocess.run(["aubiotrack", "-i", str(wav)], capture_output=True, text=True,
+                                                      timeout=60).stdout.split() if re.fullmatch(r"[\d.]+", x)]
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+    bpm, steady = beats_tempo(times)
+    return {"bpm": round(bpm), "steady": round(steady, 2), "key": camelot(key) if key != "silence" else ""}
+
+
+def deck_details_measure(songs):
+    """Measure what Beatport didn't have; a few songs at a time."""
+    from concurrent.futures import ThreadPoolExecutor
+    if not songs or not measure_ready():
+        return
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        for song, got in zip(songs, pool.map(measure_song, songs)):
+            if deck_details_exact(deck_details_read().get(deck_song_key(song), {})):
+                continue                    # Beatport's figures stand
+            if got is None:
+                deck_details_note(song, measured=0)
+                continue
+            fields = {"measured": 1, "key": got["key"]} if got["key"] else {"measured": 1}
+            if got["steady"] >= MEASURE_STEADY and 60 <= got["bpm"] <= 200:
+                fields["bpm"] = got["bpm"]
+            deck_details_note(song, **fields)
 
 
 def deck_details_fill():
@@ -5533,10 +5688,15 @@ def deck_details_fill():
                 if found is None and beatport_bridge({"type": "ping"}, timeout=2) is None:
                     break           # the bridge went away: try again later
                 deck_details_note(song, bpm=round((found or {}).get("bpm") or 0),
-                                  key=camelot((found or {}).get("key", "")),
+                                  key=camelot((found or {}).get("key", "")), beatport=bool(found),
                                   **({"length": found["length"]} if found and found.get("length")
                                      and not deck_details_read().get(deck_song_key(song), {}).get("length") else {}))
-        # What Beatport didn't have (or with its window closed): Grok on the web, once per song.
+        # What Beatport didn't have: measured from the song's preview (once per song).
+        details = deck_details_read()
+        deck_details_measure([s for s in songs if s["service"] != "beatport"
+                              and not deck_details_exact(details.get(deck_song_key(s), {}))
+                              and "measured" not in details.get(deck_song_key(s), {})][:24])
+        # Still no tempo: the agent on the web, once per song.
         details = deck_details_read()
         missing = [s for s in songs if s["service"] != "beatport"
                    and not details.get(deck_song_key(s), {}).get("bpm") and not details.get(deck_song_key(s), {}).get("web")]
@@ -5571,6 +5731,9 @@ def deck_details_web(songs):
                 bpm = got.get("bpm")
                 bpm = round(bpm) if isinstance(bpm, (int, float)) and 50 <= bpm <= 220 else 0
                 key = camelot(str(got.get("key") or "").replace("♯", "#").replace("♭", "b"))
+                had = deck_details_read().get(deck_song_key(song), {})
+                if had.get("measured") and had.get("key"):
+                    key = had["key"]            # a measured key beats the web's
                 deck_details_note(song, bpm=bpm, key=key, web=True)
 
 
@@ -8060,6 +8223,28 @@ def deck_prep_judge_ask(base, count, songs):
               '"note":"one sentence on the set"} where "c" is one of "Warm up", "Build", "Peak", "Wind down".')
 
 
+PREP_GRACE = 45                  # seconds the last scout gets once the others have answered
+
+
+def agent_stop(agent):
+    """Stop this process's own running question to an agent (a scout left
+    behind): its program, found among our children, gets SIGTERM."""
+    import signal
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+            argv = (proc / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if int(fields[1]) == os.getpid() and argv and Path(argv[0].decode(errors="replace")).name == agent:
+            try:
+                os.kill(int(proc.name), signal.SIGTERM)
+            except OSError:
+                pass
+
+
 def deck_prep(settings, minutes, brief, start="", replace=False, seed=None):
     """Build a set the thorough way (deck build … --deep): scouts, the
     catalogue, then the judge."""
@@ -8091,8 +8276,24 @@ def deck_prep(settings, minutes, brief, start="", replace=False, seed=None):
         report["scouts"].append({"angle": angle, "agent": agent, "model": AGENT_MODELS[agent]["scout"][0],
                                  "seconds": round(time.time() - started, 1), "ideas": len(ideas)})
         return angle, ideas
-    with ThreadPoolExecutor(max_workers=len(angles)) as pool:
-        answers = list(pool.map(dig, zip(angles, agents)))
+    # All at once; when all but one have answered, the last gets PREP_GRACE
+    # seconds more, then the dig goes on without it (and its question stops).
+    pool = ThreadPoolExecutor(max_workers=len(angles))
+    futures = [pool.submit(dig, job) for job in zip(angles, agents)]
+    last_since = None
+    while not all(f.done() for f in futures):
+        if sum(f.done() for f in futures) >= len(futures) - 1 and len(futures) > 1:
+            last_since = last_since or time.time()
+            if time.time() - last_since > PREP_GRACE:
+                break
+        time.sleep(0.25)
+    answers = [f.result() for f in futures if f.done()]
+    for (angle, agent), future in zip(zip(angles, agents), futures):
+        if not future.done():
+            agent_stop(agent)
+            report["scouts"].append({"angle": angle, "agent": agent, "model": AGENT_MODELS[agent]["scout"][0],
+                                     "seconds": round(time.time() - report["at"], 1), "ideas": 0, "late": True})
+    pool.shutdown(wait=False)
     ideas = deck_prep_pool(answers)
     if not ideas:
         toast("The scouts came back empty", "Try saying more about the mood or the music", glyph="󰀦")
