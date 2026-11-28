@@ -746,5 +746,24 @@
   "deck.playedTip": {
     "one": "Played tonight (%1 song)",
     "other": "Played tonight (%1 songs)"
-  }
+  },
+  "deck.agents": "Agents",
+  "deck.agentsAbout": "Who answers the Deck's music questions. Light jobs go to a quick model, so the big ones are kept for what needs them.",
+  "deck.agentsFast": "Quick jobs",
+  "deck.agentsFastAbout": "Picking songs, tempo and key, energy",
+  "deck.agentsScout": "Scouts",
+  "deck.agentsScoutAbout": "Digging for songs for a set",
+  "deck.agentsJudge": "Judge",
+  "deck.agentsJudgeAbout": "Weighing the scouts' ideas",
+  "deck.agentsRecord": "%1 · %2 asked · %3 s · %4% answered",
+  "deck.agentsSonos": "Sonos control stays with Grok.",
+  "deck.agentJob.autodj": "finding songs for Auto-DJ",
+  "deck.agentJob.fill": "picking songs",
+  "deck.agentJob.build": "building a set",
+  "deck.agentJob.energy": "rating energy",
+  "deck.agentJob.tempo-and-key": "looking up tempo and key",
+  "deck.agentJob.suggest": "suggesting songs",
+  "deck.agentJob.ask": "answering",
+  "deck.agentJob.ideas": "finding ideas",
+  "deck.agentJob.look-up": "looking it up"
 }

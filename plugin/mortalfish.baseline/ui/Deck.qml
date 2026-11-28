@@ -190,6 +190,18 @@ Item {
       } catch (error) {}
     }
   }
+  // Who's working: written by afterlight around each question. QML can't
+  // check the pids, so anything older than a quarter of an hour is stale.
+  Commons.WatchedFile {
+    path: Quickshell.env("HOME") + "/.local/state/afterlight/agents-now.json"
+    onTextChanged: {
+      try {
+        const list = JSON.parse(text || "[]")
+        const now = Date.now() / 1000
+        root.agentsWorking = Array.isArray(list) ? list.filter(a => a && a.agent && now - (a.since || 0) < 900) : []
+      } catch (error) { root.agentsWorking = [] }
+    }
+  }
   // The watcher reports every couple of seconds while music plays; if it's
   // gone quiet, reading the state starts it again.
   Timer {
@@ -648,6 +660,21 @@ Item {
     { key: "energy", glyph: "󱐋", label: strings.t("deck.shapeEnergy") }
   ]
   property bool playedOpen: false
+  // ---- the agents: who answers the Deck's questions (one per tier), and
+  // who's at work right now, for the waveform in the header.
+  property bool agentsOpen: false
+  property var agentsWorking: []
+  readonly property var agentTiers: [
+    { key: "fast", label: strings.t("deck.agentsFast"), about: strings.t("deck.agentsFastAbout") },
+    { key: "scout", label: strings.t("deck.agentsScout"), about: strings.t("deck.agentsScoutAbout") },
+    { key: "judge", label: strings.t("deck.agentsJudge"), about: strings.t("deck.agentsJudgeAbout") }
+  ]
+  readonly property var agentNames: ({ grok: "Grok", claude: "Claude", codex: "Codex" })
+  function agentJob(job) {
+    const key = "deck.agentJob." + String(job || "ask").replace(/ /g, "-")
+    const text = strings.t(key)
+    return text === key ? String(job || "") : text
+  }
   // ---- party: the stage (the playing song, big, for the room), guests'
   // requests from their phones, and a lock so guests can't undo the night.
   property bool stageOn: false
@@ -931,7 +958,18 @@ Item {
             Label { text: strings.t("studio.brand"); font.pixelSize: Style.font.caption; font.letterSpacing: 4; color: root.amber }
             Label { text: strings.t("deck.title").toUpperCase(); font.pixelSize: 22; font.bold: true; font.letterSpacing: 3; color: root.teal }
           }
-          Item { Layout.fillWidth: true }
+          // The agents at work: a soft waveform in the header's open middle.
+          AgentWave {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 44
+            Layout.leftMargin: 24; Layout.rightMargin: 24
+            working: root.agentsWorking
+            active: root.seen
+            amber: root.amber; teal: root.teal; ink: root.ink
+            jobText: (job) => root.agentJob(job)
+            agentName: (agent) => agent === "" ? strings.t("deck.agents") : (root.agentNames[agent] || agent)
+            onTapped: root.agentsOpen = !root.agentsOpen
+          }
           // Party: the stage, guests' requests, the lock.
           ActionButton {
             icon: "󰐯"
@@ -977,6 +1015,74 @@ Item {
           }
           // Requests open and the crate folded away: the code, small (tap for it big).
           QrTile { visible: root.showQr && !root.crateOpen; size: 46 }
+        }
+
+        // The agents card: who answers which kind of question.
+        Rectangle {
+          Layout.fillWidth: true
+          visible: root.agentsOpen
+          implicitHeight: agentsCol.implicitHeight + 24
+          radius: Style.cornerRadius > 0 ? 8 : 0
+          color: Util.alpha(root.teal, 0.04)
+          border.width: 1; border.color: Util.alpha(root.teal, 0.45)
+          ColumnLayout {
+            id: agentsCol
+            x: 14; y: 12
+            width: parent.width - 28
+            spacing: 10
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: 8
+              Label { text: "󰚩  " + strings.t("deck.agents").toUpperCase(); font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal }
+              Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: strings.t("deck.agentsAbout"); font.pixelSize: Style.font.caption; opacity: 0.55 }
+              RoundButton { glyph: "󰅖"; onClicked: root.agentsOpen = false }
+            }
+            Repeater {
+              model: root.agentTiers
+              delegate: RowLayout {
+                id: tierRow
+                required property var modelData
+                readonly property string chosen: ((root.deck.agents || {}).use || {})[modelData.key] || ""
+                Layout.fillWidth: true
+                spacing: 8
+                ColumnLayout {
+                  Layout.preferredWidth: 280; Layout.maximumWidth: 280
+                  spacing: 0
+                  Label { text: tierRow.modelData.label; font.pixelSize: Style.font.caption; font.bold: true; color: root.ink }
+                  Label { Layout.preferredWidth: 280; elide: Text.ElideRight; text: tierRow.modelData.about; font.pixelSize: Style.font.caption; opacity: 0.5 }
+                }
+                Repeater {
+                  model: (root.deck.agents || {}).installed || []
+                  delegate: DjChip {
+                    required property var modelData
+                    text: root.agentNames[modelData] || modelData
+                    on: tierRow.chosen === modelData
+                    onTapped: if (!root.locked) root.run(["deck", "agents", "use", tierRow.modelData.key, modelData])
+                  }
+                }
+                Label {
+                  Layout.fillWidth: true
+                  horizontalAlignment: Text.AlignRight
+                  elide: Text.ElideRight
+                  opacity: 0.55
+                  font.pixelSize: Style.font.caption
+                  text: {
+                    const a = root.deck.agents || {}
+                    const model = (a.models || {})[tierRow.modelData.key] || ""
+                    const rec = ((a.record || {})[tierRow.chosen] || {})[tierRow.modelData.key]
+                    if (!rec) return model
+                    return strings.t("deck.agentsRecord").arg(model).arg(rec.n)
+                      .arg(Commons.I18n.formatNumber(rec.seconds, 1)).arg(Math.round(rec.ok * 100))
+                  }
+                }
+              }
+            }
+            Label {
+              text: strings.t("deck.agentsSonos")
+              font.pixelSize: Style.font.caption
+              opacity: 0.45
+            }
+          }
         }
 
         Rectangle {

@@ -3857,11 +3857,11 @@ def suggest_write(value):
 def suggest(service, query, items, open_tab=True):
     """No clear match: show the closest ones and ask Grok for more."""
     suggest_write({"service": service, "query": query[:120], "close": items[:6], "grok": [], "try": [],
-                   "pending": bool(shutil.which("grok"))})
+                   "pending": bool(agent_for("fast"))})
     if open_tab:
         # The panel says it itself; a popup at the same moment would close it.
         run("omarchy-shell", "-q", "mortalfish.baseline", "openTab", "player")
-    if shutil.which("grok"):
+    if agent_for("fast"):
         subprocess.Popen([str(REPO / "bin/afterlight"), "music", "grok", service, query[:200]],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
@@ -3871,9 +3871,181 @@ def suggest(service, query, items, open_tab=True):
 CHAPTERS = ("Warm up", "Build", "Peak", "Wind down")
 
 
-def grok_ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False):
-    """Songs that fit what was asked, and searches to try, from Grok's fast
-    model with every tool off: {"songs": [{"t", "a", "w"}], "q": [...]}."""
+# ---- agents: which AI answers the music questions. Each job asks for a tier,
+# not a model: fast (look-ups, quick ideas), scout (hunting for songs) and
+# judge (taste and the night's shape, rarely). Your choice of agent per tier
+# is in agents.json; each agent's model for a tier is below. The agents run
+# as their own programs, signed in as you (Omarchy keeps them signed in),
+# with every tool off but web search where a job needs it. Sonos control
+# stays with Grok (its Sonos connection), whatever is picked here.
+
+AGENTS_FILE = STATE.parent / "agents.json"          # {"fast": "grok", "scout": "claude", "judge": "claude"}
+AGENT_LOG = STATE.parent / "agent-calls.jsonl"      # each question: when, the job, agent, model, seconds, ok
+AGENT_NOW = STATE.parent / "agents-now.json"        # the questions being worked on now (the Deck's waveform)
+AGENT_TIERS = ("fast", "scout", "judge")
+AGENT_MODELS = {
+    "grok": {"fast": ("grok-4.7-build-fast", "low"), "scout": ("grok-4.7", "medium"), "judge": ("grok-4.7", "high")},
+    "claude": {"fast": ("claude-haiku-5-5", "low"), "scout": ("claude-sonnet-5-5", "medium"),
+               "judge": ("claude-opus-5-5", "high")},
+    "codex": {"fast": ("gpt-6-luna", "low"), "scout": ("gpt-6.2-sol", "medium"), "judge": ("gpt-6.2-astra", "high")},
+}
+AGENT_NAMES = {"grok": "Grok", "claude": "Claude", "codex": "Codex"}
+AGENT_LOG_KEEP = 2000           # questions remembered (for tryouts: which agent is quick, and right)
+
+
+def agents_installed():
+    return [a for a in AGENT_MODELS if shutil.which(a)]
+
+
+def agent_choices():
+    """The agent for each tier: yours, if it's installed; otherwise Grok, or
+    whichever agent is there."""
+    have = agents_installed()
+    saved = read_json(AGENTS_FILE, {})
+    saved = saved if isinstance(saved, dict) else {}
+    default = "grok" if "grok" in have else (have[0] if have else None)
+    return {tier: saved.get(tier) if saved.get(tier) in have else default for tier in AGENT_TIERS}
+
+
+def agent_for(tier="fast"):
+    return agent_choices().get(tier)
+
+
+def agents_set(tier, agent):
+    """Pick the agent for a tier (deck agents use <tier> <agent>)."""
+    if tier not in AGENT_TIERS or agent not in AGENT_MODELS:
+        sys.exit(f"Usage: afterlight deck agents use {'|'.join(AGENT_TIERS)} {'|'.join(AGENT_MODELS)}")
+    if agent not in agents_installed():
+        sys.exit(f"{AGENT_NAMES[agent]} isn't installed (omarchy agent account add {agent}).")
+    saved = read_json(AGENTS_FILE, {})
+    saved = saved if isinstance(saved, dict) else {}
+    saved[tier] = agent
+    write_atomic(AGENTS_FILE, json.dumps(saved) + "\n")
+
+
+def agents_state():
+    """For the Deck: what's installed, what's picked, and who's working now."""
+    choices = agent_choices()
+    return {"installed": agents_installed(), "use": choices,
+            "models": {tier: AGENT_MODELS[a][tier][0] for tier, a in choices.items() if a},
+            "now": agent_working(), "record": agent_record()}
+
+
+def agent_record(last=300):
+    """How each agent has done lately, per tier, from the log: questions,
+    seconds on average, and the share answered properly (for tryouts)."""
+    try:
+        lines = AGENT_LOG.read_text().splitlines()[-last:]
+    except OSError:
+        return {}
+    record = {}
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if entry.get("agent") not in AGENT_MODELS or entry.get("tier") not in AGENT_TIERS:
+            continue
+        slot = record.setdefault(entry["agent"], {}).setdefault(entry["tier"], {"n": 0, "seconds": 0.0, "ok": 0})
+        slot["n"] += 1
+        slot["seconds"] += float(entry.get("seconds") or 0)
+        slot["ok"] += bool(entry.get("ok"))
+    for tiers in record.values():
+        for slot in tiers.values():
+            slot["seconds"] = round(slot["seconds"] / slot["n"], 1)
+            slot["ok"] = round(slot["ok"] / slot["n"], 2)
+    return record
+
+
+def agent_working():
+    """The questions being worked on now: [{id, agent, tier, job, since}]."""
+    now = read_list(AGENT_NOW)
+    alive = []
+    for item in now if isinstance(now, list) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            os.kill(int(item.get("pid", 0)), 0)
+        except (OSError, ValueError, TypeError):
+            continue                    # its process is gone: it isn't working any more
+        alive.append(item)
+    return alive
+
+
+def agent_note(add=None, done=None):
+    """Add or take away a question in agents-now.json, one process at a time."""
+    AGENT_NOW.parent.mkdir(parents=True, exist_ok=True)
+    with open(AGENT_NOW.with_suffix(".lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        now = [i for i in agent_working() if i.get("id") != done]
+        if add:
+            now.append(add)
+        write_atomic(AGENT_NOW, json.dumps(now) + "\n")
+
+
+def agent_log(entry):
+    AGENT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(AGENT_NOW.with_suffix(".lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            lines = AGENT_LOG.read_text().splitlines()[-(AGENT_LOG_KEEP - 1):]
+        except OSError:
+            lines = []
+        write_atomic(AGENT_LOG, "\n".join(lines + [json.dumps(entry)]) + "\n")
+
+
+def agent_command(agent, model, effort, prompt, web, turns, out):
+    """The agent's own program, asked one question: no shell, no files, no
+    MCP servers; web search and fetch only when the job needs them."""
+    if agent == "grok":
+        return ["grok", "-m", model, "--effort", effort, "--tools", "WebSearch,WebFetch" if web else "",
+                *(["--allow", "WebSearch", "--allow", "WebFetch"] if web else []),
+                "--deny", "MCPTool(*)", "--deny", "Bash", "--deny", "Edit", "--deny", "Write",
+                "-p", prompt, "--max-turns", str(turns), "--no-auto-update"]
+    if agent == "claude":
+        return ["claude", "-p", prompt, "--model", model, "--effort", effort,
+                "--tools=WebSearch,WebFetch" if web else "--tools=",
+                *(["--allowedTools=WebSearch,WebFetch"] if web else []),
+                "--strict-mcp-config", "--no-session-persistence", "--output-format", "text"]
+    return ["codex", "exec", "--skip-git-repo-check", "--ephemeral", "-s", "read-only", "-m", model,
+            "-c", f"model_reasoning_effort={effort}", *(["-c", 'web_search="live"'] if web else []),
+            "-o", str(out), prompt]
+
+
+def agent_ask(prompt, tier="fast", job="", web=False, timeout=60, turns=1, agent=None):
+    """One question to the agent picked for this tier; its JSON answer (the
+    first {...} in what it says) or None. Each question is noted while it's
+    worked on (the Deck's waveform) and logged afterwards (tryouts)."""
+    import secrets
+    agent = agent or agent_for(tier)
+    if not agent or not shutil.which(agent):
+        return None
+    model, effort = AGENT_MODELS[agent][tier]
+    workdir = STATE.parent / "agent-music"
+    workdir.mkdir(parents=True, exist_ok=True)
+    qid = secrets.token_hex(4)
+    out = workdir / f"answer-{qid}.txt"
+    started = time.time()
+    agent_note(add={"id": qid, "pid": os.getpid(), "agent": agent, "tier": tier, "job": job, "since": started})
+    value, text = None, ""
+    try:
+        result = subprocess.run(agent_command(agent, model, effort, prompt, web, turns, out), cwd=workdir,
+                                capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        text = out.read_text() if agent == "codex" and out.is_file() else result.stdout
+        value = json.loads(text[text.index("{"):text.rindex("}") + 1])
+    except (OSError, subprocess.SubprocessError, ValueError):
+        value = None
+    finally:
+        out.unlink(missing_ok=True)
+        agent_note(done=qid)
+        agent_log({"at": int(started), "job": job, "agent": agent, "model": model, "tier": tier, "web": web,
+                   "seconds": round(time.time() - started, 1), "ok": isinstance(value, dict), "chars": len(text)})
+    return value if isinstance(value, dict) else None
+
+
+def grok_ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False, job="ideas"):
+    """Songs that fit what was asked, and searches to try, from the fast
+    agent with every tool off: {"songs": [{"t", "a", "w"}], "q": [...]}."""
     ask = ask or (f"Someone asked to play: «{query.replace('»', '')[:200]}». There was no exact match.")
     song = '{"t":"title","a":"artist","w":"why it fits, max 30 chars"' + (',"e":7,"c":"Build"' if shape else "") \
         + (',"e":7,"b":118,"k":"8A"' if mix and not shape else "") + "}"
@@ -3884,16 +4056,9 @@ def grok_ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False):
                  '"Warm up", "Build", "Peak", "Wind down".' if shape else "")
               + (' "e" is its energy from 1 (calm) to 10 (peak), "b" its tempo in BPM and "k" its key on the Camelot wheel '
                  '(1A to 12B): rough is fine, don\'t deliberate.' if mix else ""))
-    workdir = STATE.parent / "grok-music"
-    workdir.mkdir(parents=True, exist_ok=True)
-    try:
-        # Every tool off, the Sonos MCP's too: it answers from what it knows.
-        result = subprocess.run(["grok", "-m", GROK_FAST, "--effort", "low", "--tools", "", "--deny", "MCPTool(*)", "-p", prompt,
-                                 "--max-turns", "1", "--no-auto-update"], cwd=workdir, capture_output=True,
-                                text=True, timeout=timeout, stdin=subprocess.DEVNULL)
-        text = result.stdout
-        value = json.loads(text[text.index("{"):text.rindex("}") + 1])
-    except (OSError, subprocess.SubprocessError, ValueError):
+    # Every tool off: it answers from what it knows.
+    value = agent_ask(prompt, tier="fast", job=job, timeout=timeout)
+    if value is None:
         return {"songs": [], "q": []}
     songs = [{"t": clean_text(str(x.get("t", "")), 100), "a": clean_text(str(x.get("a", "")), 100),
               "w": clean_text(str(x.get("w", "")), 40),
@@ -3926,7 +4091,7 @@ def find_songs(service, ideas):
 
 def grok_suggest(service, query):
     """Fill in Grok's ideas, each found on the service so it plays."""
-    ideas = grok_ideas(query)
+    ideas = grok_ideas(query, job="suggest")
     found = []
     for idea, match in find_songs(service, ideas["songs"]):
         if match and not any(f.get("id", f.get("video")) == match.get("id", match.get("video")) for f in found):
@@ -5277,20 +5442,9 @@ def deck_details_wanted(deck, details=None):
     return songs
 
 
-def grok_json(prompt, timeout=60):
-    """One question to Grok's fast model with every tool off; its JSON answer or None."""
-    if not shutil.which("grok"):
-        return None
-    workdir = STATE.parent / "grok-music"
-    workdir.mkdir(parents=True, exist_ok=True)
-    try:
-        result = subprocess.run(["grok", "-m", GROK_FAST, "--effort", "low", "--tools", "", "--deny", "MCPTool(*)", "-p", prompt,
-                                 "--max-turns", "1", "--no-auto-update"], cwd=workdir, capture_output=True,
-                                text=True, timeout=timeout, stdin=subprocess.DEVNULL)
-        text = result.stdout
-        return json.loads(text[text.index("{"):text.rindex("}") + 1])
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return None
+def grok_json(prompt, timeout=60, job="ask"):
+    """One question to the fast agent with every tool off; its JSON answer or None."""
+    return agent_ask(prompt, tier="fast", job=job, timeout=timeout)
 
 
 def deck_details_fill():
@@ -5341,7 +5495,7 @@ def deck_details_fill():
             listing = "\n".join(f"{i + 1}. {s['title']} by {s['artist']}" for i, s in enumerate(need)).replace("»", "")
             answer = grok_json("Answer from your own knowledge; use no tools. For a DJ, rate each song's energy from 1 "
                                "(calm) to 10 (peak). Reply with ONLY compact JSON, no prose: {\"e\":[7,4]} with one number "
-                               "per song, in the same order.\n" + listing[:6000]) or {}
+                               "per song, in the same order.\n" + listing[:6000], job="energy") or {}
             energies = answer.get("e") if isinstance(answer.get("e"), list) else []
             if len(energies) == len(need):
                 for song, energy in zip(need, energies):
@@ -5366,22 +5520,10 @@ def deck_details_fill():
             deck_details_web(missing)
 
 
-def grok_web_json(prompt, timeout=170):
-    """One question to Grok's fast model that may search and read the web
+def grok_web_json(prompt, timeout=170, job="look-up"):
+    """One question to the fast agent that may search and read the web
     (nothing else: no shell, no files, no other tools); its JSON or None."""
-    if not shutil.which("grok"):
-        return None
-    workdir = STATE.parent / "grok-music"
-    workdir.mkdir(parents=True, exist_ok=True)
-    try:
-        result = subprocess.run(["grok", "-m", GROK_FAST, "--effort", "low", "--tools", "WebSearch,WebFetch",
-                                 "--allow", "WebSearch", "--allow", "WebFetch", "--deny", "MCPTool(*)", "--deny", "Bash",
-                                 "--deny", "Edit", "--deny", "Write", "-p", prompt, "--max-turns", "16", "--no-auto-update"],
-                                cwd=workdir, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
-        text = result.stdout
-        return json.loads(text[text.index("{"):text.rindex("}") + 1])
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return None
+    return agent_ask(prompt, tier="fast", job=job, web=True, timeout=timeout, turns=16)
 
 
 def deck_details_web(songs):
@@ -5394,7 +5536,7 @@ def deck_details_web(songs):
             "For a DJ: find each song's tempo (BPM) and musical key, looking it up on the web (sites like "
             "songbpm.com, tunebat.com, musicstax.com, getsongbpm.com). Use the original studio version. Reply with "
             "ONLY compact JSON, no prose: {\"s\":[{\"bpm\":120,\"key\":\"A minor\"}]} with one object per song, "
-            "in the same order; null for what you can't find.\n" + listing[:3000]) or {}
+            "in the same order; null for what you can't find.\n" + listing[:3000], job="tempo and key") or {}
         found = answer.get("s") if isinstance(answer.get("s"), list) else []
         return batch, found if len(found) == len(batch) else []
     batches = [songs[i:i + 8] for i in range(0, min(len(songs), 24), 8)]
@@ -7071,6 +7213,7 @@ def deck_command(settings, args):
         else:
             deck["laptopOut"] = deck_laptop_out()
         deck["battery"] = deck_battery()
+        deck["agents"] = agents_state()
         deck_warm_soon(deck)
         deck["voiceReady"] = voice_ready()
         deck["voiceName"] = deck_voice_name(deck)
@@ -7397,6 +7540,13 @@ def deck_command(settings, args):
     elif action == "room-switch" and len(args) == 4 and args[1] in {"live", "queue", "unmute"} \
             and re.fullmatch(r"\d+(\.\d+)?", args[3]):
         deck_room_switch(args[1], args[2], float(args[3]))
+    elif action == "agents" and len(args) == 1:
+        print(json.dumps(agents_state()))
+    elif action == "agents" and len(args) == 4 and args[1] == "use":
+        agents_set(args[2], args[3])
+    elif action == "agents" and len(args) >= 4 and args[1] == "ask" and args[2] in AGENT_TIERS:
+        # A question straight to a tier's agent (deck agents ask <tier> <words>): for trying them out.
+        print(json.dumps(agent_ask(" ".join(args[3:]), tier=args[2], job="ask")))
     elif action == "room-stream" and len(args) == 2 and args[1] in {"on", "off"}:
         # Off: a Sonos room plays every song from Apple Music (as before the stream).
         deck_update(lambda d: d.update(roomStream=args[1] == "on"))
@@ -7528,25 +7678,26 @@ def deck_fill_now(settings, count=5, auto=False, seed=None):
         deck = deck_read()
         recent = ([deck["now"]] if deck.get("now") else []) + deck["set"]
     if not recent:
-        toast("Add a few songs first", "Grok fills the Deck with songs that fit what's in it", glyph="󰀦")
+        toast("Add a few songs first", "Fill adds songs that fit what's in the Deck", glyph="󰀦")
         return
-    if not shutil.which("grok"):
-        sys.exit("Filling the Deck needs the Grok agent (grok).")
+    if not agent_for("fast"):
+        sys.exit("Filling the Deck needs an agent: Grok, Claude or Codex (omarchy agent account add).")
+    who = AGENT_NAMES[agent_for("fast")]
     gen = deck.get("setGen", 0)       # the set these are for (see place)
     anchor = None
     if seed or auto:
         if seed:
             toast("Auto-DJ is listening to your pick…", seed["title"], glyph="∞")
         ask, anchor = deck_autodj_ask(deck, seed)
-        ideas = grok_ideas("", ask=ask, count=count + 3, timeout=150, mix=True)
-        if not ideas["songs"]:          # Grok stalled: once more, asking less
+        ideas = grok_ideas("", ask=ask, count=count + 3, timeout=150, mix=True, job="autodj")
+        if not ideas["songs"]:          # the agent stalled: once more, asking less
             ask, anchor = deck_autodj_ask(deck, seed, compact=True)
-            ideas = grok_ideas("", ask=ask, count=count + 3, timeout=120, mix=True)
+            ideas = grok_ideas("", ask=ask, count=count + 3, timeout=120, mix=True, job="autodj")
     else:
-        toast("Grok is picking songs…", "That fit " + ", ".join(s["title"] for s in recent[-3:]), glyph="✦")
+        toast(f"{who} is picking songs…", "That fit " + ", ".join(s["title"] for s in recent[-3:]), glyph="✦")
         listing = "; ".join(f"{s['title']} by {s['artist']}" for s in recent[-8:])
         ideas = grok_ideas("", ask="Suggest songs to follow this DJ set, in the same mood and flow, none already in it: "
-                               + listing.replace("»", "")[:900] + ".", count=count + 4)
+                               + listing.replace("»", "")[:900] + ".", count=count + 4, job="fill")
     service = (settings.get("music") or {}).get("service", "ytmusic")
     have = {song_key(s["title"]) for s in recent + deck["played"]}
     recent_artists = (deck_artists(seed) if seed else
@@ -7762,8 +7913,8 @@ def deck_build(settings, minutes, brief, start="", replace=False, seed=None):
     from its sound, tempo and key.
     Grok's fast model curates it in play order (a build, a peak, a wind-down);
     each song is found on your music service and the set lands in the Deck."""
-    if not shutil.which("grok"):
-        sys.exit("Building a set needs the Grok agent (grok).")
+    if not agent_for("fast"):
+        sys.exit("Building a set needs an agent: Grok, Claude or Codex (omarchy agent account add).")
     minutes = max(10, min(240, minutes))
     count = max(5, min(45, round(minutes / 3.7)))
     brief = brief.replace("»", "").strip()[:600]
@@ -7771,7 +7922,7 @@ def deck_build(settings, minutes, brief, start="", replace=False, seed=None):
     if seed:
         start = ""
         brief = brief or f"music that grows from {seed['title']} by {seed['artist']}"
-    toast("Grok is building your set…", f"About {minutes} minutes, {count} songs: {brief[:60]}", glyph="✦")
+    toast(f"{AGENT_NAMES[agent_for('fast')]} is building your set…", f"About {minutes} minutes, {count} songs: {brief[:60]}", glyph="✦")
     ask = (f"Curate a DJ set of about {minutes} minutes ({count} songs), in play order, for: «{brief}». "
            + (f"Start with «{start}». " if start else "")
            + (f"It opens with «{deck_seed_words(seed)}», already chosen: don't list it; carry on from its sound, era, "
@@ -7779,7 +7930,7 @@ def deck_build(settings, minutes, brief, start="", replace=False, seed=None):
            + "Shape it like a good DJ: ease in, build the energy, peak around two thirds of the way, then wind down. "
              "Keep neighbouring songs compatible in tempo and mood; no song twice; well-known enough to be on streaming "
              "services. In each 'w', say its job in the set in a few words (opener, builds, peak, cool-down…).")
-    ideas = grok_ideas("", ask=ask, count=count + 3, timeout=150, shape=True)
+    ideas = grok_ideas("", ask=ask, count=count + 3, timeout=150, shape=True, job="build")
     service = (settings.get("music") or {}).get("service", "ytmusic")
     found, seen = [], set()
     if seed:

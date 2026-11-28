@@ -617,7 +617,7 @@ class DeckTests(TempCase):
 
     def test_build_asks_for_the_right_length_and_keeps_reasons(self):
         asked = {}
-        def ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False):
+        def ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False, job=""):
             asked.update(ask=ask, count=count, shape=shape)
             return {"songs": [{"t": "Lady", "a": "Modjo", "w": "opener", "e": 5, "c": "Warm up"},
                               {"t": "Finally", "a": "CeCe Peniston", "w": "builds", "e": 7, "c": "Build"},
@@ -638,7 +638,7 @@ class DeckTests(TempCase):
 
     def test_build_from_a_picked_song_opens_with_it(self):
         asked = {}
-        def ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False):
+        def ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False, job=""):
             asked.update(ask=ask)
             return {"songs": [{"t": "Lady", "a": "Modjo", "w": "follows", "e": 6, "c": "Build"},
                               {"t": "Seed", "a": "Someone", "w": "again", "e": 0, "c": ""}], "q": []}
@@ -658,7 +658,7 @@ class DeckTests(TempCase):
         self.patch("deck_watch", lambda: None)
         for n in range(2):
             self.deck("add", "applemusic", json.dumps(self.apple(n)))
-        def ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False):
+        def ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False, job=""):
             self.assertIn("The next song follows «Seed by Someone», which the listener just picked", ask)
             self.assertTrue(mix)
             return {"songs": [{"t": "More", "a": "Someone", "w": ""}, {"t": "Other", "a": "Else", "w": ""}], "q": []}
@@ -676,7 +676,7 @@ class DeckTests(TempCase):
         self.patch("toast", lambda *a, **k: None)
         self.deck("add", "applemusic", json.dumps(self.apple(1)))
         meanwhile = {"do": None}
-        def ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False):
+        def ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False, job=""):
             meanwhile["do"]()                      # what happens while Grok thinks
             return {"songs": [{"t": "Late", "a": "Elsewhere", "w": ""}], "q": []}
         self.patch("grok_ideas", ideas)
@@ -792,7 +792,7 @@ class DeckTests(TempCase):
         for n in range(2):
             self.deck("add", "applemusic", json.dumps(self.apple(n)))
         self.patch("am_lookup", lambda params: [{"trackId": 1000, "trackTimeMillis": 201000}, {"trackId": 1001, "trackTimeMillis": 99000}])
-        self.patch("grok_json", lambda prompt, timeout=60: {"e": [4, 9]})
+        self.patch("grok_json", lambda prompt, timeout=60, job="": {"e": [4, 9]})
         self.patch("beatport_windows", lambda: [])
         al.deck_details_fill()
         details = al.deck_details_read()
@@ -1410,6 +1410,75 @@ class DeckStreamTests(TempCase):
         self.assertTrue(al.ufw_allows(8766))
 
 
+class AgentTests(TempCase):
+    """Which agent answers: a tier per job, the agent's own program with its
+    tools locked down, and every question noted and logged."""
+
+    def setUp(self):
+        super().setUp()
+        self.patch("AGENTS_FILE", self.tmp / "agents.json")
+        self.patch("AGENT_LOG", self.tmp / "agent-calls.jsonl")
+        self.patch("AGENT_NOW", self.tmp / "agents-now.json")
+        self.patch("STATE", self.tmp / "afterlight" / "state.json")
+        self.have = {"grok", "claude", "codex"}
+        self.patch("shutil", mock.Mock(which=lambda name: f"/bin/{name}" if name in self.have else None))
+
+    def test_record_sums_each_agent_and_tier(self):
+        log = self.tmp / "agent-calls.jsonl"
+        rows = [{"agent": "claude", "tier": "fast", "seconds": 2, "ok": True},
+                {"agent": "claude", "tier": "fast", "seconds": 4, "ok": False},
+                {"agent": "nobody", "tier": "fast", "seconds": 9, "ok": True}]
+        log.write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n")
+        self.assertEqual(al.agent_record(), {"claude": {"fast": {"n": 2, "seconds": 3.0, "ok": 0.5}}})
+
+    def test_tiers_default_to_grok_and_keep_your_choice(self):
+        self.assertEqual(al.agent_choices(), {"fast": "grok", "scout": "grok", "judge": "grok"})
+        al.agents_set("scout", "claude")
+        self.assertEqual(al.agent_for("scout"), "claude")
+        self.assertEqual(al.agents_state()["models"]["scout"], "claude-sonnet-5-5")
+        self.have.discard("claude")             # uninstalled: back to Grok, not a broken pick
+        self.assertEqual(al.agent_for("scout"), "grok")
+        with self.assertRaises(SystemExit):
+            al.agents_set("scout", "claude")
+
+    def test_each_agent_runs_with_its_tools_locked_down(self):
+        out = self.tmp / "answer.txt"
+        grok = al.agent_command("grok", "grok-4.7-build-fast", "low", "q", False, 1, out)
+        self.assertIn("--deny", grok)
+        self.assertEqual(grok[grok.index("--tools") + 1], "")
+        claude = al.agent_command("claude", "claude-haiku-5-5", "low", "q", False, 1, out)
+        self.assertIn("--tools=", claude)
+        self.assertIn("--strict-mcp-config", claude)          # no MCP servers (Sonos stays with Grok)
+        web = al.agent_command("claude", "claude-haiku-5-5", "low", "q", True, 8, out)
+        self.assertIn("--tools=WebSearch,WebFetch", web)
+        codex = al.agent_command("codex", "gpt-6-luna", "low", "q", False, 1, out)
+        self.assertEqual(codex[codex.index("-s") + 1], "read-only")
+        self.assertNotIn('web_search="live"', codex)
+        self.assertIn('web_search="live"', al.agent_command("codex", "gpt-6-luna", "low", "q", True, 1, out))
+
+    def test_a_question_is_noted_while_it_runs_and_logged_after(self):
+        seen = []
+        def answer(cmd, **kw):
+            seen.append([i["agent"] for i in al.agent_working()])
+            return mock.Mock(stdout='Sure: {"songs": [{"t": "Finally"}]} hope that helps')
+        self.patch("subprocess", mock.Mock(run=answer, SubprocessError=Exception, DEVNULL=-3))
+        value = al.agent_ask("q", tier="fast", job="autodj", agent="claude")
+        self.assertEqual(value, {"songs": [{"t": "Finally"}]})
+        self.assertEqual(seen, [["claude"]])                  # working while it ran
+        self.assertEqual(al.agent_working(), [])               # and not after
+        logged = json.loads(al.AGENT_LOG.read_text().splitlines()[-1])
+        self.assertEqual((logged["job"], logged["agent"], logged["model"], logged["ok"]),
+                         ("autodj", "claude", "claude-haiku-5-5", True))
+
+    def test_a_bad_answer_is_none_and_logged_as_failed(self):
+        self.patch("subprocess", mock.Mock(run=lambda cmd, **kw: mock.Mock(stdout="I can't help with that"),
+                                           SubprocessError=Exception, DEVNULL=-3))
+        self.assertIsNone(al.agent_ask("q", agent="grok"))
+        self.assertFalse(json.loads(al.AGENT_LOG.read_text().splitlines()[-1])["ok"])
+        self.have.clear()
+        self.assertIsNone(al.agent_ask("q"))                   # no agent at all
+
+
 class DeckAndPlayerTabTests(TempCase):
     """The Deck's room and Baseline's Sonos room (the Player tab, the volume
     keys) are the same room, whichever one you change."""
@@ -1834,7 +1903,7 @@ class SuggestionTests(TempCase):
     def test_a_newer_search_wins(self):
         self.patch("SUGGEST", self.tmp / "suggest.json")
         al.suggest_write({"service": "applemusic", "query": "newer", "close": [], "grok": [], "try": [], "pending": True})
-        self.patch("grok_ideas", lambda q: {"songs": [], "q": ["x"]})
+        self.patch("grok_ideas", lambda q, **kw: {"songs": [], "q": ["x"]})
         al.grok_suggest("applemusic", "older")
         self.assertTrue(json.loads((self.tmp / "suggest.json").read_text())["pending"])
 
