@@ -503,8 +503,15 @@
   "deck.minutes": "%1 min",
   "deck.hours": "%1 h",
   "deck.buildGo": "Build",
-  "deck.buildFrom": "Starts from %1, then eases in, builds, peaks and winds down. Grok takes about half a minute.",
-  "deck.buildNote": "Grok eases in, builds, peaks and winds down. It takes about half a minute; the songs land in the set.",
+  "deck.buildLand": "The new songs go",
+  "deck.buildLand_next": "up next",
+  "deck.buildLand_after": "after the set",
+  "deck.buildLand_replace": "in place of it",
+  "deck.buildFrom": "Starts from %1, then eases in, builds, peaks and winds down. %2 takes %3.",
+  "deck.buildAfter": "Follows on from %1, the last song in the set, then builds, peaks and winds down. %2 takes %3.",
+  "deck.aboutSeconds": "about %1 seconds",
+  "deck.aboutMinutes": { "one": "about a minute", "other": "about %1 minutes" },
+  "deck.buildNote": "%1 eases in, builds, peaks and winds down. It takes %2; the songs land in the set.",
   "deck.search": "Find a song, album or playlist",
   "deck.findHint": "Search for a song, album or playlist (yours come first). Tap a song to choose: now, next, later or somewhere in the set; tap an album or playlist to open it and pick songs; or drag either in, onto the cover, or onto a room.",
   "deck.playNow": "Play now",
@@ -748,7 +755,9 @@
     "other": "Played tonight (%1 songs)"
   },
   "deck.agents": "Agents",
-  "deck.agentsAbout": "Who answers the Deck's music questions. Light jobs go to a quick model, so the big ones are kept for what needs them.",
+  "deck.agentsAbout": "Who answers the Deck's music questions. Light jobs go to a quick model, so the big ones are kept for what needs them. A job you leave to the Deck goes to the agent with the most of its week left, if it's quick enough.",
+  "deck.agentsWeek": "This week",
+  "deck.agentsUsed": "%1% used",
   "deck.agentsFast": "Quick jobs",
   "deck.agentsFastAbout": "Picking songs, tempo and key, energy",
   "deck.agentsScout": "Scouts",
@@ -784,5 +793,7 @@
   "deck.agentsUnreliable": "Unreliable here: too few usable answers",
   "deck.agentsInstead": " · %1 takes %2 s",
   "deck.agentsFitSlow": "slow",
-  "deck.agentsFitUnreliable": "unreliable"
+  "deck.agentsFitUnreliable": "unreliable",
+  "deck.songsCount": "%1 songs",
+  "deck.fillTo": "Fill to"
 }

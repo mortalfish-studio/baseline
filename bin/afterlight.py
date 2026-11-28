@@ -3898,8 +3898,8 @@ def agents_installed():
 
 
 def agent_choices():
-    """The agent for each tier: yours, if it's installed; otherwise Grok, or
-    whichever agent is there."""
+    """The agent for each tier: yours, if it's installed; otherwise the fit one
+    with the most allowance left (Grok, or whichever is there, to start)."""
     have = agents_installed()
     saved = read_json(AGENTS_FILE, {})
     saved = saved if isinstance(saved, dict) else {}
@@ -3924,6 +3924,8 @@ def scout_agents(count):
     # Mix leaves out an agent that's too slow or unreliable for digging
     # (it gets another try after a week).
     have = [a for a in have if agent_suited(a, "scout", record)] or have
+    used = agent_allowance()
+    have = [a for a in have if not agent_spent(a, used)] or have     # nor one whose allowance is nearly spent
     return [have[n % len(have)] for n in range(count)]
 
 
@@ -3949,12 +3951,13 @@ def agents_state():
     """For the Deck: what's installed, what's picked, and who's working now."""
     choices = agent_choices()
     return {"installed": agents_installed(), "use": choices,
+            # with Mix, only those who'll dig (not one left out as slow, or nearly spent)
             "models": {tier: AGENT_MODELS[a][tier][0] if a in AGENT_MODELS else
-                       " + ".join(AGENT_MODELS[b][tier][0] for b in agents_installed())
+                       " + ".join(AGENT_MODELS[b][tier][0] for b in dict.fromkeys(scout_agents(3)))
                        for tier, a in choices.items() if a},
             "now": agent_working(), "record": agent_record(), "prep": read_json(DECK_PREP, {}),
             "best": {tier: agent_best(tier, agents_installed()) for tier in AGENT_TIERS},
-            "budget": AGENT_BUDGET}
+            "budget": AGENT_BUDGET, "used": agent_allowance(), "spent": AGENT_SPENT}
 
 
 def agent_record(last=300):
@@ -3993,8 +3996,9 @@ AGENT_RETRY = 7 * 86400          # an agent left out gets another try after a we
 
 
 def agent_fit(slot, tier):
-    """"ok", "slow" or "unreliable" for a tier, from at least two questions."""
-    if not slot or slot.get("n", 0) < 2:
+    """"ok", "slow" or "unreliable" for a tier, from at least two questions
+    (or one that ran past twice the time it's given: no need to wait twice)."""
+    if not slot or (slot.get("n", 0) < 2 and slot.get("seconds", 0) <= 2 * AGENT_BUDGET[tier]):
         return "ok"
     if slot["ok"] < AGENT_RELIABLE:
         return "unreliable"
@@ -4007,13 +4011,52 @@ def agent_suited(agent, tier, record=None):
     return agent_fit(slot, tier) == "ok" or time.time() - (slot or {}).get("last", 0) > AGENT_RETRY
 
 
-def agent_best(tier, have, record=None):
-    """The quickest agent that's fit for a tier (by its record), or None.
-    One without a record yet comes after those with a good one."""
+# Each agent runs on a subscription with a weekly allowance, and the quick
+# ones cost the most of it; so speed only decides who's fit for a job, and the
+# job goes to whoever has the most allowance left. One nearly spent sits out.
+AGENT_ALLOWANCE = STATE.parent / "agent-allowance.json"      # {"at": t, "used": {"claude": 0.69, ...}}
+AGENT_ALLOWANCE_FRESH = 600
+AGENT_SPENT = 0.9
+
+
+def agent_allowance():
+    """How much of each agent's allowance is used ({agent: 0..1}, the fullest
+    of its limits), from omarchy agent account list, kept ten minutes."""
+    kept = read_json(AGENT_ALLOWANCE, {})
+    if isinstance(kept, dict) and time.time() - float(kept.get("at") or 0) < AGENT_ALLOWANCE_FRESH:
+        return kept.get("used") or {}
+    used = {}
+    try:
+        listing = json.loads(subprocess.run(["omarchy", "agent", "account", "list", "--json"], capture_output=True,
+                                            text=True, timeout=15).stdout or "[]")
+        for provider in listing if isinstance(listing, list) else []:
+            name = provider.get("provider")
+            active = [a for a in provider.get("accounts") or [] if a.get("active")]
+            limits = [float(x.get("percent") or 0) for a in active for x in a.get("limits") or []
+                      if isinstance(x.get("percent"), (int, float))]
+            if name in AGENT_MODELS and limits:
+                used[name] = round(max(limits), 3)
+    except (OSError, ValueError, subprocess.SubprocessError, AttributeError, TypeError):
+        used = (kept or {}).get("used") or {} if isinstance(kept, dict) else {}
+    write_atomic(AGENT_ALLOWANCE, json.dumps({"at": int(time.time()), "used": used}) + "\n")
+    return used
+
+
+def agent_spent(agent, used=None):
+    return (agent_allowance() if used is None else used).get(agent, 0) >= AGENT_SPENT
+
+
+def agent_best(tier, have, record=None, used=None):
+    """Of the agents fit for a tier (quick and sound enough, by their record),
+    the one with the most allowance left, or None. Grok first on a tie, then
+    the quicker."""
     record = agent_record() if record is None else record
+    used = agent_allowance() if used is None else used
     fit = [a for a in have if agent_fit(record.get(a, {}).get(tier), tier) == "ok"]
+    fit = [a for a in fit if not agent_spent(a, used)] or fit
     timed = lambda a: (record.get(a, {}).get(tier) or {}).get("seconds") or AGENT_BUDGET[tier]
-    return min(fit, key=lambda a: (timed(a), a != "grok")) if fit else None
+    left = lambda a: round(used.get(a, 0.5), 1)        # not known: taken as middling
+    return min(fit, key=lambda a: (left(a), a != "grok", timed(a))) if fit else None
 
 
 def agent_working():
@@ -4091,7 +4134,7 @@ def agent_ask(prompt, tier="fast", job="", web=False, timeout=60, turns=1, agent
         result = subprocess.run(agent_command(agent, model, effort, prompt, web, turns, out), cwd=workdir,
                                 capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         text = out.read_text() if agent == "codex" and out.is_file() else result.stdout
-        value = json.loads(text[text.index("{"):text.rindex("}") + 1])
+        value = agent_json(text)
     except (OSError, subprocess.SubprocessError, ValueError):
         value = None
     finally:
@@ -4100,6 +4143,22 @@ def agent_ask(prompt, tier="fast", job="", web=False, timeout=60, turns=1, agent
         agent_log({"at": int(started), "job": job, "agent": agent, "model": model, "tier": tier, "web": web,
                    "seconds": round(time.time() - started, 1), "ok": isinstance(value, dict), "chars": len(text)})
     return value if isinstance(value, dict) else None
+
+
+def agent_json(text):
+    """The JSON object in an agent's answer, or None. Agents wrap it in a code
+    fence or a sentence, or mention {braces} around it: each { is tried in
+    turn, and the biggest object that parses wins."""
+    decoder, best, at = json.JSONDecoder(), None, text.find("{")
+    while at != -1:
+        try:
+            value, end = decoder.raw_decode(text, at)
+            if isinstance(value, dict) and (best is None or end - at > best[1]):
+                best = (value, end - at)
+        except ValueError:
+            pass
+        at = text.find("{", at + 1)
+    return best[0] if best else None
 
 
 def grok_ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False, job="ideas"):
@@ -4139,8 +4198,9 @@ def find_songs(service, ideas):
     search = am_songs if service == "applemusic" else beatport_search_tracks if service == "beatport" else ytm_search
     def look(idea):
         try:
-            results = [i for i in search(f"{idea['t']} {idea['a']}") if i["kind"] == "song"]
-        except (OSError, ValueError):
+            results = [i for i in search(f"{idea['t']} {idea['a']}")
+                       if isinstance(i, dict) and i.get("kind") == "song" and isinstance(i.get("title"), str)]
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):     # one odd search doesn't sink a set
             return idea, None
         same = [i for i in results if song_key(i["title"]) == song_key(idea["t"])]
         # The version people know first: not a live take, instrumental or karaoke one, unless that was asked for.
@@ -4190,7 +4250,7 @@ DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kin
               "paused": False, "sleep": None, "crossfade": False, "autodj": False, "autodjAt": 0, "handoff": "",
               "pushed": [], "pushedFrom": 1, "expect": None, "was": None, "updated": 0,
               "lock": False, "requests": [], "guests": None, "requestsAuto": False, "votes": {}, "lastCall": 0,
-              "shaped": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": "",
+              "shaped": [], "smoothed": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": "",
               "micViz": False, "speaking": None, "asks": [], "awoke": False, "phoneSeen": 0, "ready": None,
               "recapAt": 0, "closedAt": 0, "skipped": [], "direction": "", "toward": None,
               "autoTidy": True, "autodjSettle": None, "autodjBusy": None, "softSkip": True, "unplayable": None, "silent": None, "batteryWarned": 0, "setGen": 0,
@@ -5109,7 +5169,8 @@ def deck_tick(last):
     deck_closing(deck)
     if deck_settle_due(deck):
         uids = set(deck["autodjSettle"]["uids"])
-        deck_edit(lambda d: (deck_tidy(d, uids), d.update(autodjSettle=None)))
+        # Auto-DJ tidying its own songs isn't yours to undo: Ctrl+Z stays with what you did.
+        deck_update(lambda d: (deck_tidy(d, uids), d.update(autodjSettle=None)))
         deck_after_edit()
     deck_fade_heal()
     deck_battery_watch(deck)
@@ -5119,7 +5180,8 @@ def deck_tick(last):
     if deck_unplugged(deck):
         return None
     if deck_autodj_due(deck):
-        deck_update(lambda d: d.update(autodjAt=time.time()))
+        # Marked busy now, not when the fill gets going: the next tick mustn't start another.
+        deck_update(lambda d: d.update(autodjAt=time.time(), autodjBusy={"at": time.time(), "toward": "", "seed": ""}))
         service = (deck.get("now") or {}).get("service") or "applemusic"
         subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "fill", "--auto", "--service", service], stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -5536,10 +5598,24 @@ def keyfinder_tool():
         return None
     if not shutil.which("g++") or not Path("/usr/include/keyfinder/keyfinder.h").is_file():
         return None
+    # A build that failed isn't tried again until the source changes (this
+    # is asked for every song the Deck shows).
+    failed = KEYFINDER.with_suffix(".failed")
+    try:
+        if failed.is_file() and failed.stat().st_mtime >= source.stat().st_mtime:
+            return None
+    except OSError:
+        pass
     KEYFINDER.parent.mkdir(parents=True, exist_ok=True)
-    built = subprocess.run(["g++", "-O2", "-o", str(KEYFINDER), str(source), "-lkeyfinder"],
-                           capture_output=True, timeout=120)
-    return KEYFINDER if built.returncode == 0 else None
+    try:
+        built = subprocess.run(["g++", "-O2", "-o", str(KEYFINDER), str(source), "-lkeyfinder"],
+                               capture_output=True, timeout=120)
+        ok = built.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        ok = False
+    if not ok:
+        failed.write_text(time.strftime("%Y-%m-%d %H:%M\n"))
+    return KEYFINDER if ok else None
 
 
 def deck_details_exact(details):
@@ -5748,27 +5824,58 @@ def deck_details_soon(deck):
 
 def deck_edit(change):
     """deck_update for a change you might want to take back: the set as it was
-    goes on the undo list first (the last 30)."""
+    goes on the undo list (the last 30), with what the change left (so undo
+    keeps songs that came in after it) and any songs it took from what's
+    played (so undo gives them back). A change that changed nothing isn't
+    remembered: one undo is one thing you did."""
     def remembered(d):
-        stack = read_list(DECK_UNDO)
-        stack = (stack if isinstance(stack, list) else [])[-29:] + [{"set": d["set"], "pinned": d["pinned"]}]
-        write_atomic(DECK_UNDO, json.dumps(stack))
-        return change(d)
+        before = {"set": list(d["set"]), "pinned": list(d["pinned"])}
+        played = list(d["played"])
+        result = change(d)
+        left = {s["uid"] for s in d["played"]}
+        taken = [s for s in played if s["uid"] not in left]
+        if [s["uid"] for s in d["set"]] != [s["uid"] for s in before["set"]] or d["pinned"] != before["pinned"] or taken:
+            stack = read_list(DECK_UNDO)
+            stack = (stack if isinstance(stack, list) else [])[-29:] + [{
+                **before, "after": [s["uid"] for s in d["set"]], "afterPinned": list(d["pinned"]), "taken": taken}]
+            write_atomic(DECK_UNDO, json.dumps(stack))
+        return result
     return deck_update(remembered)
 
 
 def deck_undo():
-    stack = read_list(DECK_UNDO)
-    if not isinstance(stack, list) or not stack:
-        return False
-    last = stack.pop()
+    """Take back the last thing you did to the set. Songs that came in since
+    (Auto-DJ's, the song "previous" put back) stay where they are, pins made
+    since stay, and songs it took from what's played go back there. Done
+    under the Deck's lock, so an edit landing meanwhile isn't lost."""
     def back(d):
+        stack = read_list(DECK_UNDO)
+        if not isinstance(stack, list) or not stack:
+            return False
+        last = stack.pop()
+        write_atomic(DECK_UNDO, json.dumps(stack))
         gone = ({d["now"]["uid"]} if d.get("now") else set()) | {s["uid"] for s in d["played"]}
-        d["set"] = [s for s in last.get("set", []) if isinstance(s, dict) and s.get("uid") not in gone]
-        d["pinned"] = [u for u in last.get("pinned", []) if isinstance(u, str)]
-    deck_update(back)
-    write_atomic(DECK_UNDO, json.dumps(stack))
-    return True
+        restored = [s for s in last.get("set", []) if isinstance(s, dict) and s.get("uid") not in gone]
+        known = {s["uid"] for s in restored} | set(last.get("after") or [])
+        if "after" in last:                 # older entries don't know what came after
+            # each stays after the song it follows now (or first, if it leads)
+            follows = None
+            for song in d["set"]:
+                if song["uid"] not in known:
+                    at = next((i + 1 for i, x in enumerate(restored) if x["uid"] == follows), 0) if follows else 0
+                    restored.insert(at, song)
+                if any(x["uid"] == song["uid"] for x in restored):
+                    follows = song["uid"]
+        d["set"] = restored
+        since = [u for u in d["pinned"] if u not in (last.get("afterPinned") or [])]
+        present = {s["uid"] for s in d["set"]}
+        d["pinned"] = [u for u in [*last.get("pinned", []), *since] if isinstance(u, str) and u in present]
+        here = {s["uid"] for s in d["set"]} | gone
+        back_to_played = [s for s in last.get("taken") or [] if isinstance(s, dict) and s.get("uid") not in here]
+        if back_to_played:
+            d["played"] = sorted(d["played"] + back_to_played, key=lambda s: s.get("playedAt", 0))[-DECK_HISTORY:]
+        return True
+    return deck_update(back)
 
 
 def deck_place(d, where, uids):
@@ -5819,7 +5926,10 @@ def deck_move_chapter(d, uid, index):
         return
     run = d["set"][at:end]
     rest = d["set"][:at] + d["set"][end:]
-    index = max(0, min(len(rest), index - (len(run) if index > at else 0)))
+    # index is a gap in the set as it is: before the chapter, inside it (it
+    # stays), or after it (less the chapter's own songs).
+    index = index if index <= at else at if index <= end else index - len(run)
+    index = max(0, min(len(rest), index))
     d["set"] = rest[:index] + run + rest[index:]
 
 
@@ -5839,22 +5949,34 @@ def deck_save_set(name, part="next"):
     if not name or not songs:
         return False
     saved = [s for s in deck_sets() if s["name"].lower() != name.lower()]
-    saved.insert(0, {"name": name, "saved": time.time(), "songs": [{k: v for k, v in s.items() if k not in ("warn", "playedAt")} for s in songs][:300]})
+    saved.insert(0, {"name": name, "saved": time.time(), "songs": [deck_set_song(s) for s in songs][:300]})
     write_atomic(DECK_SETS, json.dumps(saved[:50]))
     return True
+
+
+# A saved set keeps the songs, not who asked for them: a guest's name,
+# photo, phone and message stay with that night.
+DECK_SET_DROP = {"warn", "playedAt", "rid", "by", "photo", "phone", "gid", "note"}
+
+
+def deck_set_song(song):
+    return {k: v for k, v in song.items() if k not in DECK_SET_DROP}
 
 
 def deck_load_set(name, replace=False):
     found = next((s for s in deck_sets() if s["name"].lower() == name.lower()), None)
     if not found:
         return False
-    songs = [{**s, "uid": os.urandom(4).hex()} for s in found["songs"] if isinstance(s, dict) and s.get("service") in DECK_SERVICES]
+    songs = [{**deck_set_song(s), "uid": os.urandom(4).hex()} for s in found["songs"]
+             if isinstance(s, dict) and s.get("service") in DECK_SERVICES]
     def load(d):
         if replace:
             d["set"], d["pinned"] = songs, []
             d["setGen"] = d.get("setGen", 0) + 1
-        else:
-            d["set"] = d["set"] + songs
+        else:                               # added to the set: not a song twice
+            key = lambda s: (s["service"], s.get("id"), s.get("video"))
+            known = {key(s) for s in d["set"] + ([d["now"]] if d.get("now") else [])}
+            d["set"] = d["set"] + [s for s in songs if key(s) not in known]
     deck_edit(load)
     return True
 
@@ -5892,12 +6014,14 @@ def deck_shape(d, how):
     slots = [i for i, s in enumerate(d["set"]) if s["uid"] not in d["pinned"]]
     songs = [d["set"][i] for i in slots]
     info = lambda s: full.get(s["uid"], {})
-    d["shaped"] = [s["uid"] for s in d["set"]]      # placed by a shape: no ◆ for these
-    if how == "bumps":
-        return deck_smooth_bumps(d, full, details.get("now"))
     field = {"tempo": "bpm", "smooth": "bpm", "energy": "energy", "arc": "energy", "harmonic": "key"}.get(how)
-    if not field:
+    if not field and how != "bumps":
         return False
+    if how == "bumps":
+        # What's left after smoothing still shows: those bumps are real.
+        d["shaped"] = []
+        return deck_smooth_bumps(d, full, details.get("now"))
+    d["shaped"] = [s["uid"] for s in d["set"]]      # placed by a shape: no ◆ for these
     known = [s for s in songs if info(s).get(field)]
     rest = [s for s in songs if not info(s).get(field)]
     if how == "tempo":
@@ -5944,35 +6068,56 @@ def deck_bump(before, song):
 def deck_smooth_bumps(d, full, now, fixed=None):
     """Fix the bumps: keep the order, but move a song that doesn't sit well
     (the ◆ ones) to wherever it fits best, one move at a time, while that
-    makes the set smoother. Pinned songs stay put."""
+    makes the set smoother. Pinned songs stay put, and so does every song
+    between a pinned one and where a move would push it.
+
+    A move changes only the pairs around where the song left and where it
+    lands, so each try is scored from those few pairs: a long set smooths
+    in well under a second (it's done holding the Deck's lock)."""
     info = lambda s: full.get(s["uid"], s)
     pinned = set(d["pinned"]) | set(fixed or ())
-    def total(seq):
-        return sum(deck_bump(info(a) if a else now, info(b)) for a, b in zip([None] + seq[:-1], seq))
+    bumps = {}
+
+    def bump(a, b):                      # a None: the song playing now
+        key = (a["uid"] if a else None, b["uid"] if b else None)
+        if key not in bumps:
+            bumps[key] = 0 if b is None else deck_bump(info(a) if a else now, info(b))
+        return bumps[key]
     seq = list(d["set"])
-    best = total(seq)
+    # A song moves only within its part of the set: the songs next to it from
+    # the same build, in the same chapter. The night's shape (warm up, build,
+    # peak, wind down) and a set built after another stay as they are.
+    part = lambda s: (s.get("from") or "", s.get("chapter") or "")
     moved = False
     for _ in range(40):
-        bumpy = [i for i, s in enumerate(seq) if s["uid"] not in pinned
-                 and (deck_bump(info(seq[i - 1]) if i else now, info(s)) or
-                      (i + 1 < len(seq) and deck_bump(info(s), info(seq[i + 1]))))]
+        n = len(seq)
+        at = lambda k: seq[k] if 0 <= k < n else None
+        bumpy = [i for i in range(n) if seq[i]["uid"] not in pinned
+                 and (bump(at(i - 1), seq[i]) or bump(seq[i], at(i + 1)))]
+        pins = [k for k in range(n) if seq[k]["uid"] in pinned]
         choice = None
         for i in bumpy:
+            song, before, after = seq[i], at(i - 1), at(i + 1)
+            lift = bump(before, after) - bump(before, song) - bump(song, after)
             rest = seq[:i] + seq[i + 1:]
             for j in range(len(rest) + 1):
                 if j == i:
                     continue
-                trial = rest[:j] + [seq[i]] + rest[j:]
-                # pinned songs keep their places
-                if any(trial[k]["uid"] != seq[k]["uid"] for k in range(len(seq)) if seq[k]["uid"] in pinned):
+                # songs between here and there shift one place: never a pinned one
+                low, high = (j, i - 1) if j < i else (i + 1, j)
+                if any(low <= k <= high for k in pins) or any(part(seq[k]) != part(song) for k in range(low, high + 1)):
                     continue
-                score = total(trial)
-                if score < best and (choice is None or score < choice[0]):
-                    choice = (score, trial)
+                left, right = (rest[j - 1] if j else None), (rest[j] if j < len(rest) else None)
+                change = lift + bump(left, song) + bump(song, right) - bump(left, right)
+                if change < -1e-9 and (choice is None or change < choice[0]):
+                    choice = (change, i, j)
         if not choice:
             break
-        best, seq, moved = choice[0], choice[1], True
+        _, i, j = choice
+        rest = seq[:i] + seq[i + 1:]
+        seq, moved = rest[:j] + [seq[i]] + rest[j:], True
     d["set"] = seq
+    d["smoothed"] = [s["uid"] for s in seq]     # as smooth as it goes: the Deck stops offering it, till the set changes
     return moved or True
 
 
@@ -7377,11 +7522,16 @@ def deck_battery_watch(deck):
             return
 
 
+DECK_AUTODJ_STUCK = 600         # a fill still "busy" after this long died: don't wait on it
+
+
 def deck_autodj_due(deck):
-    """Auto-DJ: with three songs or fewer left, Grok adds more that fit (at
-    most every three minutes)."""
+    """Auto-DJ: with three songs or fewer left, the agent adds more that fit
+    (at most every three minutes, and never while a fill is still at work: a
+    slow agent's two fills would add the same songs twice)."""
+    busy = (deck.get("autodjBusy") or {}).get("at") or 0
     return bool(deck.get("autodj") and deck.get("playing") and len(deck["set"]) <= 3
-                and time.time() - (deck.get("autodjAt") or 0) > 180)
+                and time.time() - (deck.get("autodjAt") or 0) > 180 and time.time() - busy > DECK_AUTODJ_STUCK)
 
 
 def deck_command(settings, args):
@@ -7432,15 +7582,27 @@ def deck_command(settings, args):
                 for song in fresh:
                     d["set"].insert(random.randint(min(1, len(d["set"])), len(d["set"])), song)
                 return fresh
-            where = len(d["set"]) if at < 0 else min(at, len(d["set"]))
-            d["set"][where:where] = fresh
-            if "--play" in args and fresh:
-                deck_start(d, fresh[0])
-            return fresh
-        fresh = deck_edit(add)
+            key = lambda s: (s["service"], s.get("id"), s.get("video"))
+            if at >= 0:
+                # Next, at a spot, or to play: a song already queued moves
+                # there too (it isn't added twice, nor left where it was).
+                queued = {key(s): s for s in d["set"]}
+                moving = [queued.get(key(s)) or s for s in songs]
+                d["set"] = [s for s in d["set"] if s not in moving]
+                where = min(at, len(d["set"]))
+                d["set"][where:where] = moving
+                if "--play" in args and moving:
+                    deck_start(d, moving[0])
+                return {"fresh": fresh, "moved": len(moving) - len(fresh)}
+            d["set"].extend(fresh)
+            return {"fresh": fresh, "moved": 0}
+        done = deck_edit(add)
+        fresh = done["fresh"] if isinstance(done, dict) else done
         if fresh and "--play" not in args:
             toast("Added to the Deck", fresh[0]["title"] + (f" and {len(fresh) - 1} more" if len(fresh) > 1 else ""),
                   glyph="󰐒")
+        elif songs and isinstance(done, dict) and "--play" not in args:
+            toast("Already in the set", songs[0]["title"] + ((" moves up next" if at == 0 else " moves there") if done["moved"] else ""), glyph="󰐒")
         if "--play" not in args:
             deck_after_edit()
     elif action == "move" and len(args) == 3 and args[2].lstrip("-").isdigit():
@@ -7490,8 +7652,8 @@ def deck_command(settings, args):
     elif action == "shape" and len(args) == 2:
         if deck_edit(lambda d: deck_shape(d, args[1])):
             deck_after_edit()
-        if args[1] in DIRECTIONS:           # and Auto-DJ carries on that way
-            deck_update(lambda d: d.update(direction=args[1]))
+        if args[1] in DIRECTIONS:           # and Auto-DJ, if it's on, carries on that way
+            deck_update(lambda d: d.update(direction=args[1]) if d.get("autodj") else None)
     elif action == "guests" and len(args) == 2 and args[1] in {"on", "off"}:
         if args[1] == "on":
             print(deck_guests_on())
@@ -7694,27 +7856,29 @@ def deck_command(settings, args):
         elif not song:
             toast("Couldn't find what's playing", "Nothing playing, or it isn't on your music service", glyph="󰀦")
         else:
-            deck_edit(lambda d: d["set"].insert(0, song) if "--next" in args else d["set"].append(song))
-            deck_after_edit()
-            toast("Added to the Deck" + (", next" if "--next" in args else ""), f"{song['title']} · {song['artist']}", glyph="󰐒")
+            deck_put_one(song, "--next" in args)
     elif action == "find-add" and len(args) >= 2:
         # A song by name, the best match on your music service, into the set.
         words = " ".join(a for a in args[1:] if a != "--next").strip()[:200]
         service = (settings.get("music") or {}).get("service", "ytmusic")
-        hits = [i for i in deck_search(service, words) if i.get("kind") == "song"] if words else []
-        if not hits:
+        song = deck_find_song(service, words)
+        if not song:
             toast("Couldn't find that song", words, glyph="󰀦")
             return
-        song = deck_item(service, hits[0])
-        deck_edit(lambda d: d["set"].insert(0, song) if "--next" in args else d["set"].append(song))
-        deck_after_edit()
-        toast("Added to the Deck" + (", next" if "--next" in args else ""), f"{song['title']} · {song['artist']}", glyph="󰐒")
+        deck_put_one(song, "--next" in args)
     elif action == "build-from-playing":
         # A set grown from the song you're hearing.
         minutes = int(args[1]) if len(args) > 1 and args[1].isdigit() else 60
-        song, _ = deck_playing_song(settings)
+        song, in_deck = deck_playing_song(settings)
         if not song:
             toast("Couldn't find what's playing", "Play a song first, then ask again", glyph="󰀦")
+            return
+        if in_deck:
+            # The Deck's own song, playing now: the set grows from it, without it again.
+            words = f"{song['title']} by {song['artist']}".replace("»", "")[:120]
+            settings = {**settings, "music": {**(settings.get("music") or {}), "service": song["service"]}}
+            deck_build(settings, minutes, f"music that carries on from «{words}», playing now (don't list it): "
+                                          "its sound, era, tempo and key", replace=not deck_read()["set"])
             return
         seed = {k: v for k, v in song.items() if k not in {"from", "why", "chapter"}}
         seed["uid"] = os.urandom(4).hex()
@@ -7763,6 +7927,12 @@ def deck_command(settings, args):
         if service not in DECK_SERVICES:
             sys.exit("Unknown service.")
         deck_command({**settings, "music": {**(settings.get("music") or {}), "service": service}}, args[:at] + args[at + 2:])
+    elif action == "fill" and "--to" in args:
+        at = args.index("--to")
+        target = args[at + 1] if at + 1 < len(args) else ""
+        if not target.isdigit():
+            sys.exit("Fill to how many minutes?")
+        deck_fill_to(settings, int(target))
     elif action == "fill":
         deck_fill(settings, auto="--auto" in args)
     elif action == "build" and len(args) >= 2 and args[1].isdigit():
@@ -7771,11 +7941,15 @@ def deck_command(settings, args):
         if value("--seed"):
             seed = deck_seed((settings.get("music") or {}).get("service", "ytmusic"), value("--seed"))
         words = [a for i, a in enumerate(args[2:], 2)
-                 if a not in {"--start", "--replace", "--seed", "--deep"} and args[i - 1] not in {"--start", "--seed"}]
+                 if a not in {"--start", "--replace", "--after", "--seed", "--deep", "--songs"}
+                 and args[i - 1] not in {"--start", "--seed"}]
         if not words and not seed:
             sys.exit("Say what the set is for, or give it a song to start from (--seed).")
         build = deck_prep if "--deep" in args else deck_build
-        build(settings, int(args[1]), " ".join(words), value("--start"), replace="--replace" in args, seed=seed)
+        # The number is minutes, or with --songs, how many songs.
+        by_songs = "--songs" in args
+        build(settings, 0 if by_songs else int(args[1]), " ".join(words), value("--start"), replace="--replace" in args,
+              seed=seed, songs=int(args[1]) if by_songs else 0, after="--after" in args)
     elif action == "run":
         deck_run()
     else:
@@ -7784,7 +7958,8 @@ def deck_command(settings, args):
                  "save <name> [--played|--all]|sets|load <name> [--replace]|grab [--next]|find-add <words> [--next]|build-from-playing [minutes]|next-up|songs <service> <album or playlist json>|forget <name>|shape <tempo|smooth|energy|arc|harmonic|bumps>|autodj <on|off>|autodj from <service> <item json>|export <service> <name> [--played|--all|--saved|--tonight]|crossfade <on|off>|soft-skip <on|off>|sleep <minutes|song|off>|guests <on|off|forget>|request <take|drop> <id> [--next|--mix]|requests <clear|auto on|auto off|lastcall <minutes|off>>|lock <on|off>|details|"
                  "pin <uid>|shuffle|clear|play [uid]|pause|next|previous|where <laptop|room id>|rooms|join <room id>|"
                  "leave <room id>|everywhere|volume <room id> <0-100>|search <service> <words>|mine <service>|fill [--service <s>]|"
-                 "build <minutes> [what it's for] [--start <song>|--seed <item json>] [--replace] [--deep] [--service <s>]|run]")
+                 "build <minutes, or songs with --songs> [what it's for] [--start <song>|--seed <item json>] [--replace|--after] [--deep] [--songs] [--service <s>]|"
+                 "fill [--to <minutes>]|run]")
 
 
 def deck_as_result(song):
@@ -7795,6 +7970,67 @@ def deck_as_result(song):
         if song.get(key):
             out[key] = song[key]
     return out
+
+
+def deck_best_hit(hits, words):
+    """Of a search's songs, the one a few words mean: by an artist they name
+    (not a cover act the service ranks first), and not a live, karaoke or
+    instrumental take unless asked for. The service's order otherwise."""
+    odd = lambda i: any(w in str(i.get("title", "")).lower() and w not in words.lower() for w in ODD_VERSIONS)
+    return min(enumerate(hits), key=lambda p: (not deck_hit_named(p[1], words), odd(p[1]), p[0]))[1]
+
+
+def deck_hit_named(item, words):
+    """Do the words, once the title's taken out, name this item's artist?"""
+    said = song_key(words)
+    artist = song_key(str(item.get("artist") or str(item.get("subtitle", "")).split(" • ")[0])).split()
+    rest = set(said.replace(song_key(str(item.get("title", ""))), " ").split())
+    return bool(artist) and any(w in rest for w in artist if len(w) > 2 or len(artist) == 1)
+
+
+def deck_find_song(service, words):
+    """A song by a few words (title and artist) on a service, or None. When
+    the service lists only covers as songs but has the named artist's single
+    or album, the song comes from there."""
+    found = deck_search(service, words) if words else []
+    songs = [i for i in found if i.get("kind") == "song"]
+    best = deck_best_hit(songs, words) if songs else None
+    if best and deck_hit_named(best, words):
+        return deck_item(service, best)
+    said = song_key(words)
+    for album in [i for i in found if i.get("kind") == "album" and deck_hit_named(i, words)][:2]:
+        try:
+            tracks = deck_expand_songs(service, album)
+        except (OSError, ValueError, SystemExit):
+            continue
+        track = next((t for t in tracks if song_key(t["title"]) and song_key(t["title"]) in said
+                      and not any(w in t["title"].lower() and w not in words.lower() for w in ODD_VERSIONS)), None)
+        if track:
+            return track
+    return deck_item(service, best) if best else None
+
+
+def deck_put_one(song, next_up=False):
+    """One song into the set, at the end or next. Already queued: it isn't
+    added twice (next moves it up); playing now: it's left be."""
+    key = lambda s: (s["service"], s.get("id"), s.get("video"))
+    def put(d):
+        if d.get("now") and key(d["now"]) == key(song):
+            return "playing"
+        queued = next((s for s in d["set"] if key(s) == key(song)), None)
+        if queued and not next_up:
+            return "queued"
+        d["set"] = [s for s in d["set"] if s is not queued]
+        d["set"].insert(0, queued or song) if next_up else d["set"].append(song)
+        return "moved" if queued else "added"
+    done = deck_edit(put)
+    deck_after_edit()
+    title = f"{song['title']} · {song['artist']}"
+    if done == "added":
+        toast("Added to the Deck" + (", next" if next_up else ""), title, glyph="󰐒")
+    else:
+        toast({"playing": "That's playing now", "queued": "Already in the set", "moved": "Already in the set: up next now"}[done],
+              title, glyph="󰐒")
 
 
 def deck_playing_song(settings):
@@ -7837,6 +8073,38 @@ def deck_seed(service, text):
     return deck_item(service, item)
 
 
+def deck_fill_to(settings, minutes):
+    """Fill until what's up next lasts about `minutes`: a few songs at a
+    time (at most five rounds), then any overshoot trimmed from the end."""
+    minutes = max(5, min(480, minutes))
+    def ahead():
+        d = deck_read()
+        lengths = deck_note_lengths(d["set"])
+        return d, lengths, deck_seconds(d["set"], lengths)
+    d, lengths, (seconds, usual) = ahead()
+    had = {s["uid"] for s in d["set"]}
+    if seconds >= minutes * 60 - usual / 2:
+        toast(f"Up next already lasts {deck_clock(seconds)}", f"That's at least {deck_clock(minutes * 60)}", glyph="✦")
+        return
+    for _ in range(5):
+        need = -(-(minutes * 60 - seconds) // usual)
+        before = len(d["set"])
+        deck_fill_now(settings, count=max(2, min(10, int(need))), quiet=True)
+        d, lengths, (seconds, usual) = ahead()
+        if len(d["set"]) == before or seconds >= minutes * 60 - usual / 2:
+            break
+    # Over by more than half a song: the last few added come off again.
+    added = [s for s in d["set"] if s["uid"] not in had]
+    extra = []
+    while added and seconds - (lengths.get(added[-1]["uid"]) or usual) >= minutes * 60 - usual / 2:
+        seconds -= lengths.get(added[-1]["uid"]) or usual
+        extra.append(added.pop()["uid"])
+    if extra:
+        deck_update(lambda x: x.update(set=[s for s in x["set"] if s["uid"] not in extra]))
+        deck_after_edit()
+    toast(f"Up next now lasts {deck_clock(seconds)}", f"{len(deck_read()['set'])} songs", glyph="✦")
+
+
 def deck_fill(settings, count=5, auto=False, seed=None):
     """Auto-DJ at work shows on the Deck (what it's doing) until it's done."""
     if not (auto or seed):
@@ -7849,7 +8117,7 @@ def deck_fill(settings, count=5, auto=False, seed=None):
         deck_update(lambda d: d.update(autodjBusy=None))
 
 
-def deck_fill_now(settings, count=5, auto=False, seed=None):
+def deck_fill_now(settings, count=5, auto=False, seed=None, quiet=False):
     """Grok's fast model picks songs that fit the set; each is found on your
     music service and added to the end. Auto-DJ (auto) looks at the whole
     night so far: what's been played, what's playing and what's left. With a
@@ -7858,11 +8126,20 @@ def deck_fill_now(settings, count=5, auto=False, seed=None):
     deck = deck_read()
     recent = ([deck["now"]] if deck.get("now") else []) + deck["set"]
     if seed:
+        # Your pick goes next, labelled yours. Already queued: it moves up, the
+        # same song (so Auto-DJ follows it, not the set's last). Playing now:
+        # it stays where it is, and the picks follow it.
+        same = lambda x: (x["service"], x.get("id"), x.get("video")) == (seed["service"], seed.get("id"), seed.get("video"))
         def put(d):
-            known = {(s["service"], s.get("id"), s.get("video")) for s in d["set"]}
-            if (seed["service"], seed.get("id"), seed.get("video")) not in known:
-                d["set"].insert(0, {**seed, "from": "✦ Auto-DJ"})
-        deck_edit(put)
+            if d.get("now") and same(d["now"]):
+                return d["now"]["uid"]
+            queued = next((x for x in d["set"] if same(x)), None)
+            if queued:
+                d["set"] = [queued] + [x for x in d["set"] if x is not queued]
+                return queued["uid"]
+            d["set"].insert(0, {**seed, "from": "✦ Your pick"})
+            return seed["uid"]
+        seed = {**seed, "uid": deck_edit(put)}
         deck = deck_read()
         recent = ([deck["now"]] if deck.get("now") else []) + deck["set"]
     if not recent:
@@ -7872,6 +8149,7 @@ def deck_fill_now(settings, count=5, auto=False, seed=None):
         sys.exit("Filling the Deck needs an agent: Grok, Claude or Codex (omarchy agent account add).")
     who = AGENT_NAMES[agent_for("fast")]
     gen = deck.get("setGen", 0)       # the set these are for (see place)
+    was_playing = bool(deck.get("playing"))
     anchor = None
     if seed or auto:
         if seed:
@@ -7913,7 +8191,7 @@ def deck_fill_now(settings, count=5, auto=False, seed=None):
         # Auto-DJ's search takes a minute or two. If it was turned off
         # meanwhile, or the set was replaced (built, cleared, a saved one
         # loaded over it), they no longer fit: they don't go in.
-        if auto and not seed and (not d.get("autodj") or d.get("setGen", 0) != gen):
+        if (auto and not seed and not d.get("autodj")) or ((auto or seed) and d.get("setGen", 0) != gen):
             landed["ok"] = False
             return
         heading = (d.get("toward") or {}).get("brief") and d["toward"].get("done", 0) < d["toward"].get("steps", 6)
@@ -7922,17 +8200,26 @@ def deck_fill_now(settings, count=5, auto=False, seed=None):
             d["autodjSettle"] = {"uids": [s["uid"] for s in found], "at": time.time()}
         if auto and found and (d.get("toward") or {}).get("brief"):
             d["toward"]["done"] = d["toward"].get("done", 0) + len(found)
+        # The set ran out while Auto-DJ looked (the music stopped by itself,
+        # not paused): play on with its picks.
+        landed["resume"] = bool(auto and not seed and found and was_playing and not d["set"]
+                                and not d.get("playing") and not d.get("paused"))
         if seed:                            # straight after the pick
             at = next((i + 1 for i, x in enumerate(d["set"]) if x["uid"] == seed["uid"] or
                        (x["service"], x.get("id"), x.get("video")) == (seed["service"], seed.get("id"), seed.get("video"))), 0)
             d["set"][at:at] = found
         else:
             d["set"].extend(found)
-    deck_edit(place)
+    (deck_update if auto and not seed else deck_edit)(place)     # Auto-DJ's own additions: not on your undo list
     if not landed["ok"]:
         return
+    if landed.get("resume"):
+        deck_update(lambda d: deck_start(d) if d["set"] and not d.get("playing") and not d.get("paused") else None)
     deck_after_edit()
-    toast((f"Auto-DJ added {len(found)} songs" if auto or seed else f"Grok added {len(found)} songs") if found else "Grok couldn't find songs that fit",
+    if quiet:
+        return
+    toast((f"Auto-DJ added {len(found)} songs" if auto or seed else f"{who} added {len(found)} songs") if found
+          else f"{who} couldn't find songs that fit",
           ", ".join(s["title"] for s in found[:3]) + ("…" if len(found) > 3 else ""), glyph="✦")
 
 
@@ -8095,39 +8382,129 @@ def deck_seed_words(song):
     return (f"{song['title']} by {song['artist']}" + (f" ({extra})" if extra else "")).replace("»", "")[:200]
 
 
-def deck_build(settings, minutes, brief, start="", replace=False, seed=None):
-    """Build a set from a brief: what it's for, how long, maybe a first song.
+# A set's length: built to a length (fitted to the songs' real lengths) or
+# to a number of songs; Fill adds a few songs, or up to a length.
+SONG_SECONDS = 240              # a song's length when it isn't known yet
+
+
+def deck_note_lengths(songs, matches=None):
+    """Each song's length in seconds ({uid: seconds}, 0 if unknown), noted in
+    the details: what the search said (Beatport, YouTube Music's "4:05"),
+    else Apple's catalogue (one lookup) or YouTube Music's player."""
+    from concurrent.futures import ThreadPoolExecutor
+    details = deck_details_read()
+    out = {}
+    for n, song in enumerate(songs):
+        known = details.get(deck_song_key(song), {}).get("length")
+        if not known and matches:
+            match = matches[n] or {}
+            if isinstance(match.get("length"), (int, float)) and match["length"] > 0:
+                known = int(match["length"])
+            else:
+                clock = re.search(r"(?:^|•\s*)(\d{1,2}):(\d{2})\s*$", str(match.get("subtitle", "")))
+                known = int(clock[1]) * 60 + int(clock[2]) if clock else 0
+            if known:
+                deck_details_note(song, length=known)
+        out[song["uid"]] = known or 0
+    apple = [s for s in songs if not out[s["uid"]] and s["service"] == "applemusic"][:150]
+    if apple:
+        try:
+            got = {str(t["trackId"]): round(t.get("trackTimeMillis", 0) / 1000)
+                   for t in am_lookup({"id": ",".join(s["id"] for s in apple)}) if t.get("trackId")}
+        except (OSError, ValueError):
+            got = {}
+        for song in apple:
+            if got.get(song["id"]):
+                out[song["uid"]] = got[song["id"]]
+                deck_details_note(song, length=got[song["id"]])
+    def yt(song):
+        try:
+            return song, int((ytm_call("player", {"videoId": song["video"]}).get("videoDetails") or {}).get("lengthSeconds") or 0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            return song, 0
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for song, length in pool.map(yt, [s for s in songs if not out[s["uid"]] and s["service"] == "ytmusic"][:40]):
+            if length:
+                out[song["uid"]] = length
+                deck_details_note(song, length=length)
+    return out
+
+
+def deck_seconds(songs, lengths):
+    known = [lengths[s["uid"]] for s in songs if lengths.get(s["uid"])]
+    usual = sum(known) / len(known) if known else SONG_SECONDS
+    return sum(lengths.get(s["uid"]) or usual for s in songs), usual
+
+
+def deck_fit_length(songs, lengths, seconds, keep_first=0):
+    """A set in play order trimmed to about `seconds` (within half a song):
+    songs go from its middle (the build and the peak), spread evenly, so
+    the opening and the wind-down stay as the curation had them."""
+    songs = list(songs)
+    total, usual = deck_seconds(songs, lengths)
+    if total <= seconds + usual / 2:
+        return songs
+    lo = max(keep_first, 2 if len(songs) > 6 else 1)
+    for drop in range(1, len(songs)):
+        middle = list(range(lo, len(songs) - 2))
+        if len(middle) < drop:
+            break
+        gone = {middle[int((i + 0.5) * len(middle) / drop)] for i in range(drop)}
+        kept = [s for i, s in enumerate(songs) if i not in gone]
+        if deck_seconds(kept, lengths)[0] <= seconds + usual / 2:
+            return kept
+    return songs[:max(keep_first, 3)]
+
+
+def deck_build_target(minutes=0, songs=0):
+    """How many songs to look for, and how many ideas to ask for."""
+    if songs:
+        return songs, songs + 3
+    return max(5, round(minutes * 60 / SONG_SECONDS)), max(6, round(minutes * 60 / 210)) + 3
+
+
+def deck_build(settings, minutes, brief, start="", replace=False, seed=None, songs=0, after=False):
+    """Build a set from a brief: what it's for, how long (or how many songs),
+    maybe a first song.
     A seed is a song you picked: it opens the set as it is, and the rest grows
     from its sound, tempo and key.
     Grok's fast model curates it in play order (a build, a peak, a wind-down);
     each song is found on your music service and the set lands in the Deck."""
     if not agent_for("fast"):
         sys.exit("Building a set needs an agent: Grok, Claude or Codex (omarchy agent account add).")
-    minutes = max(10, min(240, minutes))
-    count = max(5, min(45, round(minutes / 3.7)))
+    songs = max(3, min(60, songs)) if songs else 0
+    minutes = max(10, min(240, minutes)) if not songs else round(songs * SONG_SECONDS / 60)
+    count, ask_for = deck_build_target(minutes, songs)
+    size = f"{songs} songs" if songs else f"about {minutes} minutes"
     brief = brief.replace("»", "").strip()[:600]
     start = start.replace("»", "").strip()[:120]
     if seed:
         start = ""
         brief = brief or f"music that grows from {seed['title']} by {seed['artist']}"
-    toast(f"{AGENT_NAMES[agent_for('fast')]} is building your set…", f"About {minutes} minutes, {count} songs: {brief[:60]}", glyph="✦")
-    ask = (f"Curate a DJ set of about {minutes} minutes ({count} songs), in play order, for: «{brief}». "
+    toast(f"{AGENT_NAMES[agent_for('fast')]} is building your set…", f"{size.capitalize()}: {brief[:60]}", glyph="✦")
+    ask = (f"Curate a DJ set of {size} ({count} songs), in play order, for: «{brief}». "
            + (f"Start with «{start}». " if start else "")
            + (f"It opens with «{deck_seed_words(seed)}», already chosen: don't list it; carry on from its sound, era, "
               "tempo and key, and let the set grow out of it. " if seed else "")
            + "Shape it like a good DJ: ease in, build the energy, peak around two thirds of the way, then wind down. "
              "Keep neighbouring songs compatible in tempo and mood; no song twice; well-known enough to be on streaming "
              "services. In each 'w', say its job in the set in a few words (opener, builds, peak, cool-down…).")
-    ideas = grok_ideas("", ask=ask, count=count + 3, timeout=150, shape=True, job="build")
+    ideas = grok_ideas("", ask=ask, count=ask_for, timeout=150, shape=True, job="build")
     service = (settings.get("music") or {}).get("service", "ytmusic")
-    found, seen = [], set()
+    found, matches = [], []
+    # Not what's playing, nor (unless it's replaced) a song already in the set.
+    deck = deck_read()
+    seen = {song_key(s["title"]) for s in ([deck["now"]] if deck.get("now") else []) + ([] if replace else deck["set"])}
     if seed:
+        seen.discard(song_key(seed["title"]))
         found.append({**seed, "from": "✦ " + brief[:50], "why": "your pick"})
         seen.add(song_key(seed["title"]))
+    room = (songs + (1 if seed else 0)) if songs else ask_for + 1     # by length: all that's found, fitted after
     for idea, match in find_songs(service, ideas["songs"]):
-        if match and song_key(match["title"]) not in seen and len(found) < count:
+        if match and song_key(match["title"]) not in seen and len(found) < room:
             seen.add(song_key(match["title"]))
             song = deck_item(service, match)
+            matches.append(match)
             song["why"] = idea["w"]
             song["from"] = "✦ " + brief[:50]
             if idea["c"]:
@@ -8138,19 +8515,82 @@ def deck_build(settings, minutes, brief, start="", replace=False, seed=None):
     if len(found) <= (1 if seed else 0):
         toast(f"{AGENT_NAMES[agent_for('fast')]} couldn't build that set", "Try saying more about the mood or the music", glyph="󰀦")
         return
-    deck_build_land(found, replace)
+    found = deck_build_fit(found, matches, minutes, songs, seed)
+    if not songs:
+        found = deck_build_top_up(found, minutes, service, brief, seen)
+    deck_build_land(found, replace, after)
 
 
-def deck_build_land(found, replace):
-    """A built set goes into the Deck: in place of the set, or before it."""
+def deck_build_fit(found, matches, minutes, songs, seed):
+    """By number of songs: as found. By length: fitted to the real lengths."""
+    if songs:
+        return found
+    lengths = deck_note_lengths(found[1:] if seed else found, matches)
+    if seed:
+        lengths.update(deck_note_lengths([found[0]]))
+    return deck_fit_length(found, lengths, minutes * 60, keep_first=1 if seed else 0)
+
+
+def deck_wind_down_at(songs):
+    """Where the wind-down starts (its first song), else the last two songs."""
+    at = next((i for i, s in enumerate(songs) if s.get("chapter") == "Wind down"), None)
+    return at if at is not None else max(0, len(songs) - 2)
+
+
+def deck_build_top_up(found, minutes, service, brief, seen, spare=None):
+    """Short of the length by more than half a song: more songs go in before
+    the wind-down, so the set still ends the way it was curated. From
+    `spare` (ideas already found, best first) if given, else one more ask."""
+    lengths = deck_note_lengths(found)
+    total, usual = deck_seconds(found, lengths)
+    short = minutes * 60 - total
+    if short <= usual / 2:
+        return found
+    need = max(1, round(short / usual))
+    extra = []
+    if spare is not None:
+        extra = [song for song in spare if song_key(song["title"]) not in seen][:need + 1]
+    else:
+        listing = "; ".join(f"{s['title']} by {s['artist']}" for s in found)[:1500].replace("»", "")
+        ideas = grok_ideas("", ask=f"This DJ set for «{brief[:200]}» needs {need} more songs for its peak, in the same "
+                                    f"spirit, none already in it: {listing}.", count=need + 3, shape=True, job="build")
+        for idea, match in find_songs(service, ideas["songs"]):
+            if match and song_key(match["title"]) not in seen and len(extra) <= need:
+                seen.add(song_key(match["title"]))
+                extra.append({**deck_item(service, match), "why": idea["w"], "from": "✦ " + brief[:50], "chapter": "Peak"})
+                if idea["e"]:
+                    deck_details_note(extra[-1], energy=idea["e"])
+    if not extra:
+        return found
+    lengths.update(deck_note_lengths(extra))
+    at = deck_wind_down_at(found)
+    added = []
+    for song in extra:
+        if deck_seconds(found[:at] + added + found[at:], lengths)[0] >= minutes * 60 - usual / 2:
+            break
+        added.append({**song, "chapter": song.get("chapter") or (found[at - 1].get("chapter", "") if at else "")})
+    return found[:at] + added + found[at:]
+
+
+def deck_build_land(found, replace, after=False):
+    """A built set goes into the Deck: in place of the set, before it (up
+    next), or after it."""
+    lengths = deck_note_lengths(found)
+    seconds = deck_seconds(found, lengths)[0]
     def place(d):
-        d["set"] = found + ([] if replace else d["set"])
+        d["set"] = found if replace else d["set"] + found if after else found + d["set"]
         d["setGen"] = d.get("setGen", 0) + 1         # a new set: Auto-DJ's searches from before don't land
         if replace:
             d["pinned"] = []
     deck_edit(place)
     deck_after_edit()
-    toast(f"Your set is ready: {len(found)} songs", f"{found[0]['title']} → {found[-1]['title']}", glyph="✦")
+    toast(f"Your set is ready: {len(found)} songs, {deck_clock(seconds)}", f"{found[0]['title']} → {found[-1]['title']}", glyph="✦")
+
+
+def deck_clock(seconds):
+    """1 h 05 min, or 48 min."""
+    minutes = round(seconds / 60)
+    return f"{minutes // 60} h {minutes % 60:02d} min" if minutes >= 60 else f"{minutes} min"
 
 
 # Prep: a set dug for properly. Scouts look from different angles at once
@@ -8205,17 +8645,21 @@ def deck_prep_pool(answers):
     return sorted(pool.values(), key=lambda i: -len(i["by"]))
 
 
-def deck_prep_judge_ask(base, count, songs):
+def deck_prep_judge_ask(base, count, songs, seconds=None, minutes=0):
     lines = []
     for n, (idea, song) in enumerate(songs, 1):
         notes = [f"named by {', '.join(idea['by'])}"]
+        if seconds and seconds[n - 1]:
+            notes.append(f"{seconds[n - 1] // 60}:{seconds[n - 1] % 60:02d}")
         notes += [f"~{round(idea['b'])} BPM"] if idea["b"] else []
         notes += [idea["k"]] if idea["k"] else []
         notes += [f"energy {idea['e']}"] if idea["e"] else []
         lines.append(f"{n}. {song['title']} — {str(song.get('subtitle', '')).split(' • ')[0] or idea['a']} "
                      f"({'; '.join(notes)})")
     return ("Answer from your own knowledge; use no tools. You're the head DJ judging your scouts' finds. "
-            f"{base} Pick {count} of these songs and put them in play order: ease in, build, peak around two thirds "
+            f"{base} Pick "
+            + (f"songs that together last about {minutes} minutes (lengths given)" if minutes else f"{count} of these songs")
+            + " and put them in play order: ease in, build, peak around two thirds "
             "of the way, then wind down; neighbouring songs compatible in tempo and key; no artist twice in a row. "
             "Songs several scouts named are promising but not automatically in: judge the fit. Candidates:\n"
             + "\n".join(lines)
@@ -8245,28 +8689,30 @@ def agent_stop(agent):
                 pass
 
 
-def deck_prep(settings, minutes, brief, start="", replace=False, seed=None):
+def deck_prep(settings, minutes, brief, start="", replace=False, seed=None, songs=0, after=False):
     """Build a set the thorough way (deck build … --deep): scouts, the
     catalogue, then the judge."""
     from concurrent.futures import ThreadPoolExecutor
     if not agent_for("scout") or not agent_for("judge"):
         sys.exit("Prep needs an agent: Grok, Claude or Codex (omarchy agent account add).")
-    minutes = max(10, min(240, minutes))
-    count = max(5, min(45, round(minutes / 3.7)))
+    songs = max(3, min(60, songs)) if songs else 0
+    minutes = max(10, min(240, minutes)) if not songs else round(songs * SONG_SECONDS / 60)
+    count, _ = deck_build_target(minutes, songs)
+    size = f"{songs} songs" if songs else f"about {minutes} minutes"
     brief = brief.replace("»", "").strip()[:600]
     start = start.replace("»", "").strip()[:120]
     if seed:
         start = ""
         brief = brief or f"music that grows from {seed['title']} by {seed['artist']}"
-    base = (f"The set is about {minutes} minutes, for: «{brief}». "
+    base = (f"The set is {size}, for: «{brief}». "
             + (f"It starts with «{start}». " if start else "")
             + (f"It opens with «{deck_seed_words(seed)}», already chosen: don't list it; stay near its sound, era, "
                "tempo and key. " if seed else ""))
     angles = list(SCOUT_ANGLES)
     agents = scout_agents(len(angles))
     names = sorted({AGENT_NAMES[a] for a in agents})
-    toast(f"{len(angles)} scouts are digging…", f"{' + '.join(names)} · about {minutes} minutes: {brief[:50]}", glyph="✦")
-    report = {"at": int(time.time()), "brief": brief[:120], "minutes": minutes, "scouts": [], "judge": {}}
+    toast(f"{len(angles)} scouts are digging…", f"{' + '.join(names)} · {size}: {brief[:50]}", glyph="✦")
+    report = {"at": int(time.time()), "brief": brief[:120], "minutes": minutes, "songs": songs, "scouts": [], "judge": {}}
 
     def dig(job):
         angle, agent = job
@@ -8287,7 +8733,7 @@ def deck_prep(settings, minutes, brief, start="", replace=False, seed=None):
             if time.time() - last_since > PREP_GRACE:
                 break
         time.sleep(0.25)
-    answers = [f.result() for f in futures if f.done()]
+    answers = [f.result() for f in futures if f.done() and not f.exception()]    # a scout that failed is left out
     for (angle, agent), future in zip(zip(angles, agents), futures):
         if not future.done():
             agent_stop(agent)
@@ -8299,12 +8745,18 @@ def deck_prep(settings, minutes, brief, start="", replace=False, seed=None):
         toast("The scouts came back empty", "Try saying more about the mood or the music", glyph="󰀦")
         return
     service = (settings.get("music") or {}).get("service", "ytmusic")
-    seen = {song_key(seed["title"])} if seed else set()
+    deck = deck_read()               # not what's playing, nor (unless it's replaced) what's in the set
+    seen = {song_key(s["title"]) for s in ([deck["now"]] if deck.get("now") else []) + ([] if replace else deck["set"])}
+    if seed:
+        seen.add(song_key(seed["title"]))
     real = []
     for idea, match in find_songs(service, ideas[:60]):
         if match and song_key(match["title"]) not in seen:
             seen.add(song_key(match["title"]))
             real.append((idea, match))
+    # Each candidate's length, for the judge to fill the time.
+    items = [deck_item(service, match) for _, match in real]
+    lengths = deck_note_lengths(items, [match for _, match in real])
     for scout in report["scouts"]:
         scout["real"] = sum(1 for idea, _ in real if scout["angle"] in idea["by"])
     agreed = sum(1 for idea, _ in real if len(idea["by"]) > 1)
@@ -8315,11 +8767,14 @@ def deck_prep(settings, minutes, brief, start="", replace=False, seed=None):
         return
     judge = agent_for("judge")
     started = time.time()
-    verdict = agent_ask(deck_prep_judge_ask(base, count, real), tier="judge", job="judging", timeout=240)
+    secs = [lengths.get(item["uid"], 0) for item in items]
+    verdict = agent_ask(deck_prep_judge_ask(base, count, real, secs, 0 if songs else minutes), tier="judge",
+                        job="judging", timeout=240)
     if not (isinstance(verdict, dict) and verdict.get("set")) and agent_for("fast"):
         # The judge didn't answer in time: the quick model judges instead.
         judge = agent_for("fast")
-        verdict = agent_ask(deck_prep_judge_ask(base, count, real), tier="fast", job="judging", timeout=120)
+        verdict = agent_ask(deck_prep_judge_ask(base, count, real, secs, 0 if songs else minutes), tier="fast",
+                            job="judging", timeout=120)
         report["judge"]["stoodIn"] = True
     picks = []
     for pick in (verdict or {}).get("set", []) if isinstance(verdict, dict) else []:
@@ -8331,11 +8786,13 @@ def deck_prep(settings, minutes, brief, start="", replace=False, seed=None):
                        "seconds": round(time.time() - started, 1), "ok": bool(picks), "stoodIn": stood_in, "note": clean_text(str((verdict or {}).get("note", "")), 200) if isinstance(verdict, dict) else ""}
     if not picks:
         # No verdict: the songs most scouts agreed on, in the order found.
-        picks = [(n, "", "") for n in range(min(count, len(real)))]
+        picks = [(n, "", "") for n in range(min(count + (0 if songs else 4), len(real)))]
+    if songs:
+        picks = picks[:songs]
     found = [{**seed, "from": "✦ " + brief[:50], "why": "your pick"}] if seed else []
-    for n, chapter, why in picks[:count]:
+    for n, chapter, why in picks:
         idea, match = real[n]
-        song = deck_item(service, match)
+        song = items[n]
         song["why"] = why or idea["w"]
         song["from"] = "✦ " + brief[:50]
         if chapter:
@@ -8343,12 +8800,22 @@ def deck_prep(settings, minutes, brief, start="", replace=False, seed=None):
         if idea["e"]:
             deck_details_note(song, energy=idea["e"])
         found.append(song)
+    if not songs:
+        if seed:
+            lengths.update(deck_note_lengths([found[0]]))
+        found = deck_fit_length(found, lengths, minutes * 60, keep_first=1 if seed else 0)
+        # Short of the time: the scouts' other finds, most votes first.
+        picked = {n for n, _, _ in picks}
+        spare = [{**items[n], "why": real[n][0]["w"], "from": "✦ " + brief[:50]}
+                 for n in range(len(real)) if n not in picked]
+        found = deck_build_top_up(found, minutes, service, brief, {song_key(s["title"]) for s in found}, spare=spare)
+    kept = {s["uid"] for s in found}
     for scout in report["scouts"]:
-        scout["kept"] = sum(1 for n, _, _ in picks[:count] if scout["angle"] in real[n][0]["by"])
+        scout["kept"] = sum(1 for n, _, _ in picks if items[n]["uid"] in kept and scout["angle"] in real[n][0]["by"])
     report["agreed"] = agreed
     report["pool"] = len(ideas)
     write_atomic(DECK_PREP, json.dumps(report) + "\n")
-    deck_build_land(found, replace)
+    deck_build_land(found, replace, after)
 
 
 def deck_room_has(deck, room):

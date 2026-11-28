@@ -68,6 +68,7 @@ def tearDownModule():
 
 
 REAL_AGENT_ASK = al.agent_ask
+REAL_AGENT_ALLOWANCE = al.agent_allowance
 REAL_HOME = al.HOME
 
 
@@ -97,12 +98,20 @@ class TempCase(unittest.TestCase):
         patcher = mock.patch.object(al.subprocess, "Popen", popen)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # No test reaches the network: a lookup that isn't stood in for fails, as offline.
+        import urllib.request
+        def offline(*a, **k):
+            raise OSError("no network in tests")
+        patcher = mock.patch.object(urllib.request, "urlopen", offline)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         for name, file in (("AGENTS_FILE", "deck-agents.json"), ("AGENT_LOG", "agent-calls.jsonl"),
                            ("AGENT_NOW", "agents-now.json"), ("DECK_PREP", "deck-prep.json")):
             self.patch(name, self.tmp / file)
         self.patch("KEYFINDER", self.tmp / "bin" / "baseline-keyfinder")
         self.patch("measure_ready", lambda: False)         # no real measuring unless a test asks
         self.patch("agent_ask", lambda *a, **kw: None)     # and no real agent is ever asked
+        self.patch("agent_allowance", lambda: {})         # nor its allowance looked up
 
     def patch(self, name, value):
         patcher = mock.patch.object(al, name, value)
@@ -645,6 +654,7 @@ class DeckTests(TempCase):
         self.assertEqual(self.deck("pin", uids[0])["pinned"], [uids[5]])
 
     def test_build_asks_for_the_right_length_and_keeps_reasons(self):
+        self.patch("deck_build_top_up", lambda found, *a, **k: found)   # tested on its own
         asked = {}
         def ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False, job=""):
             asked.update(ask=ask, count=count, shape=shape)
@@ -657,7 +667,7 @@ class DeckTests(TempCase):
             al.deck_command({"music": {"service": "applemusic"}},
                             ["build", "60", "rooftop", "at", "sunset", "--start", "Lady by Modjo", "--replace"])
         d = al.deck_read()
-        self.assertEqual(asked["count"], 16 + 3)                     # an hour is about 16 songs
+        self.assertEqual(asked["count"], 17 + 3)                     # ideas for an hour, fitted to real lengths after
         self.assertIn("«rooftop at sunset»", asked["ask"])
         self.assertIn("Start with «Lady by Modjo»", asked["ask"])
         self.assertEqual([(s["title"], s["why"]) for s in d["set"]], [("Lady", "opener"), ("Finally", "builds")])
@@ -666,6 +676,7 @@ class DeckTests(TempCase):
         self.assertEqual(al.deck_with_details(d)["set"][1]["energy"], 7)
 
     def test_prep_pools_the_scouts_checks_the_catalogue_and_lets_the_judge_order(self):
+        self.patch("deck_build_top_up", lambda found, *a, **k: found)   # tested on its own
         asked = []
         scouts = {"digger": [{"t": "Lady", "a": "Modjo"}, {"t": "Made Up", "a": "Nobody"}],
                   "connector": [{"t": "Lady", "a": "Modjo (radio edit)"}, {"t": "Finally", "a": "CeCe Peniston", "e": 8}],
@@ -758,7 +769,74 @@ class DeckTests(TempCase):
             al.deck_command({"music": {"service": "applemusic"}}, ["build", "30", "x", "--replace", "--deep"])
         self.assertEqual([s["title"] for s in al.deck_read()["set"]], ["Solo", "Both"])
 
+    def test_fitting_to_a_length_trims_the_middle_and_keeps_the_ends(self):
+        songs = [{"uid": f"s{n}", "title": f"Song {n}"} for n in range(12)]
+        lengths = {s["uid"]: 300 for s in songs}                       # 12 five-minute songs: an hour
+        kept = al.deck_fit_length(songs, lengths, 40 * 60)
+        self.assertEqual(len(kept), 8)                                  # 40 minutes
+        self.assertEqual([s["uid"] for s in kept[:2]], ["s0", "s1"])    # the opening stays
+        self.assertEqual([s["uid"] for s in kept[-2:]], ["s10", "s11"]) # so does the wind-down
+        self.assertEqual(al.deck_fit_length(songs, lengths, 90 * 60), songs)   # short of it: all of them
+        kept = al.deck_fit_length(songs, lengths, 40 * 60, keep_first=3)
+        self.assertEqual([s["uid"] for s in kept[:3]], ["s0", "s1", "s2"])
+
+    def test_a_short_set_is_topped_up_before_its_wind_down(self):
+        found = [{"uid": f"s{n}", "service": "applemusic", "id": str(n), "title": f"S{n}", "artist": "X",
+                  "chapter": c} for n, c in enumerate(["Warm up", "Build", "Peak", "Wind down", "Wind down"])]
+        spare = [{"uid": f"x{n}", "service": "applemusic", "id": str(50 + n), "title": f"X{n}", "artist": "Y"} for n in range(5)]
+        self.patch("am_lookup", lambda params: [{"trackId": int(i), "trackTimeMillis": 300000} for i in params["id"].split(",")])
+        out = al.deck_build_top_up(found, 40, "applemusic", "x", set(), spare=spare)
+        self.assertEqual(len(out), 8)                                   # 40 minutes of five-minute songs
+        self.assertEqual([s["uid"] for s in out[-2:]], ["s3", "s4"])    # the wind-down still ends it
+        self.assertEqual(out[3]["chapter"], "Peak")                     # the new ones join the peak
+
+    def test_lengths_come_from_the_search_or_the_catalogue(self):
+        songs = [{"uid": "a", "service": "ytmusic", "video": "aaaaaaaaaaa", "title": "A"},
+                 {"uid": "b", "service": "beatport", "id": "7", "title": "B"},
+                 {"uid": "c", "service": "applemusic", "id": "9", "title": "C"}]
+        matches = [{"subtitle": "Someone • 4:05"}, {"length": 307}, {"subtitle": "Someone • Album"}]
+        self.patch("am_lookup", lambda params: [{"trackId": 9, "trackTimeMillis": 201000}])
+        self.assertEqual(al.deck_note_lengths(songs, matches), {"a": 245, "b": 307, "c": 201})
+        self.assertEqual(al.deck_details_read()["yt:aaaaaaaaaaa"]["length"], 245)
+
+    def test_build_by_songs_takes_that_many_and_by_length_fits(self):
+        ideas = {"songs": [{"t": f"T{n}", "a": f"A{n}", "w": "", "e": 5, "c": "Build"} for n in range(25)], "q": []}
+        asked = {}
+        def grok(query, ask=None, count=6, **kw):
+            asked.update(ask=ask, count=count)
+            return ideas
+        self.patch("grok_ideas", grok)
+        self.patch("find_songs", lambda service, wanted: [(i, {**self.apple(n, i["t"], i["a"]), "length": 300})
+                                                          for n, i in enumerate(wanted)])
+        self.patch("am_lookup", lambda params: [{"trackId": int(i), "trackTimeMillis": 300000} for i in params["id"].split(",")])
+        with mock.patch("shutil.which", return_value="/usr/bin/grok"):
+            al.deck_command({"music": {"service": "applemusic"}}, ["build", "12", "x", "--songs", "--replace"])
+        self.assertEqual(len(al.deck_read()["set"]), 12)
+        self.assertIn("12 songs", asked["ask"])
+        with mock.patch("shutil.which", return_value="/usr/bin/grok"):
+            al.deck_command({"music": {"service": "applemusic"}}, ["build", "60", "x", "--replace"])
+        self.assertEqual(len(al.deck_read()["set"]), 12)                # 12 five-minute songs make the hour
+
+    def test_fill_to_a_length_adds_until_it_lasts_that_long(self):
+        for n in range(2):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        self.patch("am_lookup", lambda params: [{"trackId": int(i), "trackTimeMillis": 300000} for i in params["id"].split(",")])
+        made = iter(range(100, 200))
+        def fill(settings, count=5, auto=False, seed=None, quiet=False):
+            def add(d):
+                for _ in range(count):
+                    n = next(made)
+                    d["set"].append({**al.deck_item("applemusic", self.apple(n)), "from": "✦ Fill"})
+            al.deck_update(add)
+        self.patch("deck_fill_now", fill)
+        al.deck_command({"music": {"service": "applemusic"}}, ["fill", "--to", "30"])
+        d = al.deck_read()
+        self.assertEqual(len(d["set"]), 6)                              # six five-minute songs: half an hour
+        al.deck_command({"music": {"service": "applemusic"}}, ["fill", "--to", "20"])   # already longer: nothing
+        self.assertEqual(len(al.deck_read()["set"]), 6)
+
     def test_build_from_a_picked_song_opens_with_it(self):
+        self.patch("deck_build_top_up", lambda found, *a, **k: found)   # tested on its own
         asked = {}
         def ideas(query, ask=None, count=6, timeout=45, shape=False, mix=False, job=""):
             asked.update(ask=ask)
@@ -1182,6 +1260,212 @@ class DeckTests(TempCase):
         self.assertEqual(match["id"], "2")
         [(idea, match)] = al.find_songs("applemusic", [{"t": "Music Sounds Better With You", "a": "Nobody Here", "w": ""}])
         self.assertIsNone(match)
+
+
+    # ---- from a review of the set's logic: each of these went wrong once.
+
+    def titles(self, d=None):
+        return [s["title"] for s in (d or al.deck_read())["set"]]
+
+    def test_fix_bumps_on_a_long_set_is_quick_and_keeps_pins(self):
+        songs = []
+        for n in range(60):
+            song = {"uid": f"u{n}", "service": "applemusic", "id": str(5000 + n), "title": f"T{n}", "artist": f"A{n % 7}"}
+            songs.append(song)
+            al.deck_details_note(song, bpm=90 + (n * 37) % 60, key=f"{(n * 5) % 12 + 1}{'AB'[n % 2]}", energy=5)
+        al.deck_update(lambda d: d.update(set=songs, pinned=["u10", "u40"]))
+        started = time.time()
+        d = self.deck("shape", "bumps")
+        self.assertLess(time.time() - started, 3)               # it holds the Deck's lock meanwhile
+        uids = [s["uid"] for s in d["set"]]
+        self.assertEqual((uids.index("u10"), uids.index("u40")), (10, 40))
+        self.assertEqual(sorted(uids), sorted(s["uid"] for s in songs))
+
+    def test_undo_after_previous_keeps_the_song_previous_put_back(self):
+        for n in range(3):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        al.deck_update(lambda d: d.update(now={"uid": "NOW", "service": "applemusic", "id": "77", "title": "NowSong", "artist": "x"},
+                                          played=[{"uid": "P", "service": "applemusic", "id": "78", "title": "Prev", "artist": "y"}]))
+        self.deck("remove", al.deck_read()["set"][0]["uid"])
+
+        def previous(d):
+            before = d["played"].pop()
+            d["set"].insert(0, d["now"])
+            d["now"] = before
+        al.deck_update(previous)
+        al.deck_undo()
+        self.assertEqual(self.titles(), ["NowSong", "Song 0", "Song 1", "Song 2"])
+
+    def test_undo_of_place_from_played_gives_the_song_back(self):
+        self.deck("add", "applemusic", json.dumps(self.apple(0)))
+        al.deck_update(lambda d: d.update(played=[{"uid": "P", "service": "applemusic", "id": "78", "title": "Prev", "artist": "y",
+                                                   "playedAt": 5}]))
+        self.deck("place", "end", "P")
+        self.assertEqual(self.titles(), ["Song 0", "Prev"])
+        al.deck_undo()
+        d = al.deck_read()
+        self.assertEqual((self.titles(d), [s["title"] for s in d["played"]]), (["Song 0"], ["Prev"]))
+
+    def test_undo_keeps_auto_djs_songs_and_pins_made_since(self):
+        for n in range(3):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        first = al.deck_read()["set"][0]["uid"]
+        self.deck("remove", first)
+        al.deck_update(lambda d: d["set"].append({"uid": "AUTO", "service": "applemusic", "id": "90", "title": "Auto", "artist": "z"}))
+        al.deck_update(lambda d: d.update(pinned=["AUTO"]))
+        al.deck_undo()
+        d = al.deck_read()
+        self.assertEqual(self.titles(d), ["Song 0", "Song 1", "Song 2", "Auto"])
+        self.assertEqual(d["pinned"], ["AUTO"])
+        al.deck_update(lambda d: d.update(set=[s for s in d["set"] if s["uid"] != "AUTO"]))
+        self.deck("add", "applemusic", json.dumps(self.apple(8)))
+        al.deck_update(lambda d: d.update(pinned=d["pinned"] + [d["set"][-1]["uid"]]))
+        al.deck_undo()                       # the added song goes, and its pin with it
+        self.assertEqual(al.deck_read()["pinned"], [])
+
+    def test_an_edit_that_changes_nothing_costs_no_undo(self):
+        self.deck("add", "applemusic", json.dumps(self.apple(0)))
+        before = len(json.loads(al.DECK_UNDO.read_text()))
+        self.deck("move", "nobody", "0")
+        self.deck("shape", "nonsense")
+        self.assertEqual(len(json.loads(al.DECK_UNDO.read_text())), before)
+
+    def test_moving_a_chapter_inside_itself_leaves_it(self):
+        for n in range(6):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        uids = [s["uid"] for s in al.deck_read()["set"]]
+        self.deck("chapter", uids[2], "Peak")
+        self.deck("chapter", uids[5], "Down")
+        for gap in (2, 3, 4, 5):
+            d = self.deck("move-chapter", uids[2], str(gap))
+            self.assertEqual([s["uid"] for s in d["set"]], uids, gap)
+        d = self.deck("move-chapter", uids[2], "0")
+        self.assertEqual([uids.index(s["uid"]) for s in d["set"]], [2, 3, 4, 0, 1, 5])
+        d = self.deck("move-chapter", uids[2], "6")
+        self.assertEqual([uids.index(s["uid"]) for s in d["set"]], [0, 1, 5, 2, 3, 4])
+
+    def test_add_play_of_a_queued_song_plays_it_not_a_copy(self):
+        for n in range(3):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        queued = al.deck_read()["set"][2]["uid"]
+        started = []
+        self.patch("deck_start", lambda d, song=None, **k: started.append(song["uid"]))
+        d = self.deck("add", "applemusic", json.dumps(self.apple(2)), "--play")
+        self.assertEqual(started, [queued])
+        self.assertEqual(self.titles(d).count("Song 2"), 1)
+        d = self.deck("add", "applemusic", json.dumps(self.apple(1)), "--next")
+        self.assertEqual(self.titles(d)[0], "Song 1")
+        self.assertEqual(len(d["set"]), 3)
+
+    def test_find_add_and_load_dont_queue_a_song_twice(self):
+        self.patch("deck_search", lambda service, words: [self.apple(4)])
+        find = lambda: al.deck_command({"music": {"service": "applemusic"}}, ["find-add", "Song 4"])
+        find()
+        find()
+        self.assertEqual(self.titles(), ["Song 4"])
+        self.deck("save", "Mine")
+        self.deck("load", "Mine")
+        self.assertEqual(self.titles(), ["Song 4"])
+
+    def test_find_add_takes_the_artist_named_not_a_cover(self):
+        hits = [{"kind": "song", "id": "1", "title": "Music Sounds Better With You", "subtitle": "Dance Fruits Music • Covers"},
+                {"kind": "song", "id": "2", "title": "Music Sounds Better With You (Live)", "subtitle": "Stardust • Live"},
+                {"kind": "song", "id": "3", "title": "Music Sounds Better With You", "subtitle": "Stardust • Single"}]
+        self.assertEqual(al.deck_best_hit(hits, "Music Sounds Better With You Stardust")["id"], "3")
+        self.assertEqual(al.deck_best_hit(hits, "Music Sounds Better With You")["id"], "1")     # no artist said: as ranked
+        self.assertEqual(al.deck_best_hit(hits, "Music Sounds Better With You Stardust live")["id"], "2")
+
+    def test_find_add_finds_the_song_on_the_artists_single_when_search_lists_covers(self):
+        found = [{"kind": "song", "id": "1", "title": "Music Sounds Better With You", "subtitle": "Dance Fruits Music • Single"},
+                 {"kind": "album", "id": "77", "title": "Music Sounds Better With You - Single", "subtitle": "Stardust"}]
+        self.patch("deck_search", lambda service, words: found)
+        self.patch("am_lookup", lambda q: [{"wrapperType": "track", "trackId": 9, "trackName": "Music Sounds Better With You",
+                                            "artistName": "Stardust", "trackNumber": 1},
+                                           {"wrapperType": "track", "trackId": 10, "trackName": "Music Sounds Better With You (Live)",
+                                            "artistName": "Stardust", "trackNumber": 2}])
+        song = al.deck_find_song("applemusic", "Music Sounds Better With You Stardust")
+        self.assertEqual((song["id"], song["artist"]), ("9", "Stardust"))
+
+    def test_saved_sets_keep_songs_not_guests(self):
+        guest = {**al.deck_item("applemusic", self.apple(3)), "rid": "r1", "by": "Sam", "photo": "/x.jpg",
+                 "phone": "07700", "gid": "g1", "note": "for Jo"}
+        al.deck_update(lambda d: d["set"].append(guest))
+        self.deck("save", "Party")
+        song = al.deck_sets()[0]["songs"][0]
+        self.assertEqual(song["title"], "Song 3")
+        self.assertFalse({"rid", "by", "photo", "phone", "gid", "note"} & set(song))
+
+    def test_shaping_while_auto_dj_is_off_doesnt_steer_it(self):
+        self.deck("add", "applemusic", json.dumps(self.apple(0)))
+        self.assertEqual(self.deck("shape", "energy").get("direction") or "", "")
+        al.deck_update(lambda d: d.update(autodj=True))
+        self.assertEqual(self.deck("shape", "energy")["direction"], "energy")
+
+    def test_auto_dj_waits_for_a_fill_still_at_work(self):
+        deck = {**al.DECK_EMPTY, "autodj": True, "playing": True, "set": [], "autodjAt": time.time() - 200}
+        self.assertTrue(al.deck_autodj_due(deck))
+        self.assertFalse(al.deck_autodj_due({**deck, "autodjBusy": {"at": time.time() - 100}}))
+        self.assertTrue(al.deck_autodj_due({**deck, "autodjBusy": {"at": time.time() - 700}}))      # that one died
+
+    def autodj_agent(self, titles):
+        self.patch("agent_for", lambda tier="fast": "grok")
+        self.patch("grok_ideas", lambda q, ask=None, count=6, **kw: {
+            "songs": [{"t": t, "a": f"Band {t}", "w": "", "e": 0, "c": "", "b": 0, "k": ""} for t in titles], "q": []})
+        self.patch("find_songs", lambda service, wanted: [(i, self.apple(70 + n, i["t"], i["a"])) for n, i in enumerate(wanted)])
+        self.patch("deck_watch", lambda: None)
+        self.patch("deck_crowd", lambda d: {"up": [], "down": []})
+
+    def test_auto_dj_plays_on_when_the_set_ran_dry_meanwhile(self):
+        self.autodj_agent(["A", "B", "C", "D", "E", "F"])
+        now = al.deck_item("applemusic", self.apple(1, "Last", "X"))
+        al.deck_update(lambda d: d.update(now=now, playing=True, autodj=True))
+        real_ideas = al.grok_ideas
+
+        def ran_dry(*a, **kw):          # the last song ends while the agent thinks
+            al.deck_update(lambda d: d.update(playing=False))
+            return real_ideas(*a, **kw)
+        self.patch("grok_ideas", ran_dry)
+        started = []
+        self.patch("deck_start", lambda d, song=None, **k: started.append(d["set"][0]["title"]))
+        al.deck_fill({"music": {"service": "applemusic"}}, auto=True)
+        self.assertEqual(len(started), 1)
+        self.assertFalse(json.loads(al.DECK_UNDO.read_text()) if al.DECK_UNDO.exists() else [])   # not yours to undo
+
+    def test_auto_dj_from_a_queued_song_moves_it_up_and_follows_it(self):
+        for n in range(3):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        asks = []
+        self.autodj_agent(["New"])
+        real_ideas = al.grok_ideas
+        self.patch("grok_ideas", lambda *a, **kw: (asks.append(kw.get("ask")), real_ideas(*a, **kw))[1])
+        al.deck_command({"music": {"service": "applemusic"}}, ["autodj", "from", "applemusic", json.dumps(self.apple(2))])
+        d = al.deck_read()
+        self.assertEqual(self.titles(d)[:2], ["Song 2", "New"])
+        self.assertEqual(self.titles(d).count("Song 2"), 1)
+        self.assertIn("Song 2", asks[0][asks[0].find("The next song follows"):][:60])
+
+    def test_build_from_playing_doesnt_queue_the_song_again(self):
+        self.deck("add", "applemusic", json.dumps(self.apple(0)))
+        now = al.deck_item("applemusic", self.apple(5, "Hearing", "Band"))
+        al.deck_update(lambda d: d.update(now=now, playing=True))
+        self.patch("agent_for", lambda tier="fast": "grok")
+        self.patch("grok_ideas", lambda q, ask=None, count=6, **kw: {
+            "songs": [{"t": t, "a": "Other", "w": "", "e": 0, "c": "", "b": 0, "k": ""} for t in ("Hearing", "Next")], "q": []})
+        self.patch("find_songs", lambda service, wanted: [(i, self.apple(60 + n, i["t"], i["a"])) for n, i in enumerate(wanted)])
+        self.patch("deck_note_lengths", lambda songs, matches=None: {s["uid"]: 240 for s in songs})
+        al.deck_command({"music": {"service": "applemusic"}}, ["build-from-playing", "20"])
+        self.assertEqual(self.titles(), ["Next", "Song 0"])
+
+    def test_a_build_goes_up_next_after_the_set_or_in_place_of_it(self):
+        for n in range(2):
+            self.deck("add", "applemusic", json.dumps(self.apple(n)))
+        song = lambda t: al.deck_item("applemusic", self.apple(80, t))
+        al.deck_build_land([song("New")], False)
+        self.assertEqual(self.titles(), ["New", "Song 0", "Song 1"])
+        al.deck_build_land([song("Later")], False, after=True)
+        self.assertEqual(self.titles(), ["New", "Song 0", "Song 1", "Later"])
+        al.deck_build_land([song("Only")], True)
+        self.assertEqual(self.titles(), ["Only"])
 
 
 Q, M, K, L = ("RINCON_000E58BC46FC01400", "RINCON_000E58B234C701400", "RINCON_347E5CF6D52001400", "RINCON_48A6B8BBE5C001400")
@@ -1624,10 +1908,31 @@ class AgentTests(TempCase):
         self.assertEqual(record["codex"]["scout"]["fit"], "ok")          # one question isn't enough to say
         self.assertEqual(record["codex"]["fast"]["fit"], "unreliable")
 
-    def test_unchosen_jobs_go_to_the_quickest_fit_agent(self):
+    def test_an_answer_is_found_inside_whatever_wraps_it(self):
+        songs = {"songs": [{"t": "A", "a": "B"}]}
+        for text in (json.dumps(songs), "```json\n" + json.dumps(songs) + "\n```",
+                     "Here you go {as asked}: " + json.dumps(songs) + " (all real songs, no {covers})",
+                     json.dumps(songs) + "\n\nNote: I avoided {the obvious ones}."):
+            self.assertEqual(al.agent_json(text), songs, text)
+        self.assertIsNone(al.agent_json("no answer at all {not json}"))
+
+    def test_one_question_far_past_its_time_is_enough_to_say_slow(self):
+        self.log(("grok", "judge", 300, False), ("codex", "judge", 200, True))
+        record = al.agent_record()
+        self.assertNotEqual(record["grok"]["judge"]["fit"], "ok")       # it timed out: out until next week
+        self.assertEqual(record["codex"]["judge"]["fit"], "ok")          # over, but not twice over: once more
+
+    def test_unchosen_jobs_go_to_the_fit_agent_with_most_allowance_left(self):
+        # Speed only decides who's fit: Claude is quickest, but the job goes to
+        # whoever has the most of their week left (Codex can't answer, so is out).
         self.log(("grok", "fast", 15, True), ("grok", "fast", 16, True), ("claude", "fast", 5, True),
                  ("claude", "fast", 6, True), ("codex", "fast", 2, False), ("codex", "fast", 3, False))
+        self.assertEqual(al.agent_choices()["fast"], "grok")
+        self.patch("agent_allowance", lambda: {"grok": 0.5, "claude": 0.2})
         self.assertEqual(al.agent_choices()["fast"], "claude")
+        self.patch("agent_allowance", lambda: {"grok": 0.95, "claude": 0.92})
+        self.assertEqual(al.agent_choices()["fast"], "grok")          # all nearly spent: still someone
+        self.patch("agent_allowance", lambda: {"grok": 0.1})
         al.agents_set("fast", "grok")                                   # your choice stands
         self.assertEqual(al.agent_choices()["fast"], "grok")
         self.assertEqual(al.agent_choices()["judge"], "grok")           # no record: Grok first
@@ -1638,6 +1943,36 @@ class AgentTests(TempCase):
         self.assertEqual(al.scout_agents(3), ["claude", "codex", "claude"])
         with mock.patch.object(al.time, "time", return_value=time.time() + 8 * 86400):
             self.assertIn("grok", al.scout_agents(3))
+
+    def test_mix_leaves_out_an_agent_whose_allowance_is_nearly_spent(self):
+        al.agents_set("scout", "mix")
+        self.patch("agent_allowance", lambda: {"claude": 0.93, "codex": 0.4})
+        self.assertEqual(al.scout_agents(3), ["grok", "codex", "grok"])
+        self.patch("agent_allowance", lambda: {"grok": 0.99, "claude": 0.93, "codex": 0.97})
+        self.assertEqual(len(al.scout_agents(3)), 3)                    # all spent: nobody's left out
+
+    def test_allowance_is_read_from_omarchy_and_kept_ten_minutes(self):
+        self.patch("agent_allowance", REAL_AGENT_ALLOWANCE)
+        listing = [{"provider": "claude", "accounts": [
+                        {"active": True, "limits": [{"percent": 0.69}, {"percent": 0.0}]},
+                        {"active": False, "limits": [{"percent": 1.0}]}]},
+                   {"provider": "grok", "accounts": [{"active": True, "limits": [{"percent": 0.09}]}]},
+                   {"provider": "cursor", "accounts": [{"active": True, "limits": [{"percent": 0.5}]}]}]
+        ran = []
+
+        def run(cmd, **kw):
+            ran.append(cmd)
+            return mock.Mock(stdout=json.dumps(listing))
+        with mock.patch.object(al.subprocess, "run", run):
+            self.assertEqual(al.agent_allowance(), {"claude": 0.69, "grok": 0.09})
+            self.assertEqual(al.agent_allowance(), {"claude": 0.69, "grok": 0.09})
+        self.assertEqual(ran, [["omarchy", "agent", "account", "list", "--json"]])     # once in ten minutes
+
+        def broken(cmd, **kw):
+            raise al.subprocess.TimeoutExpired(cmd, 15)
+        with mock.patch.object(al.time, "time", return_value=time.time() + 700), \
+                mock.patch.object(al.subprocess, "run", broken):
+            self.assertEqual(al.agent_allowance(), {"claude": 0.69, "grok": 0.09})      # the last reading stands
 
     def test_tiers_default_to_grok_and_keep_your_choice(self):
         self.assertEqual(al.agent_choices(), {"fast": "grok", "scout": "grok", "judge": "grok"})

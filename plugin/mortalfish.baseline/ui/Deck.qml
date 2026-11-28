@@ -679,6 +679,37 @@ Item {
     { key: "judge", label: strings.t("deck.agentsJudge"), about: strings.t("deck.agentsJudgeAbout") }
   ]
   readonly property var agentNames: ({ grok: "Grok", claude: "Claude", codex: "Codex" })
+  // Who a build goes to, and roughly how long it takes, from how long their calls have taken.
+  function tierAgent(tier) {
+    const a = deck.agents || {}
+    const use = (a.use || {})[tier] || ""
+    return use === "mix" || use === "" ? ((a.best || {})[tier] || "") : use
+  }
+  function tierSeconds(tier, agent) { return Number((((((deck.agents || {}).record || {})[agent] || {})[tier]) || {}).seconds || 0) }
+  readonly property string buildWho: {
+    if (!build.deep) return agentNames[tierAgent("fast")] || "Grok"
+    const a = deck.agents || {}
+    const scouts = (a.use || {}).scout === "mix"
+      ? (a.installed || []).filter(x => ((((a.record || {})[x] || {}).scout || {}).fit || "ok") === "ok")
+      : [tierAgent("scout")]
+    const who = scouts.concat([tierAgent("judge")]).filter((x, i, all) => x && all.indexOf(x) === i)
+    return who.map(x => agentNames[x] || x).join(" + ")
+  }
+  readonly property string buildTime: {
+    let secs = 0
+    if (!build.deep) secs = tierSeconds("fast", tierAgent("fast")) || 20
+    else {
+      const a = deck.agents || {}
+      const scouts = (a.use || {}).scout === "mix" ? (a.installed || []) : [tierAgent("scout")]
+      const slowest = Math.max.apply(null, [0].concat(scouts
+        .filter(x => ((((a.record || {})[x] || {}).scout || {}).fit || "ok") === "ok")
+        .map(x => tierSeconds("scout", x))))
+      secs = (slowest || 30) + (tierSeconds("judge", tierAgent("judge")) || 60)
+    }
+    secs += 10  // finding each song on the service
+    return secs < 50 ? strings.t("deck.aboutSeconds").arg(Math.max(10, Math.round(secs / 10) * 10))
+      : strings.tn("deck.aboutMinutes", Math.max(1, Math.round(secs / 60))).arg(Math.max(1, Math.round(secs / 60)))
+  }
   function agentJob(job) {
     const key = "deck.agentJob." + String(job || "ask").replace(/ /g, "-")
     const text = strings.t(key)
@@ -697,7 +728,7 @@ Item {
     const k = deck.direction || ""
     return k === "" ? "" : strings.t("deck.direction" + k.charAt(0).toUpperCase() + k.slice(1))
   }
-  // Somewhere for Auto-DJ to head: a name for the chip, and what Grok is told.
+  // Somewhere for Auto-DJ to head: a name for the chip, and what the agent is told.
   readonly property var towardPresets: [
     { label: strings.t("deck.towardWindDown"), brief: "a gentle wind-down to end the night: slower, warmer, softer" },
     { label: strings.t("deck.towardPeak"), brief: "peak time: the biggest, highest-energy floor-fillers" },
@@ -833,6 +864,11 @@ Item {
   }
   onServiceChanged: if (seen) readShelf()
   onSeenChanged: if (seen) readShelf()
+  // A set saved, loaded or forgotten (here, from the command line or by voice): the shelf follows.
+  Commons.WatchedFile {
+    path: Quickshell.env("HOME") + "/.local/state/afterlight/deck-sets.json"
+    onTextChanged: if (root.seen && !setsReader.running) setsReader.running = true
+  }
   property bool saving: false
   property string savePart: "next"          // what's to come, what's played, or the whole night
   property string saveTo: "baseline"        // or a service: a new playlist there, with the songs it has
@@ -1045,6 +1081,40 @@ Item {
               Label { text: "󰚩  " + strings.t("deck.agents").toUpperCase(); font.family: "Iosevka Nerd Font Propo"; font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.teal }
               Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: strings.t("deck.agentsAbout"); font.pixelSize: Style.font.caption; opacity: 0.55 }
               RoundButton { glyph: "󰅖"; onClicked: root.agentsOpen = false }
+            }
+            // Each agent's weekly allowance: the quick ones cost the most of it.
+            RowLayout {
+              id: weekRow
+              readonly property var used: (root.deck.agents || {}).used || {}
+              visible: Object.keys(used).length > 0
+              Layout.fillWidth: true
+              spacing: 14
+              Label { text: strings.t("deck.agentsWeek"); font.pixelSize: Style.font.caption; opacity: 0.55 }
+              Repeater {
+                model: ((root.deck.agents || {}).installed || []).filter(x => weekRow.used[x] !== undefined)
+                delegate: RowLayout {
+                  required property var modelData
+                  readonly property real share: Math.max(0, Math.min(1, Number(weekRow.used[modelData] || 0)))
+                  readonly property bool spent: share >= Number((root.deck.agents || {}).spent || 0.9)
+                  spacing: 6
+                  Label { text: root.agentNames[modelData] || modelData; font.pixelSize: Style.font.caption }
+                  Rectangle {
+                    implicitWidth: 54; implicitHeight: 4; radius: 2
+                    color: Util.alpha(root.ink, 0.12)
+                    Rectangle {
+                      width: parent.width * share; height: parent.height; radius: 2
+                      color: spent ? root.amber : share >= 0.7 ? Util.alpha(root.amber, 0.7) : root.teal
+                    }
+                  }
+                  Label {
+                    text: strings.t("deck.agentsUsed").arg(Math.round(share * 100))
+                    font.pixelSize: Style.font.caption
+                    color: spent ? root.amber : root.ink
+                    opacity: spent ? 1 : 0.55
+                  }
+                }
+              }
+              Item { Layout.fillWidth: true }
             }
             Repeater {
               model: root.agentTiers
@@ -1294,7 +1364,9 @@ Item {
                 anchors.margins: 10
                 spacing: 8
                 property int minutes: 60
+                property int songs: 0              // by number of songs instead (0: by length)
                 property bool deep: false
+                property string land: "next"       // with songs in the set: next, after it, or in place of it
                 RowLayout {
                   Layout.fillWidth: true
                   Label { text: "✦  " + strings.t("deck.build").toUpperCase(); font.pixelSize: Style.font.caption; font.letterSpacing: 2; color: root.amber }
@@ -1351,7 +1423,7 @@ Item {
                     model: [30, 60, 120, 180]
                     delegate: Rectangle {
                       required property var modelData
-                      readonly property bool on: build.minutes === modelData
+                      readonly property bool on: build.songs === 0 && build.minutes === modelData
                       implicitWidth: lenLabel.implicitWidth + 14
                       implicitHeight: lenLabel.implicitHeight + 8
                       radius: Style.cornerRadius > 0 ? 3 : 0
@@ -1365,7 +1437,30 @@ Item {
                         font.pixelSize: Style.font.caption
                       }
                       HoverHandler { cursorShape: Qt.PointingHandCursor }
-                      TapHandler { onTapped: build.minutes = modelData }
+                      TapHandler { onTapped: { build.minutes = modelData; build.songs = 0 } }
+                    }
+                  }
+                  // Or a number of songs.
+                  Rectangle { width: 1; height: 16; color: Util.alpha(root.ink, 0.15); Layout.alignment: Qt.AlignVCenter }
+                  Repeater {
+                    model: [10, 20, 30]
+                    delegate: Rectangle {
+                      required property var modelData
+                      readonly property bool on: build.songs === modelData
+                      implicitWidth: countLabel.implicitWidth + 14
+                      implicitHeight: countLabel.implicitHeight + 8
+                      radius: Style.cornerRadius > 0 ? 3 : 0
+                      color: on ? Util.alpha(root.amber, 0.2) : "transparent"
+                      border.width: 1
+                      border.color: on ? root.amber : Util.alpha(root.ink, 0.15)
+                      Label {
+                        id: countLabel
+                        anchors.centerIn: parent
+                        text: strings.t("deck.songsCount").arg(modelData)
+                        font.pixelSize: Style.font.caption
+                      }
+                      HoverHandler { cursorShape: Qt.PointingHandCursor }
+                      TapHandler { onTapped: build.songs = modelData }
                     }
                   }
                   Item { Layout.fillWidth: true }
@@ -1381,11 +1476,16 @@ Item {
                     text: strings.t("deck.buildGo")
                     enabled: brief.text.trim() !== "" || !!root.seed
                     onClicked: {
-                      const args = ["deck", "build", String(build.minutes)]
+                      const args = ["deck", "build", String(build.songs || build.minutes)]
+                      if (build.songs) args.push("--songs")
                       if (brief.text.trim() !== "") args.push(brief.text.trim())
+                      // It grows from your pick, or from what it follows: the last song of the set, or the one playing.
+                      const set = root.deck.set || []
+                      const follows = build.land === "after" && set.length ? set[set.length - 1] : root.now
                       if (root.seed) args.push("--seed", JSON.stringify(root.seed))
-                      else if (root.now) args.push("--start", root.now.title + " by " + root.now.artist)
-                      if ((root.deck.set || []).length === 0) args.push("--replace")
+                      else if (follows) args.push("--start", follows.title + " by " + follows.artist)
+                      if (set.length === 0 || build.land === "replace") args.push("--replace")
+                      else if (build.land === "after") args.push("--after")
                       if (build.deep) args.push("--deep")
                       args.push("--service", root.seed ? root.seedService : root.service)
                       root.runLong(args)
@@ -1393,6 +1493,36 @@ Item {
                       root.buildOpen = false
                     }
                   }
+                }
+                // With songs in the set already: where the new ones go.
+                RowLayout {
+                  visible: root.buildShown && (root.deck.set || []).length > 0
+                  Layout.fillWidth: true
+                  spacing: 6
+                  Label { text: strings.t("deck.buildLand"); font.pixelSize: Style.font.caption; opacity: 0.55 }
+                  Repeater {
+                    model: [{ key: "next", glyph: "󰒭" }, { key: "after", glyph: "󰼨" }, { key: "replace", glyph: "󰑐" }]
+                    delegate: Rectangle {
+                      required property var modelData
+                      readonly property bool on: build.land === modelData.key
+                      implicitWidth: landLabel.implicitWidth + 14
+                      implicitHeight: landLabel.implicitHeight + 8
+                      radius: Style.cornerRadius > 0 ? 3 : 0
+                      color: on ? Util.alpha(root.amber, 0.2) : "transparent"
+                      border.width: 1
+                      border.color: on ? root.amber : Util.alpha(root.ink, 0.15)
+                      Label {
+                        id: landLabel
+                        anchors.centerIn: parent
+                        text: modelData.glyph + "  " + strings.t("deck.buildLand_" + modelData.key)
+                        font.family: "Iosevka Nerd Font Propo"
+                        font.pixelSize: Style.font.caption
+                      }
+                      HoverHandler { cursorShape: Qt.PointingHandCursor }
+                      TapHandler { onTapped: build.land = modelData.key }
+                    }
+                  }
+                  Item { Layout.fillWidth: true }
                 }
                 // The song it grows from, picked with ✦ on a song below.
                 Rectangle {
@@ -1434,7 +1564,10 @@ Item {
                   Layout.fillWidth: true
                   wrapMode: Text.Wrap
                   text: root.seed ? strings.t("deck.seedNote")
-                    : root.now ? strings.t("deck.buildFrom").arg(root.now.title) : strings.t("deck.buildNote")
+                    : build.land === "after" && (root.deck.set || []).length
+                      ? strings.t("deck.buildAfter").arg(root.deck.set[root.deck.set.length - 1].title || "").arg(root.buildWho).arg(root.buildTime)
+                    : root.now ? strings.t("deck.buildFrom").arg(root.now.title).arg(root.buildWho).arg(root.buildTime)
+                    : strings.t("deck.buildNote").arg(root.buildWho).arg(root.buildTime)
                   font.pixelSize: Style.font.caption
                   opacity: 0.55
                 }
@@ -1553,6 +1686,9 @@ Item {
                 spacing: 2
                 visible: found.shelf
                 height: found.shelf ? implicitHeight : 0
+                // The sets arrive after the list is made, and a list keeps its place
+                // when its header grows: back to the top, so the newest set shows.
+                onHeightChanged: if (found.shelf) Qt.callLater(function() { found.contentY = found.originY })
                 Label {
                   visible: root.savedSets.length > 0
                   text: strings.t("deck.yourSets").toUpperCase()
@@ -1893,7 +2029,7 @@ Item {
                     enabled: (root.deck.set || []).length > 1 && !root.locked
                     onClicked: { root.shapeOpen = !root.shapeOpen; root.autodjOpen = false; root.saving = false; root.filterOpen = false }
                   }
-                  // Auto-DJ: with three songs left, Grok adds more that carry the night on.
+                  // Auto-DJ: with three songs left, the agent adds more that carry the night on.
                   ActionButton {
                     icon: "∞"
                     text: root.djBusy ? strings.t("deck.autodjWorking") : strings.t("deck.autodj")
@@ -1997,7 +2133,9 @@ Item {
               // flows (Fix the bumps; pinned songs stay, Undo puts it back). Hidden
               // when locked, like Shape.
               HeadLink {
+                // Not again once it's as smooth as it goes (what's left would change the set's shape).
                 visible: root.selectedUids.length === 0 && root.bumps > 0 && !root.locked
+                         && (root.deck.smoothed || []).join() !== (root.deck.set || []).map(s => s.uid).join()
                 glyph: "󰘖"; on: true
                 text: strings.tn("deck.smoothIt", root.bumps).arg(root.bumps)
                 tip: strings.t("deck.smoothItTip")
@@ -2369,8 +2507,31 @@ Item {
                         text: strings.tn("deck.runningLow", (root.deck.set || []).length).arg((root.deck.set || []).length)
                         font.pixelSize: Style.font.caption; color: root.amber
                       }
-                      HeadLink { anchors.verticalCenter: parent.verticalCenter; glyph: "✦"; text: strings.t("deck.fill"); on: true; onTapped: root.run(["deck", "fill"]) }
+                      HeadLink { anchors.verticalCenter: parent.verticalCenter; glyph: "✦"; text: strings.t("deck.fill"); on: true; onTapped: root.runLong(["deck", "fill", "--service", root.service]) }
                       HeadLink { anchors.verticalCenter: parent.verticalCenter; glyph: "∞"; text: strings.t("deck.autodjTurnOn"); on: true; onTapped: root.run(["deck", "autodj", "on"]) }
+                    }
+                  }
+                  // Make what's up next last longer: to the next hours it doesn't reach yet.
+                  Row {
+                    visible: !root.deck.autodj && !root.locked && !root.runningLow && (root.deck.set || []).length > 0
+                             && fillTargets.count > 0 && !root.djBusy
+                    x: 8
+                    height: 34
+                    spacing: 14
+                    Label {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "✦  " + strings.t("deck.fillTo")
+                      font.pixelSize: Style.font.caption; color: root.teal; opacity: 0.8
+                    }
+                    Repeater {
+                      id: fillTargets
+                      model: [60, 120, 180, 240].filter(m => m * 60 > root.setSeconds + 240).slice(0, 3)
+                      delegate: HeadLink {
+                        required property var modelData
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: strings.t("deck.hours").arg(modelData / 60)
+                        onTapped: root.runLong(["deck", "fill", "--to", String(modelData), "--service", root.service])
+                      }
                     }
                   }
                   Rectangle {
