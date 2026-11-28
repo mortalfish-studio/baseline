@@ -5251,7 +5251,9 @@ def mix_plan(a, b, length_a, offset_a, offset_b, beat_a=None, beat_b=None, style
             "seconds": round(seconds, 3), "beat": round(beat, 4), "lanes": {"a": lanes_a, "b": lanes_b},
             "swap": round(swap, 3),
             # a cut brings b in on the downbeat after a's fade; otherwise b runs under a from the start
-            "enter": round(enter, 3)}
+            "enter": round(enter, 3),
+            # each song's beats as heard (first beat, seconds apart), for drawing them
+            "grids": {"a": [round(offset_a, 4), round(beat_a, 5)], "b": [round(offset_b, 4), round(beat_b, 5)]}}
 
 
 MIX_TRIM_DB = 3                # the most a mix evens out two songs' levels, either way
@@ -5721,7 +5723,7 @@ def deck_mix_run():
     takeover = plan["startMs"] / 1000 + plan["swap"]
     mark(stage="mixing", style=plan["style"], bars=plan["bars"], rate=plan["rate"], startMs=plan["startMs"],
          endMs=plan["endMs"], takeover=takeover, live=plan["live"], entry=plan["entry"], enter=plan["enter"],
-         fromAt=plan["start"],
+         fromAt=plan["start"], grids=plan["grids"], seconds=plan["seconds"],
          curves=mix_curves(plan["lanes"], plan["seconds"]))
     # Both songs heard together, the new one's beats nudged onto the old one's.
     mix_resync(plan, live)
@@ -6353,6 +6355,12 @@ def deck_with_details(deck):
     deck["now"] = fill(deck["now"]) if deck.get("now") else None
     deck["set"] = [fill(s) for s in deck["set"]]
     deck["played"] = [fill(s) for s in deck["played"]]
+    # The loudness of the songs a mix can be between (playing, next, just
+    # played), for the close-up of a mix.
+    for song in [deck["now"]] + deck["set"][:1] + deck["played"][-1:]:
+        env = details.get(deck_song_key(song), {}).get("env") if song else None
+        if env:
+            song["env"] = env
     before = deck["now"]
     shaped = set(deck.get("shaped") or [])
     for song in deck["set"]:
@@ -6367,9 +6375,21 @@ def deck_with_details(deck):
     return deck
 
 
+SONG_ENV_POINTS = 600            # a song's loudness, kept for the Deck's close-up of a mix
+
+
+def song_env(heights, points=SONG_ENV_POINTS):
+    """A song's loudness from its waveform, evenly over the song (0-1, the
+    loudest of each stretch), for drawing; [] without one."""
+    if not heights:
+        return []
+    step = len(heights) / points
+    return [round(max(heights[int(i * step):max(int(i * step) + 1, int((i + 1) * step))]), 2) for i in range(points)]
+
+
 def deck_song_shape(wave, length, bpm):
-    """{"outro", "lift"} for a Beatport song, from its waveform picture
-    (song_shape); both None when it can't be read."""
+    """{"outro", "lift", "turns", "env"} for a Beatport song, from its
+    waveform picture (song_shape, song_env); empty when it can't be read."""
     import urllib.request
     heights = None
     if wave.startswith("https://") and length and bpm:
@@ -6379,7 +6399,7 @@ def deck_song_shape(wave, length, bpm):
             heights = png_heights(data) if len(data) <= 500_000 else None
         except (OSError, ValueError):
             heights = None
-    return song_shape(heights, length, bpm)
+    return {**song_shape(heights, length, bpm), "env": song_env(heights)}
 
 
 def deck_details_wanted(deck, details=None):
@@ -6394,7 +6414,7 @@ def deck_details_wanted(deck, details=None):
             or (not d.get("bpm") and not d.get("web") and song.get("service") != "beatport") \
             or (song.get("service") != "beatport" and "measured" not in d and not deck_details_exact(d) and measure_ready()) \
             or (not song.get("thumb") and "art" not in d) \
-            or (song.get("service") == "beatport" and ("wave" not in d or "outro" not in d))
+            or (song.get("service") == "beatport" and ("wave" not in d or "env" not in d))
         if key and key not in seen and time.time() - d.get("looked", 0) > 3600 and unknown:
             seen.add(key)
             songs.append(song)
@@ -6570,9 +6590,9 @@ def deck_details_fill():
         # waveform, from the song's own track page.
         for song in [s for s in songs if s.get("service") == "beatport" and s.get("id")][:20]:
             had = deck_details_read().get(deck_song_key(song), {})
-            if song.get("thumb") and "wave" in had and "outro" in had:
+            if song.get("thumb") and "wave" in had and "env" in had:
                 continue
-            if song.get("thumb") and had.get("wave") and "outro" not in had:
+            if song.get("thumb") and had.get("wave") and "env" not in had:
                 deck_details_note(song, **deck_song_shape(had["wave"], had.get("length"), had.get("bpm")))
                 continue
             track = beatport_next_data(beatport_track_url(song)).get("track") or {}

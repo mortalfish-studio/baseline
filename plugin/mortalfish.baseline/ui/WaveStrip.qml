@@ -15,6 +15,7 @@ Item {
   property color ink: Commons.Color.popups.text
   property real bandFrom: -1            // 0-1: the mix in this song
   property real bandTo: -1
+  property bool bandFaint: false        // only planned, not under way
   property real mark: -1                // 0-1: the takeover
   property bool playhead: true
   readonly property bool ready: wave.status === Image.Ready
@@ -86,16 +87,14 @@ Item {
     width: Math.max(2, strip.width * (strip.bandTo - strip.bandFrom))
     height: strip.height
     radius: 3
-    color: Qt.rgba(strip.tone.r, strip.tone.g, strip.tone.b, 0.1)
-    border.width: 1
-    border.color: Qt.rgba(strip.tone.r, strip.tone.g, strip.tone.b, 0.45)
+    color: Qt.rgba(strip.tone.r, strip.tone.g, strip.tone.b, strip.bandFaint ? 0.06 : 0.13)
   }
   Rectangle {
     visible: strip.mark >= 0
     x: strip.width * strip.mark - 1
     width: 2; height: strip.height
     color: strip.tone
-    opacity: 0.8
+    opacity: strip.bandFaint ? 0.5 : 0.8
   }
   // The playhead.
   Rectangle {

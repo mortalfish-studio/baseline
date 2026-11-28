@@ -821,7 +821,7 @@ Item {
   readonly property int mixBar: Math.max(1, Math.min(mixInfo.bars || 1, Math.floor(mixShare * (mixInfo.bars || 0)) + 1))
   // The other song in the mix: the next one, or the one going out.
   readonly property var mixOther: !mixLive ? null : mixInfo.stage === "out"
-                                  ? (deck.played || []).find(s => s.uid === mixInfo.from) || null
+                                  ? playedLast(mixInfo.from) || null
                                   : (deck.set || []).find(s => s.uid === mixInfo.to) || null
   readonly property bool hasBeatport: (!!now && now.service === "beatport") || (deck.set || []).some(s => s.service === "beatport")
   readonly property var mixStyles: ["swap", "beat", "smooth", "filter", "cut"]
@@ -835,6 +835,32 @@ Item {
   readonly property bool mixOutgoing: mixLive && mixInfo.stage !== "out"     // the song on top is the one going out
   // Where the mix starts in the song on top (seconds): ahead while to come, behind once it's taken over.
   readonly property real mixFromHere: shownTime + ((mixInfo.startMs || 0) - mixClock) / 1000
+  // The mix on the song playing's own clock (seconds): under way, else as planned
+  // (the style's length at this tempo, its takeover on the point picked, or near the end).
+  readonly property real plannedSeconds: nextMixed && (now.bpm || 0) > 0
+      ? (((deck.mixPlan || {})[nextSong.uid] || {}).bars || 16) * 240 / now.bpm : 0
+  readonly property real plannedSwap: plannedSeconds * Math.max(0, (((deck.mixShapes || {})[nextStyle] || {}).swap || 0.5))
+  readonly property real plannedStart: !plannedSeconds || !(pos.length > 0) ? -1
+      : (deck.mixAt || 0) > 0 ? deck.mixAt - plannedSwap : pos.length - 2 - plannedSeconds
+  // The latest play of a song (the same one can have played before).
+  function playedLast(uid) {
+    const played = deck.played || []
+    for (let i = played.length - 1; i >= 0; i -= 1) if (played[i].uid === uid) return played[i]
+    return null
+  }
+  // The two songs of the mix under way, going out and coming in, whichever is on top.
+  readonly property var mixSongA: !mixLive ? null : mixInfo.stage === "out"
+                                  ? playedLast(mixInfo.from) || null : now
+  readonly property var mixSongB: !mixLive ? null : mixInfo.stage === "out"
+                                  ? now : (deck.set || []).find(s => s.uid === mixInfo.to) || null
+  // The close-up, from a few seconds before the mix until just after it: both songs
+  // have their loudness known.
+  readonly property bool mixClose: mixTimed && !!mixSongA && !!mixSongB
+                                   && (mixSongA.env || []).length > 1 && (mixSongB.env || []).length > 1
+                                   && mixClock >= mixInfo.startMs - 6000 && mixClock <= mixInfo.endMs + 2500
+  readonly property real bandStart: mixTimed ? mixFromHere : plannedStart
+  readonly property real bandSeconds: mixTimed ? mixSeconds : plannedStart >= 0 ? plannedSeconds : 0
+  readonly property real bandSwap: mixTimed ? mixSwapSeconds : plannedSwap
   // The next song, and whether it's set to be DJ-mixed in (both on Beatport).
   readonly property var nextSong: (deck.set || []).length ? deck.set[0] : null
   readonly property bool nextMixed: mixing && !!now && now.service === "beatport" && !!nextSong && nextSong.service === "beatport"
@@ -1942,6 +1968,7 @@ Item {
               Item {
                 id: nowCover
                 Layout.preferredWidth: 176
+                Layout.alignment: Qt.AlignTop
                 Layout.preferredHeight: 176
                 Rectangle {
                   anchors.fill: parent
@@ -1958,9 +1985,12 @@ Item {
                   id: mixPip
                   readonly property real share: !root.otherDeck || root.otherDeck.preview ? 0 : root.mixOutgoing ? 0.3 + 0.35 * root.mixShare : 0.45 * (1 - root.mixShare)
                   visible: !!root.otherDeck && share > 0.02
-                  width: 176 * share; height: width
+                  // Drawn once at its biggest and scaled, so the picture never reloads as it grows.
+                  width: 176 * 0.65; height: width
                   x: 176 - width - 8; y: 176 - height - 8
-                  Behavior on width { NumberAnimation { duration: Style.duration(400); easing.type: Easing.OutCubic } }
+                  transformOrigin: Item.BottomRight
+                  scale: share / 0.65
+                  Behavior on scale { NumberAnimation { duration: Style.duration(400); easing.type: Easing.OutCubic } }
                   Rectangle {
                     anchors.fill: parent; anchors.margins: -3
                     radius: 10
@@ -1970,7 +2000,7 @@ Item {
                   }
                   Cover {
                     anchors.fill: parent
-                    size: Math.max(24, Math.round(parent.width))
+                    size: Math.round(176 * 0.65)
                     radius: 8
                     url: root.otherDeck ? (root.otherDeck.song.thumb || "") : ""
                   }
@@ -1985,18 +2015,20 @@ Item {
               ColumnLayout {
                 Layout.fillWidth: true
                 spacing: 4
-                // The title on the left, the Skyline on the right.
+                // ---- The console: the song (name, who, where, the clock), then the two
+                // decks on one clock with the seam between them, then the mix in words.
+                // Every row keeps its height, so nothing moves as a mix comes and goes.
                 RowLayout {
                   Layout.fillWidth: true
                   spacing: 16
                   ColumnLayout {
                     Layout.fillWidth: true
                     Layout.alignment: Qt.AlignTop
-                    spacing: 4
+                    spacing: 6
                     Label {
                       Layout.fillWidth: true
-                      // The name without its brackets ("[From …]", "(Radio Edit)"): those go
-                      // on their own line below. Long names shrink before they're ever cut.
+                      // The name without its brackets ("(Extended Mix)"): those go beside the artist.
+                      // Long names shrink before they're ever cut.
                       text: root.now ? root.titleParts(root.now.title).main : strings.t("deck.empty")
                       font.pixelSize: 26
                       fontSizeMode: Text.Fit
@@ -2007,271 +2039,288 @@ Item {
                       wrapMode: Text.Wrap
                       maximumLineCount: 2
                     }
-                    Label {
-                      Layout.fillWidth: true
-                      visible: text !== ""
-                      text: root.now ? root.titleParts(root.now.title).extra : ""
-                      font.pixelSize: Style.font.caption
-                      color: root.amber
-                      opacity: 0.65
-                      elide: Text.ElideRight
-                    }
-                    Label {
-                      Layout.fillWidth: true
-                      text: root.now ? root.now.artist : strings.t("deck.emptyHint")
-                      opacity: 0.85
-                      wrapMode: Text.Wrap
-                      maximumLineCount: 2
-                    }
-                    Label {
-                      Layout.fillWidth: true
-                      text: root.now ? (root.whereId === "laptop" ? "󰌢  " + strings.t(root.deck.playing ? "hover.playingOn" : "deck.pausedOn").arg(root.whereName)
-                                                                : "󰓃  " + strings.t(root.deck.playing ? "hover.playingIn" : "deck.pausedIn").arg(root.whereName))
-                                        + " · " + root.serviceName(root.now.service)
-                                        + (root.keyTempo(root.now) !== "" ? "  ·  " + root.keyTempo(root.now) : "") : ""
-                      font.family: "Iosevka Nerd Font Propo"
-                      font.pixelSize: Style.font.caption
-                      color: root.teal
-                    }
-                    Label {
-                      Layout.fillWidth: true
-                      visible: root.alertText !== ""
-                      text: root.alertGlyph + "  " + root.alertText
-                      font.family: "Iosevka Nerd Font Propo"
-                      font.pixelSize: Style.font.caption
-                      color: Commons.Color.warning
-                      wrapMode: Text.Wrap
-                    }
-                  }
-                  DeckVisualizer {
-                    Layout.preferredWidth: Math.min(360, Math.max(200, root.stageItem.width * 0.24))
-                    Layout.preferredHeight: 112
-                    Layout.alignment: Qt.AlignTop
-                    Layout.rightMargin: 8
-                    visible: !!root.now
-                    active: root.seen && !!root.now && !root.stageOn
-                    playing: root.deck.playing
-                    live: !root.inSonos
-                    mic: root.deck.micViz === true
-                    amber: root.amber
-                    teal: root.teal
-                    ground: root.ground
-                    // In a room: let the bars hear it through the microphone (or not).
-                    HeadLink {
-                      visible: root.inSonos
-                      anchors.right: parent.right; anchors.top: parent.top
-                      glyph: root.deck.micViz ? "󰍬" : "󰍭"
-                      text: root.deck.micViz ? strings.t("deck.micOn") : strings.t("deck.micOff")
-                      tip: strings.t("deck.micTip")
-                      on: root.deck.micViz === true
-                      onTapped: root.run(["deck", "mic", root.deck.micViz ? "off" : "on"])
-                    }
-                  }
-                }
-                // progress: the song's waveform when Beatport has one, else a line
-                Item {
-                  id: progressBox
-                  Layout.fillWidth: true
-                  Layout.topMargin: 6
-                  readonly property bool waved: !!root.now && (root.now.wave || "") !== "" && nowWave.ready
-                  implicitHeight: waved ? 56 : 18
-                  visible: !!root.now
-                  WaveStrip {
-                    id: nowWave
-                    anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-                    height: 36
-                    visible: progressBox.waved
-                    source: root.now ? (root.now.wave || "") : ""
-                    progress: root.pos.length > 0 ? root.shownTime / root.pos.length : 0
-                    // Brought in by a mix part way through: lit from there.
-                    litFrom: root.mixLive && !root.mixOutgoing && root.pos.length > 0 ? (root.mixInfo.entry || 0) / root.pos.length : 0
-                    tone: root.mixLive && !root.mixOutgoing ? root.teal : root.amber
-                    ink: root.ink
-                    bandFrom: root.mixTimed && root.pos.length > 0 ? Math.max(0, root.mixFromHere / root.pos.length) : -1
-                    // Between mixes: a faint tick where this song is set to mix out.
-                    readonly property real planned: !root.mixLive && root.nextMixed && (root.deck.mixAt || 0) > 0 && root.pos.length > 0
-                                                    ? root.deck.mixAt / root.pos.length : -1
-                    bandTo: root.mixTimed && root.pos.length > 0 ? Math.min(1, (root.mixFromHere + root.mixSeconds) / root.pos.length) : -1
-                    mark: root.mixTimed && root.pos.length > 0 && root.mixFromHere + root.mixSwapSeconds > 0
-                          ? (root.mixFromHere + root.mixSwapSeconds) / root.pos.length : planned
-                  }
-                  Rectangle {
-                    id: track
-                    visible: !progressBox.waved
-                    anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-                    height: 3
-                    radius: 2
-                    color: Util.alpha(root.ink, 0.1)
-                    Rectangle {
-                      height: parent.height
-                      radius: 2
-                      width: root.pos.length > 0 ? parent.width * Math.min(1, root.shownTime / root.pos.length) : 0
-                      gradient: Gradient {
-                        orientation: Gradient.Horizontal
-                        GradientStop { position: 0; color: root.amber }
-                        GradientStop { position: 1; color: root.teal }
-                      }
-                    }
-                  }
-                  Label {
-                    anchors.left: parent.left; anchors.bottom: parent.bottom
-                    text: root.clock(root.shownTime)
-                    font.pixelSize: Style.font.caption; opacity: 0.6
-                  }
-                  Label {
-                    anchors.right: parent.right; anchors.bottom: parent.bottom
-                    // What's left, then how long it is.
-                    visible: root.pos.length > 0
-                    text: "−" + root.clock(root.nowLeft) + "  /  " + root.clock(root.pos.length)
-                    font.pixelSize: Style.font.caption; color: root.teal
-                  }
-                  // The mix on the song's own timeline: where it runs, and the
-                  // moment the new song takes over (the bass swap, a cut's downbeat).
-                  Item {
-                    id: mixSpan
-                    visible: root.mixTimed && root.pos.length > 0 && !progressBox.waved
-                    readonly property real len: Math.max(1, root.pos.length)
-                    readonly property real seconds: (root.mixInfo.endMs - root.mixInfo.startMs) / 1000
-                    // Where the mix starts in this song: ahead of now while it's to come,
-                    // near the top of the new one once it has taken over.
-                    readonly property real from: root.shownTime + (root.mixInfo.startMs - root.mixClock) / 1000
-                    readonly property real swap: ((root.mixInfo.takeover || 0) * 1000 - root.mixInfo.startMs) / 1000
-                    x: track.width * Math.max(0, from) / len
-                    width: Math.max(2, track.width * Math.min(seconds + Math.min(0, from), len - Math.max(0, from)) / len)
-                    y: -3; height: 9
-                    Rectangle {
-                      anchors.fill: parent
-                      radius: 3
-                      color: Util.alpha(root.mixTone(root.mixInfo.style), root.mixHeard ? 0.32 : 0.18)
-                      border.width: 1
-                      border.color: Util.alpha(root.mixTone(root.mixInfo.style), 0.55)
-                    }
-                    Rectangle {
-                      visible: mixSpan.swap > 0 && mixSpan.from + mixSpan.swap > 0
-                      x: track.width * (mixSpan.from + mixSpan.swap) / mixSpan.len - mixSpan.x - 1
-                      y: -2; width: 2; height: parent.height + 4
-                      radius: 1
-                      color: root.mixTone(root.mixInfo.style)
-                    }
-                  }
-                }
-                // The other deck, while a mix runs: the song coming in (or going out),
-                // its cover, name and waveform, with its own playhead.
-                Item {
-                  id: otherLane
-                  Layout.fillWidth: true
-                  readonly property var d: root.otherDeck
-                  readonly property bool preview: !!d && !!d.preview
-                  readonly property bool shown: !!d
-                  implicitHeight: shown ? 48 : 0
-                  opacity: shown ? 1 : 0
-                  clip: true
-                  Behavior on implicitHeight { NumberAnimation { duration: Style.duration(220); easing.type: Easing.OutCubic } }
-                  Behavior on opacity { NumberAnimation { duration: Style.duration(220); easing.type: Easing.OutCubic } }
-                  readonly property color tone: preview || root.mixOutgoing ? root.teal : root.amber
-                  // Both songs on one clock: the same seconds to the pixel as the
-                  // waveform above, slid so its playhead sits under that one. The
-                  // two waves overlap where the songs play together.
-                  readonly property real pxPerSecond: root.pos.length > 0 ? nowWave.width / root.pos.length * (root.mixOutgoing ? 1 : (root.mixInfo.rate || 1)) : 0
-                  readonly property real headX: nowWave.width * Math.max(0, Math.min(1, nowWave.progress))
-                  // Waiting, it sits beside its name; once the mix is planned it slides
-                  // onto the shared clock.
-                  WaveStrip {
-                    id: otherWave
-                    visible: ready && (otherLane.preview || progressBox.waved)
-                    opacity: otherLane.preview ? 0.55 : 1
-                    x: !otherLane.d ? 0 : otherLane.preview ? otherChip.width + 14
-                       : otherLane.headX - otherLane.d.live / otherLane.d.rate * otherLane.pxPerSecond
-                    width: !otherLane.d ? 0 : otherLane.preview ? otherLane.width - otherChip.width - 14
-                           : otherLane.d.len / otherLane.d.rate * otherLane.pxPerSecond
-                    y: 8; height: 32
-                    source: otherLane.d ? (otherLane.d.song.wave || "") : ""
-                    progress: otherLane.d && !otherLane.preview ? Math.max(0, otherLane.d.live) / otherLane.d.len : 0
-                    litFrom: otherLane.d && !otherLane.preview && root.mixOutgoing ? otherLane.d.from : 0
-                    playhead: !otherLane.preview
-                    tone: otherLane.tone
-                    ink: root.ink
-                    bandFrom: otherLane.d && !otherLane.preview ? otherLane.d.from : -1
-                    bandTo: otherLane.d && !otherLane.preview ? otherLane.d.to : -1
-                    mark: otherLane.d && !otherLane.preview ? otherLane.d.mark : -1
-                    Behavior on x { NumberAnimation { duration: Style.duration(280); easing.type: Easing.OutCubic } }
-                    Behavior on width { NumberAnimation { duration: Style.duration(280); easing.type: Easing.OutCubic } }
-                    Behavior on opacity { NumberAnimation { duration: Style.duration(280); easing.type: Easing.OutCubic } }
-                  }
-                  // No waveform for one of them: a plain line with its playhead.
-                  Rectangle {
-                    visible: !otherWave.visible
-                    x: otherChip.x > 0 ? 0 : otherChip.width + 14
-                    width: parent.width - otherChip.width - 14
-                    y: 22; height: 3; radius: 2
-                    color: Util.alpha(root.ink, 0.12)
-                    Rectangle {
-                      height: parent.height; radius: 2
-                      width: otherLane.d && !otherLane.preview ? parent.width * Math.min(1, otherLane.d.at / otherLane.d.len) : 0
-                      color: otherLane.tone
-                    }
-                  }
-                  // Its cover and name, on a chip at the start of the lane.
-                  Rectangle {
-                    id: otherChip
-                    // Kept clear of the playheads: at the start of the lane, or its
-                    // end while the new song is still near its own start.
-                    x: otherLane.preview || otherLane.headX > width + 40 ? 0 : otherLane.width - width
-                    y: 4
-                    Behavior on x { NumberAnimation { duration: Style.duration(240); easing.type: Easing.OutCubic } }
-                    width: otherRow.implicitWidth + 16; height: 40
-                    radius: 8
-                    color: Util.alpha(root.ground, 0.82)
-                    border.width: 1
-                    border.color: Util.alpha(otherLane.tone, 0.3)
                     Row {
-                      id: otherRow
-                      x: 4; anchors.verticalCenter: parent.verticalCenter
+                      Layout.fillWidth: true
                       spacing: 10
-                      Cover {
-                        size: 32
-                        radius: 5
-                        url: otherLane.d ? (otherLane.d.song.thumb || "") : ""
-                        border.width: 1
-                        border.color: Util.alpha(otherLane.tone, 0.7)
+                      Label {
+                        id: artistLine
+                        width: Math.min(implicitWidth, parent.width - (versionLine.visible ? Math.min(versionLine.implicitWidth, parent.width * 0.4) + 10 : 0))
+                        text: root.now ? root.now.artist : strings.t("deck.emptyHint")
+                        opacity: 0.9
+                        elide: Text.ElideRight
                       }
-                      Column {
-                        anchors.verticalCenter: parent.verticalCenter
-                        spacing: 1
-                        Label {
-                          width: Math.min(implicitWidth, 190)
-                          text: otherLane.d ? (otherLane.preview || root.mixOutgoing ? "▸ " : "◂ ") + root.titleParts(otherLane.d.song.title).main : ""
-                          font.pixelSize: Style.font.caption + 1; font.bold: true
-                          color: otherLane.tone
-                          elide: Text.ElideRight
-                        }
-                        Label {
-                          width: Math.min(implicitWidth, 190)
-                          text: otherLane.d ? (otherLane.d.song.artist || "") : ""
-                          font.pixelSize: Style.font.caption
-                          opacity: 0.6
-                          elide: Text.ElideRight
-                        }
+                      Label {
+                        id: versionLine
+                        visible: text !== ""
+                        anchors.baseline: artistLine.baseline
+                        width: Math.min(implicitWidth, parent.width - artistLine.width - 10)
+                        text: root.now ? root.titleParts(root.now.title).extra : ""
+                        font.pixelSize: Style.font.caption
+                        font.letterSpacing: 0.5
+                        color: root.amber
+                        opacity: 0.6
+                        elide: Text.ElideRight
                       }
                     }
                   }
                 }
-                // The mix in words, with a little crossfader moving across as it goes.
-                // Between mixes it says how the next song comes in, and when, so the row
-                // is always there and nothing moves as a mix begins.
+                // Where it plays, and the clock.
+                RowLayout {
+                  Layout.fillWidth: true
+                  Layout.topMargin: 2
+                  spacing: 12
+                  Label {
+                    Layout.fillWidth: true
+                    text: root.now ? (root.whereId === "laptop" ? "󰌢  " + strings.t(root.deck.playing ? "hover.playingOn" : "deck.pausedOn").arg(root.whereName)
+                                                              : "󰓃  " + strings.t(root.deck.playing ? "hover.playingIn" : "deck.pausedIn").arg(root.whereName))
+                                      + " · " + root.serviceName(root.now.service)
+                                      + (root.keyTempo(root.now) !== "" ? "  ·  " + root.keyTempo(root.now) : "") : ""
+                    font.family: "Iosevka Nerd Font Propo"
+                    font.pixelSize: Style.font.caption
+                    color: root.teal
+                    elide: Text.ElideRight
+                  }
+                  // In a room: let the bars hear it through the microphone (or not).
+                  HeadLink {
+                    visible: root.inSonos && !progressBox.waved
+                    glyph: root.deck.micViz ? "󰍬" : "󰍭"
+                    text: root.deck.micViz ? strings.t("deck.micOn") : strings.t("deck.micOff")
+                    tip: strings.t("deck.micTip")
+                    on: root.deck.micViz === true
+                    onTapped: root.run(["deck", "mic", root.deck.micViz ? "off" : "on"])
+                  }
+                  Label {
+                    visible: !!root.now
+                    text: root.clock(root.shownTime)
+                    font.pixelSize: Style.font.caption; font.bold: true
+                  }
+                  Label {
+                    visible: !!root.now && root.pos.length > 0
+                    text: "−" + root.clock(root.nowLeft) + "  /  " + root.clock(root.pos.length)
+                    font.pixelSize: Style.font.caption; color: root.teal; opacity: 0.85
+                  }
+                }
+                Label {
+                  Layout.fillWidth: true
+                  visible: root.alertText !== ""
+                  text: root.alertGlyph + "  " + root.alertText
+                  font.family: "Iosevka Nerd Font Propo"
+                  font.pixelSize: Style.font.caption
+                  color: Commons.Color.warning
+                  wrapMode: Text.Wrap
+                }
+                // ---- The decks.
+                Item {
+                  id: decks
+                  Layout.fillWidth: true
+                  Layout.topMargin: 10
+                  visible: !!root.now
+                  implicitHeight: deckColumn.implicitHeight
+                  // Seconds to the pixel on the song playing, and where its playhead is.
+                  readonly property real len: Math.max(1, root.pos.length || 0)
+                  readonly property real headX: width * Math.max(0, Math.min(1, root.shownTime / len))
+                  // Overview between mixes; through a mix, the close-up (DeckZoom), eased in and out.
+                  property real zoom: root.mixClose ? 1 : 0
+                  Behavior on zoom { NumberAnimation { duration: Style.duration(900); easing.type: Easing.OutCubic } }
+                  ColumnLayout {
+                    id: deckColumn
+                    width: parent.width
+                    spacing: 0
+                    opacity: 1 - Math.min(1, decks.zoom * 3)
+                    // Deck A: the song playing, as its waveform (else a line).
+                    Item {
+                      id: progressBox
+                      Layout.fillWidth: true
+                      implicitHeight: 36
+                      readonly property bool waved: !!root.now && (root.now.wave || "") !== "" && nowWave.ready
+                      WaveStrip {
+                        id: nowWave
+                        anchors.fill: parent
+                        visible: progressBox.waved
+                        source: root.now ? (root.now.wave || "") : ""
+                        progress: root.pos.length > 0 ? root.shownTime / root.pos.length : 0
+                        // Brought in by a mix part way through: lit from there.
+                        litFrom: root.mixLive && !root.mixOutgoing && root.pos.length > 0 ? (root.mixInfo.entry || 0) / root.pos.length : 0
+                        tone: root.mixLive && !root.mixOutgoing ? root.teal : root.amber
+                        ink: root.ink
+                        bandFrom: root.bandSeconds > 0 ? Math.max(0, root.bandStart / decks.len) : -1
+                        bandTo: root.bandSeconds > 0 ? Math.min(1, (root.bandStart + root.bandSeconds) / decks.len) : -1
+                        bandFaint: !root.mixTimed
+                        mark: root.bandSeconds > 0 && root.bandStart + root.bandSwap > 0 ? (root.bandStart + root.bandSwap) / decks.len : -1
+                      }
+                      // No waveform: the sound live as bars, over a line with the mix marked on it.
+                      DeckVisualizer {
+                        visible: !progressBox.waved
+                        anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                        height: parent.height - 8
+                        active: visible && root.seen && !!root.now && !root.stageOn
+                        playing: root.deck.playing
+                        live: !root.inSonos
+                        mic: root.deck.micViz === true
+                        amber: root.amber
+                        teal: root.teal
+                        ground: root.ground
+                      }
+                      Rectangle {
+                        id: track
+                        visible: !progressBox.waved
+                        anchors.left: parent.left; anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        height: 3
+                        radius: 2
+                        color: Util.alpha(root.ink, 0.1)
+                        Rectangle {
+                          height: parent.height
+                          radius: 2
+                          width: root.pos.length > 0 ? parent.width * Math.min(1, root.shownTime / root.pos.length) : 0
+                          gradient: Gradient {
+                            orientation: Gradient.Horizontal
+                            GradientStop { position: 0; color: root.amber }
+                            GradientStop { position: 1; color: root.teal }
+                          }
+                        }
+                        Rectangle {
+                          visible: root.bandSeconds > 0
+                          x: parent.width * Math.max(0, root.bandStart) / decks.len
+                          width: Math.max(2, parent.width * Math.min(root.bandSeconds + Math.min(0, root.bandStart), decks.len - Math.max(0, root.bandStart)) / decks.len)
+                          y: -3; height: 9
+                          radius: 3
+                          color: Util.alpha(root.mixTone(root.mixInfo.style || root.nextStyle), root.mixHeard ? 0.32 : 0.14)
+                          border.width: 1
+                          border.color: Util.alpha(root.mixTone(root.mixInfo.style || root.nextStyle), 0.55)
+                        }
+                      }
+                    }
+                    // The seam: how the two songs cross, drawn right under where it
+                    // happens (faint while it's to come).
+                    Item {
+                      id: seamStrip
+                      Layout.fillWidth: true
+                      implicitHeight: otherLane.shown ? 20 : 0
+                      visible: otherLane.shown
+                      clip: true
+                      Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width; height: 1
+                        color: Util.alpha(root.ink, 0.06)
+                      }
+                      MixShape {
+                        readonly property var drawn: root.nextStyle !== "" ? ((root.deck.mixShapes || {})[root.nextStyle] || null) : null
+                        readonly property bool live: root.mixTimed && !!root.mixInfo.curves
+                        visible: root.bandSeconds > 0 && (live || !!drawn)
+                        opacity: live ? 1 : 0.5
+                        x: seamStrip.width * root.bandStart / decks.len
+                        width: Math.max(40, seamStrip.width * root.bandSeconds / decks.len)
+                        y: 2; height: seamStrip.height - 4
+                        labels: false
+                        curves: live ? root.mixInfo.curves : drawn
+                        swap: live ? root.mixSwap : drawn ? drawn.swap : -1
+                        playhead: -1
+                        outColor: root.amber; inColor: root.teal; ink: root.ink
+                        Behavior on x { enabled: !parent.live; NumberAnimation { duration: Style.duration(280); easing.type: Easing.OutCubic } }
+                      }
+                    }
+                    // Deck B: the other song. Waiting, its whole waveform, dim; once the
+                    // mix is planned it slides onto the same clock, so both playheads
+                    // sit on one line and the waves overlap where the songs play together.
+                    Item {
+                      id: otherLane
+                      Layout.fillWidth: true
+                      readonly property var d: root.otherDeck
+                      readonly property bool preview: !!d && !!d.preview
+                      readonly property bool shown: !!d
+                      implicitHeight: shown ? 30 : 0
+                      clip: true
+                      readonly property color tone: preview || root.mixOutgoing ? root.teal : root.amber
+                      readonly property real pxPerSecond: root.pos.length > 0 ? width / root.pos.length * (root.mixOutgoing ? 1 : (root.mixInfo.rate || 1)) : 0
+                      // Waiting: where it will come in on this song's clock (the mix planned,
+                      // else its last seconds), so the lane reads "comes in here" by itself.
+                      readonly property real waitAt: root.nextMixed && root.plannedStart >= 0 ? root.plannedStart
+                                                     : decks.len - (root.deck.crossfade !== false ? 8 : 0)
+                      WaveStrip {
+                        id: otherWave
+                        visible: ready && progressBox.waved
+                        opacity: otherLane.preview ? 0.45 : 1
+                        x: !otherLane.d ? 0 : otherLane.preview ? otherLane.waitAt * otherLane.width / decks.len
+                           : decks.headX - otherLane.d.live / otherLane.d.rate * otherLane.pxPerSecond
+                        width: !otherLane.d ? 0 : otherLane.d.len / (otherLane.d.rate || 1) * Math.max(otherLane.pxPerSecond, 0.001)
+                        height: parent.height
+                        source: otherLane.d ? (otherLane.d.song.wave || "") : ""
+                        progress: otherLane.d && !otherLane.preview ? Math.max(0, otherLane.d.live) / otherLane.d.len : 0
+                        litFrom: otherLane.d && !otherLane.preview && root.mixOutgoing ? otherLane.d.from : 0
+                        playhead: !otherLane.preview
+                        tone: otherLane.tone
+                        ink: root.ink
+                        bandFrom: otherLane.d && !otherLane.preview ? otherLane.d.from : -1
+                        bandTo: otherLane.d && !otherLane.preview ? otherLane.d.to : -1
+                        mark: otherLane.d && !otherLane.preview ? otherLane.d.mark : -1
+                        Behavior on x { NumberAnimation { duration: Style.duration(280); easing.type: Easing.OutCubic } }
+                        Behavior on width { NumberAnimation { duration: Style.duration(280); easing.type: Easing.OutCubic } }
+                        Behavior on opacity { NumberAnimation { duration: Style.duration(280); easing.type: Easing.OutCubic } }
+                      }
+                      // No waveform for it: a plain line from where it comes in.
+                      Rectangle {
+                        visible: !otherWave.visible
+                        anchors.verticalCenter: parent.verticalCenter
+                        x: otherLane.preview ? Math.min(otherLane.width - 24, otherLane.waitAt * otherLane.width / decks.len) : 0
+                        width: parent.width - x; height: 3; radius: 2
+                        color: Util.alpha(root.ink, 0.1)
+                        Rectangle {
+                          height: parent.height; radius: 2
+                          width: otherLane.d && !otherLane.preview ? parent.width * Math.min(1, otherLane.d.at / otherLane.d.len) : 0
+                          color: otherLane.tone
+                        }
+                      }
+                    }
+                  }
+                  DeckZoom {
+                    anchors.fill: deckColumn
+                    visible: decks.zoom > 0.001
+                    opacity: Math.min(1, decks.zoom * 3)
+                    zoom: decks.zoom
+                    mix: root.mixInfo
+                    envA: root.mixSongA ? (root.mixSongA.env || []) : []
+                    envB: root.mixSongB ? (root.mixSongB.env || []) : []
+                    lenA: root.mixSongA ? Math.max(1, root.lengthOf(root.mixSongA)) : 1
+                    lenB: root.mixSongB ? Math.max(1, root.lengthOf(root.mixSongB)) : 1
+                    handedOver: root.mixInfo.stage === "out"
+                    outColor: root.amber; inColor: root.teal; ink: root.ink
+                    topHeight: progressBox.height; seamHeight: seamStrip.height; bottomHeight: otherLane.height
+                  }
+                  // The needle: one line through both decks and the seam while they play together.
+                  Rectangle {
+                    visible: root.mixTimed && progressBox.waved && otherWave.visible
+                    x: decks.headX - 0.5
+                    y: seamStrip.y; width: 1; height: seamStrip.height
+                    color: root.ink
+                    opacity: 0.55 * deckColumn.opacity
+                  }
+                }
+                // The mix in words, beside the other song's cover: between mixes what's
+                // next and when, then how the mix is going.
                 RowLayout {
                   id: mixRow
                   Layout.fillWidth: true
-                  Layout.preferredHeight: 30
+                  Layout.topMargin: 6
+                  Layout.preferredHeight: 26
                   visible: root.mixLive || otherLane.shown
                   spacing: 10
                   readonly property string style: root.mixLive && root.mixInfo.style ? root.mixKind(root.mixInfo.style)
                                                   : root.mixLive ? (root.nextStyle || "swap") : root.nextStyle
+                  readonly property color tone: style !== "" ? root.mixTone(style) : root.ink
+                  Cover {
+                    Layout.preferredWidth: 24; Layout.preferredHeight: 24
+                    size: 24
+                    radius: 4
+                    url: otherLane.d ? (otherLane.d.song.thumb || "") : ""
+                    border.width: 1
+                    border.color: Util.alpha(otherLane.tone, 0.6)
+                  }
                   Label {
                     text: mixRow.style !== "" ? root.mixGlyph(mixRow.style) : "󰒭"
                     font.family: "Iosevka Nerd Font Propo"
-                    color: mixRow.style !== "" ? root.mixTone(mixRow.style) : root.ink
-                    opacity: root.mixLive ? 1 : 0.7
+                    color: mixRow.tone
+                    opacity: root.mixLive ? 1 : 0.75
                     SequentialAnimation on opacity {
                       running: root.mixLive && root.mixInfo.stage === "cueing" && !Style.reduceMotion
                       loops: Animation.Infinite
@@ -2291,26 +2340,9 @@ Item {
                               .arg(root.titleParts(root.nextSong.title).main)
                     font.pixelSize: Style.font.caption
                     font.letterSpacing: 0.5
-                    color: mixRow.style !== "" ? root.mixTone(mixRow.style) : root.ink
-                    opacity: root.mixLive ? 1 : 0.7
+                    color: mixRow.tone
+                    opacity: root.mixLive ? 1 : 0.75
                     elide: Text.ElideRight
-                  }
-                  // The mix as drawn in the Mix card, small, with where it is now:
-                  // a fixed place at the end of the row, under the waveforms' end,
-                  // so it stays put as the words beside it change.
-                  MixShape {
-                    Layout.preferredWidth: 220; Layout.preferredHeight: 30
-                    Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
-                    // Between mixes, the style planned, drawn faint.
-                    readonly property var drawn: mixRow.style !== "" ? ((root.deck.mixShapes || {})[mixRow.style] || null) : null
-                    readonly property bool live: root.mixTimed && !!root.mixInfo.curves
-                    opacity: live ? 1 : drawn ? 0.45 : 0
-                    Behavior on opacity { NumberAnimation { duration: Style.duration(180); easing.type: Easing.OutCubic } }
-                    labels: false
-                    curves: live ? root.mixInfo.curves : drawn
-                    swap: live ? root.mixSwap : drawn ? drawn.swap : -1
-                    playhead: live ? root.mixShare : -1
-                    outColor: root.amber; inColor: root.teal; ink: root.ink
                   }
                 }
                 Flow {
