@@ -2851,6 +2851,9 @@ def beatport_press_play(url, wait=20, first=False):
     Presses again only while nothing plays, so it never pauses by mistake."""
     target = url.split("#")[0].split("?")[0].rstrip("/")
     track = re.search(r"/track/[^/]+/(\d+)", target)
+    # A track page's own Play is the first on it; the smallest is often a
+    # recommendation's (another track entirely).
+    first = first or bool(track)
     deadline = time.time() + wait
     time.sleep(1.5)   # let the old page go
     def right_track():
@@ -4247,7 +4250,8 @@ DECK_DETAILS_LOCK = STATE.parent / "deck-details.lock"
 DECK_UNDO = STATE.parent / "deck-undo.json"           # the set before each of the last changes
 DECK_SETS = STATE.parent / "deck-sets.json"           # sets you saved
 DECK_EMPTY = {"now": None, "set": [], "played": [], "pinned": [], "where": {"kind": "laptop"}, "playing": False,
-              "paused": False, "sleep": None, "crossfade": False, "autodj": False, "autodjAt": 0, "handoff": "",
+              "paused": False, "sleep": None, "crossfade": False, "mixes": True, "mixNow": None, "mixDeck": None,
+              "autodj": False, "autodjAt": 0, "handoff": "",
               "pushed": [], "pushedFrom": 1, "expect": None, "was": None, "updated": 0,
               "lock": False, "requests": [], "guests": None, "requestsAuto": False, "votes": {}, "lastCall": 0,
               "shaped": [], "smoothed": [], "voice": True, "spoken": [], "voiceUntil": 0, "voicePrep": {}, "voiceName": "",
@@ -4943,10 +4947,386 @@ def deck_status(deck):
         item = now.get("item") or {}
         return {"time": now.get("time", 0), "length": now.get("duration", 0), "playing": bool(now.get("playing")),
                 "id": str(item.get("id", "")), "title": str(item.get("title", "")), "reach": reached is not None}
+    if song.get("service") == "beatport":
+        # The page's own player says best (the system's view of Chrome lags a
+        # seek); after a mix the song may be on either deck.
+        look = mix_op(deck.get("mixDeck") or "a", {"type": "look"}, timeout=4)
+        if look.get("ok") and look.get("duration"):
+            length = deck_mix_song(song).get("length")
+            right = not length or abs(look["duration"] - length) <= MIX_LENGTH_SLACK
+            return {"time": int(look.get("time", 0)), "length": int(look["duration"]), "playing": not look.get("paused"),
+                    "title": look.get("title") or (song["title"] if right else ""), "reach": True}
     reached = laptop_track()
     track = reached or {}
     return {"time": track.get("position", 0), "length": track.get("length", 0), "playing": bool(track.get("playing")),
             "title": track.get("title", ""), "reach": reached is not None}
+
+
+# ---- Mixing: one Beatport song into the next, like a DJ. Two decks in
+# Chrome (the Beatport app window and a small window of its own, see the
+# add-on's mixer.js): the next song is cued on the idle deck, its beats
+# lined up with the playing one's, and both are shaped on one clock (EQ,
+# filters, level; the tempo matched with the key held) over a phrase. The
+# sound goes wherever the laptop's does, the live stream to a room too.
+
+MIX_WORKSPACE = "baseline-deck"   # the hidden workspace the second deck's window sits on
+MIX_RATE_MAX = 0.06            # tempo matched (keylocked) up to 6%; past that, a cut on the downbeat
+MIX_KILL = -26                 # dB: a band "off"
+MIX_TAIL = 2.0                 # seconds of the outgoing song kept clear after a mix
+MIX_LISTEN = 16                # seconds each deck is heard for, to find its beats
+MIX_LENGTH_SLACK = 4           # seconds a song's length may differ from the catalogue's
+MIX_SURE = 0.35                # how clearly the kicks must fold onto the beat to blend on it
+
+
+def mix_style(a, b):
+    """blend, filter or cut, for song a into song b (each with bpm, key)."""
+    ta, tb = a.get("bpm") or 0, b.get("bpm") or 0
+    if not ta or not tb or abs(ta / tb - 1) > MIX_RATE_MAX:
+        return "cut"
+    return "blend" if keys_fit(a.get("key"), b.get("key")) else "filter"
+
+
+def mix_bars(a, b, style):
+    """How long a mix runs, in bars: a long blend between two extended mixes
+    (made to be mixed: long intros and outros), shorter otherwise."""
+    extended = all("extended" in str(x.get("title", "")).lower() for x in (a, b))
+    return {"blend": 32 if extended else 16, "filter": 16, "cut": 4}[style]
+
+
+def mix_plan(a, b, length_a, offset_a, offset_b, beat_a=None, beat_b=None, style=None):
+    """How song a goes into song b: the style, how many bars, where in a it
+    starts (on a phrase), where b comes in (its first beat), b's tempo
+    (a's, keylocked), how long it lasts, and the lanes: for each deck, each
+    control's [seconds from the start, value] (gain 0-1, low/mid/high dB,
+    hp/lp Hz). beat_a and beat_b are the beats as heard (seconds); the
+    catalogue's tempo is only the fallback, as it's often rounded. style
+    forces one (a cut, when a song's beats couldn't be heard clearly). None
+    when a is too short to mix out of."""
+    beat_a = beat_a or 60 / (a.get("bpm") or b.get("bpm") or 120)
+    beat_b = beat_b or 60 / (b.get("bpm") or 60 / beat_a)
+    style = style or mix_style({**a, "bpm": 60 / beat_a}, {**b, "bpm": 60 / beat_b})
+    beat = beat_a
+    bar = 4 * beat
+    bars = mix_bars(a, b, style)
+    seconds = bars * bar
+    phrase = 16 * bar
+    last = length_a - MIX_TAIL - seconds
+    if last < phrase:
+        return None
+    start = offset_a + int((last - offset_a) // phrase) * phrase
+    rate = round(beat_b / beat_a, 5) if style != "cut" else 1.0
+    half, k = seconds / 2, MIX_KILL
+    if style == "blend":
+        lanes_a = {"low": [[half - beat / 2, 0], [half, k]], "mid": [[half, 0], [seconds * 0.9, -8]],
+                   "high": [[half, 0], [seconds * 0.9, -12]], "gain": [[seconds * 0.7, 1], [seconds, 0]]}
+        lanes_b = {"gain": [[0, 0], [seconds * 0.25, 1]], "low": [[0, k], [half - beat / 2, k], [half, 0]],
+                   "high": [[0, -10], [half, 0]]}
+    elif style == "filter":
+        lanes_a = {"hp": [[0, 10], [seconds * 0.85, 900]], "low": [[half - beat / 2, 0], [half, k]],
+                   "gain": [[seconds * 0.75, 1], [seconds, 0]]}
+        lanes_b = {"gain": [[0, 0], [half, 1]], "low": [[0, k], [half - beat / 2, k], [half, 0]]}
+    else:
+        lanes_a = {"lp": [[0, 22000], [seconds, 320]], "gain": [[seconds * 0.4, 1], [seconds, 0]]}
+        lanes_b = {"gain": [[seconds - 0.01, 1]]}
+    return {"style": style, "bars": bars, "start": round(start, 3), "entry": round(offset_b, 3), "rate": rate,
+            "seconds": round(seconds, 3), "beat": round(beat, 4), "lanes": {"a": lanes_a, "b": lanes_b},
+            # a cut brings b in on the downbeat after a's fade; otherwise b runs under a from the start
+            "enter": round(seconds if style == "cut" else 0, 3)}
+
+
+def mix_wall(lanes, start_ms):
+    """Lanes in seconds from the mix's start, as times on the shared clock (ms)."""
+    return {name: [[round(start_ms + t * 1000), v] for t, v in points] for name, points in lanes.items()}
+
+
+def mix_op(deck, op, timeout=8, url=None):
+    """One request to a deck's page (a or b) through the add-on."""
+    return beatport_bridge({"type": "deck", "deck": deck, **({"url": url} if url else {}),
+                            "op": {"type": "mixer", "op": op}}, timeout=timeout) or {}
+
+
+def mix_other(deck):
+    return "b" if deck == "a" else "a"
+
+
+def mix_press_play(deck, length=0, wait=30):
+    """Start the track on a deck's page, silently (it was opened quiet): its
+    own Play, the first on the page (the smallest is often a
+    recommendation's). The right song is the one as long as the catalogue
+    says; another is paused and Play tried again as the page fills in.
+    Returns its player's state, or None."""
+    page = lambda op: beatport_bridge({"type": "deck", "deck": deck, "op": op}, timeout=5) or {}
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        items = page({"type": "probe", "region": "page", "filter": "^play-button$"}).get("items", [])
+        if not items:
+            time.sleep(0.5)
+            continue
+        page({"type": "click", "testid": "^play-button$", "region": "page", "first": True})
+        for _ in range(16):
+            time.sleep(0.5)
+            media = next((m for m in mix_op(deck, {"type": "state"}).get("media", [])
+                          if m.get("ready", 0) >= 3 and not m.get("paused")), None)
+            if media:
+                if not length or not media.get("duration") or abs(media["duration"] - length) <= MIX_LENGTH_SLACK:
+                    return media
+                mix_op(deck, {"type": "pause"})      # a recommendation started: try the track's own again
+                time.sleep(1)
+                break
+    return None
+
+
+def deck_mix(a, b, live="a", url_b=None, log=None, route=None, wanted=None):
+    """Mix song a (playing on deck live) into song b, now. Blocks until it's
+    done; returns the plan with how it went, or None if it couldn't (and
+    nothing was changed that the song playing would notice)."""
+    idle = mix_other(live)
+    beatport_bridge({"type": "mixing", "seconds": 600})
+    plan = None
+    try:
+        plan = deck_mix_cue(a, b, live, idle, url_b or beatport_track_url(b), log or (lambda *x: None), route,
+                            wanted or (lambda: True))
+    except (KeyError, TypeError, ValueError):
+        plan = None
+    if not plan:
+        # Nothing heard changed: the other deck goes quiet again.
+        mix_op(idle, {"type": "pause"})
+        if idle == "b":
+            beatport_bridge({"type": "deck-close"})
+        beatport_bridge({"type": "mixing", "seconds": 0})
+    return plan
+
+
+def deck_mix_cue(a, b, live, idle, url_b, say, route=None, wanted=lambda: True):
+    """deck_mix's work: hear both songs' beats, cue b silently on the idle
+    deck, plan it and set it going. None if any step falls short, or once
+    wanted() says the mix isn't wanted any more (paused, skipped)."""
+    if not mix_op(live, {"type": "arm"}).get("ok"):
+        say("no player on deck", live)
+        return None
+    grid_a = mix_op(live, {"type": "grid", "bpm": a["bpm"], "seconds": MIX_LISTEN}, timeout=MIX_LISTEN + 10)
+    say("grid a", grid_a)
+    if not wanted():
+        say("not wanted any more")
+        return None
+    # The next song on the other deck: heard silently for a moment, to find its beats.
+    loaded = beatport_bridge({"type": "deck", "deck": idle, "url": url_b + "#baseline-quiet"}, timeout=40) or {}
+    if not loaded.get("ok"):
+        say("couldn't load deck", idle, loaded)
+        return None
+    media = mix_press_play(idle, b.get("length") or 0)
+    if not media:
+        say("couldn't start the song on deck", idle)
+        return None
+    mix_op(idle, {"type": "cue", "time": 0, "rate": 1}, timeout=10)
+    mix_op(idle, {"type": "play"})
+    if route:
+        route()             # streaming to a room: the other deck's sound goes there too
+    grid_b = mix_op(idle, {"type": "grid", "bpm": b["bpm"], "seconds": MIX_LISTEN}, timeout=MIX_LISTEN + 10)
+    say("grid b", grid_b)
+    if not wanted():
+        say("not wanted any more")
+        return None
+    look_a = mix_op(live, {"type": "look"})
+    length_a = look_a.get("duration") or a.get("length") or 0
+    clear = lambda g: bool(g.get("ok")) and g.get("sure", 0) >= MIX_SURE
+    heard = lambda g, key: g.get(key) if clear(g) else None
+    # Beats that can't be lined up aren't blended: a cut on the downbeat instead.
+    plan = mix_plan(a, b, length_a, heard(grid_a, "offset") or 0, heard(grid_b, "offset") or 0,
+                    heard(grid_a, "period"), heard(grid_b, "period"),
+                    style=None if clear(grid_a) and clear(grid_b) else "cut")
+    if not plan:
+        say("too short to mix out of", length_a)
+        return None
+    cued = mix_op(idle, {"type": "cue", "time": plan["entry"], "rate": plan["rate"]}, timeout=10)
+    look_a = mix_op(live, {"type": "look"})
+    if not look_a.get("ok") or look_a.get("paused"):
+        say("the playing song stopped", look_a)
+        return None
+    start_ms = look_a["wall"] + (plan["start"] - look_a["time"]) * 1000
+    lead = (start_ms - time.time() * 1000) / 1000
+    say("plan", {k: v for k, v in plan.items() if k != "lanes"}, "starts in", round(lead, 1), "cued", cued)
+    if lead < 5 or not wanted():
+        say("too late to start" if lead < 5 else "not wanted any more", round(lead, 1))
+        return None
+    enter_ms = start_ms + plan["enter"] * 1000
+    mix_op(live, {"type": "automate", "lanes": mix_wall(plan["lanes"]["a"], start_ms)})
+    end_ms = start_ms + plan["seconds"] * 1000
+    mix_op(idle, {"type": "go", "start": enter_ms, "time": plan["entry"], "rate": plan["rate"], "preroll": 3,
+                  "until": end_ms + 20000, "lanes": mix_wall(plan["lanes"]["b"], start_ms)},
+           timeout=max(10, lead + 10))
+    plan.update(startMs=start_ms, endMs=end_ms, live=idle)
+    return plan
+
+
+def deck_mix_finish(plan, live_before):
+    """After a mix: the old deck stops and goes back to plain, the new one
+    eases its tempo home."""
+    mix_op(live_before, {"type": "pause"})
+    mix_op(live_before, {"type": "reset"})
+    mix_op(plan["live"], {"type": "reset", "seconds": 32 * 4 * plan["beat"]})
+    beatport_bridge({"type": "mixing", "seconds": 0})
+
+
+# ---- The Deck mixing its set: about two and a half minutes before a
+# Beatport song ends, with another Beatport song next, the mix is worked out
+# in the background (deck mixes go); the set moves along when the new song
+# takes over (the bass swap, or a cut's downbeat), and a press of Pause or
+# Next stops it at once.
+
+MIX_LEAD = 150                 # seconds before the end a mix gets going (hearing both songs, cueing)
+MIX_STUCK = 300                # a mix not done by then is forgotten
+
+
+def deck_mix_song(song, details=None):
+    """A song as the mixer needs it: its tempo, key and length from the details."""
+    details = details if details is not None else deck_details_read()
+    known = details.get(deck_song_key(song), {})
+    return {**song, **{k: known[k] for k in ("bpm", "key", "length") if known.get(k)}}
+
+
+def deck_mix_preview(deck):
+    """How each Beatport song in the set will come in from the one before
+    (the playing one, for the first): {uid: {style, bars}}, from what the
+    details say. The mix itself goes by what it hears, so it can differ."""
+    if not deck.get("mixes", True):
+        return {}
+    out, before = {}, deck.get("now")
+    for song in deck.get("set") or []:
+        if before and before.get("service") == "beatport" == song.get("service"):
+            style = mix_style(before, song)
+            out[song["uid"]] = {"style": style, "bars": mix_bars(before, song, style)}
+        before = song
+    return out
+
+
+def deck_mix_due(deck, status):
+    """Time to start mixing the song playing into the next."""
+    now, coming = deck.get("now") or {}, (deck["set"][:1] or [None])[0]
+    if not (deck.get("mixes", True) and coming and now.get("service") == "beatport" == coming.get("service")):
+        return False
+    if deck_queue_room(deck) or (deck.get("sleep") or {}).get("song") or (deck.get("mixNow") or {}).get("from") == now["uid"]:
+        return False
+    left = status.get("length", 0) - status.get("time", 0)
+    return bool(status.get("playing") and status.get("length", 0) > 150 and 20 < left <= MIX_LEAD)
+
+
+def deck_mixing(deck):
+    """A mix of the playing song is being worked out or heard."""
+    now = deck.get("mixNow") or {}
+    return now.get("stage") in {"cueing", "mixing"} and now.get("from") == (deck.get("now") or {}).get("uid") \
+        and time.time() - now.get("at", 0) < MIX_STUCK
+
+
+def deck_mixed_in(d, from_uid, to_uid, live):
+    """The new song has taken over: the set moves along as deck_start would,
+    but nothing is started (it's already playing, on deck live)."""
+    if (d.get("now") or {}).get("uid") != from_uid or not d["set"] or d["set"][0]["uid"] != to_uid:
+        return False
+    d["played"] = (d["played"] + [{**d["now"], "playedAt": int(time.time())}])[-DECK_HISTORY:]
+    d["now"], d["set"] = d["set"][0], d["set"][1:]
+    d["playing"], d["paused"], d["silent"] = True, False, None
+    d["mixDeck"] = live
+    d["mixNow"] = {**(d.get("mixNow") or {}), "stage": "out"}
+    d["expect"] = {"uid": to_uid, "since": time.time()}
+    return True
+
+
+def deck_mix_stop(d):
+    """Back to one deck (deck a), before the Deck starts a song itself."""
+    if d.get("mixDeck") == "b" or (d.get("mixNow") or {}).get("stage") in {"cueing", "mixing", "out"}:
+        beatport_bridge({"type": "deck-close"}, timeout=3)
+        beatport_bridge({"type": "mixing", "seconds": 0}, timeout=3)
+    d["mixDeck"] = None
+    if (d.get("mixNow") or {}).get("stage") in {"cueing", "mixing", "out"}:
+        d["mixNow"] = {**d["mixNow"], "stage": "stopped"}
+
+
+def deck_mix_pause(d):
+    """Pause with a mix about: a mix under way stops (the next song's deck
+    goes quiet, the playing one back to plain), and the song's own deck
+    pauses, keeping its place for Play."""
+    stage = (d.get("mixNow") or {}).get("stage")
+    live = d.get("mixDeck") or "a"
+    if stage in {"cueing", "mixing", "out"}:
+        d["mixNow"] = {**d["mixNow"], "stage": "stopped"}
+        # The other deck: the next song being cued, or the last one fading out.
+        mix_op(mix_other(live), {"type": "pause"})
+        if mix_other(live) == "b":
+            beatport_bridge({"type": "deck-close"}, timeout=3)
+        mix_op(live, {"type": "reset"})
+        beatport_bridge({"type": "mixing", "seconds": 0}, timeout=3)
+    mix_op(live, {"type": "pause"})
+
+
+MIX_LOG = STATE.parent / "deck-mix.log"
+
+
+def mix_log(*parts):
+    """A line about a mix in deck-mix.log (what was heard, the plan, why one
+    didn't happen), kept short."""
+    try:
+        if MIX_LOG.is_file() and MIX_LOG.stat().st_size > 200_000:
+            MIX_LOG.write_text("\n".join(MIX_LOG.read_text().splitlines()[-400:]) + "\n")
+        with open(MIX_LOG, "a") as log:
+            log.write(time.strftime("%H:%M:%S ") + " ".join(
+                json.dumps(p, default=str) if isinstance(p, (dict, list)) else str(p) for p in parts)[:800] + "\n")
+    except OSError:
+        pass
+
+
+def deck_mix_run():
+    """deck mixes go: mix the playing song into the next, then move the set
+    along. Run by the watcher, in the background."""
+    deck = deck_read()
+    now = deck.get("mixNow") or {}
+    a = deck.get("now")
+    b = deck["set"][0] if deck["set"] else None
+    if not a or not b or now.get("from") != a["uid"] or now.get("to") != b["uid"]:
+        return
+    details = deck_details_read()
+    a, b = deck_mix_song(a, details), deck_mix_song(b, details)
+    live = deck.get("mixDeck") or "a"
+    mark = lambda **fields: deck_update(lambda d: d["mixNow"].update(fields)
+                                        if (d.get("mixNow") or {}).get("from") == a["uid"] else None)
+    route = (lambda: deck_stream_route(DECK_STREAM_SINK)) if deck_where_room(deck) else None
+    def wanted():
+        d = deck_read()
+        return d["playing"] and (d.get("now") or {}).get("uid") == a["uid"] \
+            and (d.get("mixNow") or {}).get("stage") == "cueing" and (d.get("mixNow") or {}).get("from") == a["uid"]
+    plan = deck_mix(a, b, live=live, route=route, wanted=wanted, log=mix_log)
+    mix_log("mix", a.get("title"), "→", b.get("title"), plan and {k: v for k, v in plan.items() if k != "lanes"})
+    if not plan:
+        mark(stage="failed")
+        return
+    takeover = plan["startMs"] / 1000 + (plan["enter"] or plan["seconds"] / 2)
+    mark(stage="mixing", style=plan["style"], bars=plan["bars"], rate=plan["rate"], startMs=plan["startMs"],
+         endMs=plan["endMs"], takeover=takeover, live=plan["live"])
+    moved = False
+    while time.time() * 1000 < plan["endMs"] + 500:
+        time.sleep(0.4)
+        d = deck_read()
+        mine = (d.get("mixNow") or {}).get("from") == a["uid"]
+        playing_uid = (d.get("now") or {}).get("uid")
+        if not mine or d["mixNow"].get("stage") not in {"mixing", "out"} or not d["playing"] \
+                or playing_uid != (b["uid"] if moved else a["uid"]):
+            # Paused, Next, another song: stop mixing now, whichever deck is heard.
+            for deck_name in ("a", "b"):
+                mix_op(deck_name, {"type": "reset"})
+            if not d["playing"]:
+                mix_op("a", {"type": "pause"})
+                mix_op("b", {"type": "pause"})
+            beatport_bridge({"type": "mixing", "seconds": 0})
+            mark(stage="stopped")
+            return
+        if not moved and time.time() >= takeover:
+            moved = bool(deck_update(lambda d: deck_mixed_in(d, a["uid"], b["uid"], plan["live"])))
+            if not moved:
+                break
+    deck_mix_finish(plan, live)
+    if plan["live"] == "a":
+        beatport_bridge({"type": "deck-close"})
+    deck_update(lambda d: d["mixNow"].update(stage="done") if (d.get("mixNow") or {}).get("from") == a["uid"] else None)
 
 
 DECK_UNPLAYABLE_TRIES = 3     # songs in a row that won't play before the Deck stops
@@ -4968,6 +5348,7 @@ def deck_start(deck, song=None, start_at=0, tries=0, natural=False, room_after=N
         song = deck["set"].pop(0)
     if deck.get("now") and deck["now"]["uid"] != song["uid"]:
         deck["played"] = (deck["played"] + [{**deck["now"], "playedAt": int(time.time())}])[-DECK_HISTORY:]
+    deck_mix_stop(deck)
     deck["now"] = song
     deck["set"] = [s for s in deck["set"] if s["uid"] != song["uid"]]
     deck["playing"] = True
@@ -5253,6 +5634,14 @@ def deck_tick(last):
         return status
     if last is None or time.time() - (deck.get("expect") or {}).get("since", 0) < 6:
         return status       # give a song a moment to start
+    if deck_mixing(deck):
+        return status       # a mix is under way: deck mixes go moves the set along
+    if deck_mix_due(deck, status):
+        mixing = {"from": deck["now"]["uid"], "to": deck["set"][0]["uid"], "at": time.time(), "stage": "cueing"}
+        deck_update(lambda d: d.update(mixNow=mixing) if (d.get("now") or {}).get("uid") == mixing["from"] else None)
+        subprocess.Popen([str(REPO / "bin/afterlight"), "deck", "mixes", "go"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        return status
     stall = deck_stalled(deck, status, last)
     if stall is not None:
         return stall or None
@@ -6158,6 +6547,8 @@ def deck_pause(d):
         sonos_call(streamed["ip"], "GroupRenderingControl", "SetGroupMute", {"InstanceID": 0, "DesiredMute": 1}, timeout=3)
     if d.get("now", {}) and d["now"].get("service") == "applemusic":
         am_bridge({"action": "pause"}, timeout=4)
+    elif (d.get("now") or {}).get("service") == "beatport" and (d.get("mixDeck") or deck_mixing(d)):
+        deck_mix_pause(d)
     else:
         media_command("pause")
 
@@ -7557,7 +7948,9 @@ def deck_command(settings, args):
         if deck.get("recapAt") and time.time() - deck["recapAt"] < RECAP_MINUTES * 60:
             deck["recap"] = deck_recap(deck)
         deck["voices"] = [{"key": k, "name": n, "about": a} for k, n, a in voices_ready()]
-        print(json.dumps(deck_with_details(deck)))
+        shown = deck_with_details(deck)
+        shown["mixPlan"] = deck_mix_preview(shown)
+        print(json.dumps(shown))
         sys.stdout.flush()
         deck_details_soon(deck)
         if deck["playing"]:
@@ -7784,6 +8177,10 @@ def deck_command(settings, args):
                   glyph="󰆓")
         else:
             toast(f"Couldn't save to {names[args[1]]}", result.get("error") or "None of the songs were found there", glyph="󰀦")
+    elif action == "mixes" and len(args) == 2 and args[1] in {"on", "off"}:
+        deck_update(lambda d: d.update(mixes=args[1] == "on"))
+    elif action == "mixes" and args[1:] == ["go"]:
+        deck_mix_run()
     elif action == "crossfade" and len(args) == 2 and args[1] in {"on", "off"}:
         deck_update(lambda d: deck_crossfade(d, args[1] == "on"))
     elif action == "sleep" and len(args) == 2:
@@ -8846,6 +9243,9 @@ def deck_resume(deck):
         am_bridge({"action": "play"}, timeout=4)
     elif song.get("service") == "ytmusic" and song_key((laptop_track() or {}).get("title", "")) == song_key(song["title"]):
         media_command("play")
+    elif song.get("service") == "beatport" and deck.get("mixDeck") \
+            and mix_op(deck["mixDeck"], {"type": "look"}, timeout=4).get("duration"):
+        mix_op(deck["mixDeck"], {"type": "play"})       # the song is on the deck a mix left it on
     else:
         mark = read_json(DECK_NOW, {})
         deck_play_laptop(song, start_at=mark.get("time", 0) if mark.get("uid") == song["uid"] else 0)
@@ -9353,6 +9753,12 @@ def apps_lua_text(settings):
         lines.append(f"o.window({{ class = {json.dumps(app['class'])} }}, {{ workspace = \"{APP_WORKSPACE[role]}\" }})")
         if app.get("launch"):
             lines.append(f"o.launch_on_start({json.dumps(app['launch'])})")
+    # The Deck's second deck, for mixing Beatport songs: a window of the
+    # Baseline add-on's own, out of sight on a workspace of its own (Chrome
+    # still plays it), big enough for Beatport's full page.
+    lines.append("-- the Deck's second deck (mixing): out of sight, without taking focus")
+    lines.append(f"o.window({{ class = \"^chrome-{chrome_extension_id()}-Default$\" }}, "
+                 f"{{ workspace = \"special:{MIX_WORKSPACE} silent\", float = true, size = {{ 1280, 900 }} }})")
     return "\n".join(lines) + "\n"
 
 
@@ -9414,6 +9820,9 @@ HOOKS = CONFIG / "omarchy/hooks"
 SYSTEMD_USER = CONFIG / "systemd/user"
 HEALTH = STATE.parent / "health.json"
 UDEV_RULE = Path("/etc/udev/rules.d/99-afterlight-charge-limit.rules")
+# Lets Beatport (and the other music sites) play in the Deck's second deck,
+# which opens without a click, so the mixes can start on their own.
+AUTOPLAY_POLICY = Path("/etc/opt/chrome/policies/managed/baseline-autoplay.json")
 CHROME_POLICY = Path("/etc/opt/chrome/policies/managed/color.json")
 # Hook names from before the rename, removed when their replacement goes in.
 OLD_HOOKS = (HOOKS / "post-boot.d/afterlight-boot", HOOKS / "post-update.d/restore-plugin-copies",
@@ -9632,6 +10041,10 @@ def health_checks(settings):
     rule = REPO / "system/udev/99-afterlight-charge-limit.rules"
     udev_ok = UDEV_RULE.is_file() and UDEV_RULE.read_text() == rule.read_text()
     add("udev", "system", "Charge limit permission", udev_ok, "" if udev_ok else "udev rule missing or changed", "sudo")
+    policy = REPO / "system/chrome/baseline-autoplay.json"
+    policy_ok = AUTOPLAY_POLICY.is_file() and AUTOPLAY_POLICY.read_text() == policy.read_text()
+    add("chrome:autoplay", "system", "Chrome may start the Deck's mixes", policy_ok,
+        "" if policy_ok else "autoplay policy missing or changed", "sudo")
     add("openrgb", "system", "OpenRGB for the mouse lights", shutil.which("openrgb"),
         "" if shutil.which("openrgb") else "openrgb isn't installed", "sudo")
     return checks
@@ -9674,6 +10087,7 @@ def health_system():
     script = (f"echo 'Baseline: repairing the system parts (asks for your password)'; "
               f"sudo install -m 0644 {shlex.quote(str(rule))} {UDEV_RULE} && "
               "sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=power_supply; "
+              f"sudo install -D -m 0644 {shlex.quote(str(REPO / 'system/chrome/baseline-autoplay.json'))} {AUTOPLAY_POLICY}; "
               "command -v openrgb >/dev/null || sudo pacman -S --needed openrgb; "
               f"{shlex.quote(str(LOCAL_BIN / 'afterlight'))} repair >/dev/null; echo; read -rp 'Done. Press Enter to close.'")
     subprocess.Popen(["xdg-terminal-exec", "--title=Baseline repair", "bash", "-c", script],
@@ -10094,6 +10508,7 @@ def snapshot(added=()):
         "packages": {p: present(p) and p not in added for p in BASELINE_PACKAGES},
         "apps": {name: check() for name, (check, _) in BASELINE_APPS.items()},
         "udev": UDEV_RULE.exists(),
+        "autoplay": AUTOPLAY_POLICY.exists(),
         "entries": entries,
     }
     write_atomic(BEFORE / "manifest.json", json.dumps(manifest, indent=2) + "\n")
@@ -10155,6 +10570,7 @@ def uninstall(dry=False, remove_packages=False):
     apps = [(name, command) for name, (check, command) in BASELINE_APPS.items()
             if manifest and not manifest.get("apps", {}).get(name, True) and check()]
     udev = UDEV_RULE.exists() and not manifest.get("udev", False)
+    autoplay = AUTOPLAY_POLICY.exists() and not manifest.get("autoplay", False)
 
     print("Baseline uninstall" + (" (dry run: nothing changes)" if dry else ""))
     print("  snapshot from " + (datetime.datetime.fromtimestamp(manifest["taken"]).strftime("%Y-%m-%d %H:%M")
@@ -10166,6 +10582,8 @@ def uninstall(dry=False, remove_packages=False):
     print(f"  {'stop':32} " + ", ".join(SERVICES))
     if udev:
         print(f"  {'remove (password)':32} {UDEV_RULE}")
+    if autoplay:
+        print(f"  {'remove (password)':32} {AUTOPLAY_POLICY}")
     if dry:
         return plan
 
@@ -10225,6 +10643,11 @@ def uninstall(dry=False, remove_packages=False):
             subprocess.run(["sudo", "udevadm", "control", "--reload"])
         else:
             print(f"Remove the charge-limit rule yourself: sudo rm {UDEV_RULE}")
+    if autoplay:
+        if sys.stdin.isatty():
+            subprocess.run(["sudo", "rm", "-f", str(AUTOPLAY_POLICY)])
+        else:
+            print(f"Remove Chrome's autoplay policy yourself: sudo rm {AUTOPLAY_POLICY}")
     if remove_packages and added:
         run("omarchy", "pkg", "drop", *added, quiet=False)
     # The snapshot goes with the rest, so a later install takes a fresh one.

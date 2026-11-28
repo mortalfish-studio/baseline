@@ -168,7 +168,33 @@
     return { ok: media.length > 0, level: was };
   }
 
+  // The page's players, through mixer.js (which runs in the page itself and
+  // sees players the page keeps off screen).
+  function mixer(op, timeout = 3000) {
+    const id = Math.random().toString(36).slice(2);
+    return new Promise((resolve) => {
+      const done = (event) => {
+        let reply = {};
+        try { reply = JSON.parse(event.detail); } catch (error) { return; }
+        if (reply.id !== id) return;
+        window.removeEventListener("baseline-mixer-reply", done);
+        resolve(reply);
+      };
+      window.addEventListener("baseline-mixer-reply", done);
+      window.dispatchEvent(new CustomEvent("baseline-mixer", { detail: JSON.stringify({ ...op, id }) }));
+      setTimeout(() => { window.removeEventListener("baseline-mixer-reply", done); resolve({ ok: false, error: "no mixer" }); }, timeout);
+    });
+  }
+
   async function run(op) {
+    if (op.type === "mixer") {
+      // Finding the beats listens for a while; going waits for its moment.
+      const inner = op.op || {};
+      const wait = inner.type === "grid" ? (Number(inner.seconds) || 10) * 1000 + 5000
+        : inner.type === "go" ? Math.max(5000, Number(inner.start) - (performance.timeOrigin + performance.now()) + 5000)
+        : inner.type === "cue" ? 8000 : 3000;
+      return mixer(inner, Math.min(120000, wait));
+    }
     if (op.type === "probe") {
       const items = [...document.querySelectorAll(CLICKABLE)]
         .filter((el) => visible(el) && inRegion(el, op.region) && (!op.filter || matches(el, { text: op.filter }) || matches(el, { label: op.filter }) || matches(el, { testid: op.filter }) || matches(el, { href: op.filter })))

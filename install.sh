@@ -205,6 +205,14 @@ elif sudo install -m 0644 "$rule" /etc/udev/rules.d/99-afterlight-charge-limit.r
 else
   warn "charge-limit rule not installed (needs sudo)"
 fi
+policy=$BASELINE_DIR/system/chrome/baseline-autoplay.json
+if cmp -s "$policy" /etc/opt/chrome/policies/managed/baseline-autoplay.json; then
+  note "Chrome autoplay policy already in place"
+elif sudo install -D -m 0644 "$policy" /etc/opt/chrome/policies/managed/baseline-autoplay.json; then
+  note "Chrome autoplay policy installed (the Deck's mixes start on their own)"
+else
+  warn "Chrome autoplay policy not installed (needs sudo); the Deck won't mix Beatport songs"
+fi
 
 # ---------------------------------------------------------------- finish
 

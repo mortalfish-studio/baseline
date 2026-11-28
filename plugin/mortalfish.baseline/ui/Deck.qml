@@ -808,6 +808,34 @@ Item {
   readonly property bool setDone: !now && (deck.set || []).length === 0 && !!lastPlayed
   // Two songs or fewer left and nobody topping it up.
   readonly property bool runningLow: !!now && !deck.autodj && (deck.set || []).length <= 2 && !djBusy
+  // ---- Mixing, Beatport into Beatport: the mix under way (worked out, heard,
+  // or the new song taking over), where it is, and how each song comes in.
+  readonly property var mixInfo: deck.mixNow || ({})
+  readonly property bool mixLive: !!now && ((["cueing", "mixing"].indexOf(mixInfo.stage || "") >= 0 && mixInfo.from === now.uid)
+                                            || (mixInfo.stage === "out" && mixInfo.to === now.uid))
+  property real mixClock: Date.now()
+  Timer { interval: 250; repeat: true; running: root.seen && root.mixLive; onTriggered: root.mixClock = Date.now() }
+  readonly property bool mixTimed: mixLive && (mixInfo.startMs || 0) > 0 && (mixInfo.endMs || 0) > mixInfo.startMs
+  readonly property real mixShare: mixTimed ? Math.max(0, Math.min(1, (mixClock - mixInfo.startMs) / (mixInfo.endMs - mixInfo.startMs))) : 0
+  readonly property bool mixHeard: mixTimed && mixClock >= mixInfo.startMs
+  readonly property int mixBar: Math.max(1, Math.min(mixInfo.bars || 1, Math.floor(mixShare * (mixInfo.bars || 0)) + 1))
+  // The other song in the mix: the next one, or the one going out.
+  readonly property var mixOther: !mixLive ? null : mixInfo.stage === "out"
+                                  ? (deck.played || []).find(s => s.uid === mixInfo.from) || null
+                                  : (deck.set || []).find(s => s.uid === mixInfo.to) || null
+  readonly property bool hasBeatport: (!!now && now.service === "beatport") || (deck.set || []).some(s => s.service === "beatport")
+  function mixGlyph(style) { return style === "cut" ? "󰆐" : style === "filter" ? "󰈶" : "󰘭" }
+  function mixTone(style) { return style === "cut" ? Util.alpha(ink, 0.7) : style === "filter" ? amber : teal }
+  readonly property string mixLine: {
+    if (!mixLive) return ""
+    const other = mixOther ? titleParts(mixOther.title).main : ""
+    const style = mixInfo.style || "blend"
+    if (mixInfo.stage === "cueing") return strings.t("deck.mixCueing").arg(other)
+    const bars = strings.t("deck.mixBar").arg(mixBar).arg(mixInfo.bars || 0)
+    if (mixInfo.stage === "out") return strings.t("deck.mixOut").arg(other) + "  ·  " + bars
+    if (!mixHeard) return strings.t("deck.mixSoon." + style).arg(other).arg(clock((mixInfo.startMs - mixClock) / 1000))
+    return strings.t("deck.mixNow." + style).arg(other) + "  ·  " + bars
+  }
   // Seconds left in the playing song (for the stage's countdown).
   readonly property real songLeft: (pos.length || 0) > 0 ? Math.max(0, pos.length - shownTime) : -1
   property bool readyAsked: false
@@ -2006,6 +2034,74 @@ Item {
                     text: "−" + root.clock(root.nowLeft) + "  /  " + root.clock(root.pos.length)
                     font.pixelSize: Style.font.caption; color: root.teal
                   }
+                  // The mix on the song's own timeline: where it runs, and the
+                  // moment the new song takes over (the bass swap, a cut's downbeat).
+                  Item {
+                    id: mixSpan
+                    visible: root.mixTimed && root.pos.length > 0
+                    readonly property real len: Math.max(1, root.pos.length)
+                    readonly property real seconds: (root.mixInfo.endMs - root.mixInfo.startMs) / 1000
+                    // Where the mix starts in this song: ahead of now while it's to come,
+                    // near the top of the new one once it has taken over.
+                    readonly property real from: root.shownTime + (root.mixInfo.startMs - root.mixClock) / 1000
+                    readonly property real swap: ((root.mixInfo.takeover || 0) * 1000 - root.mixInfo.startMs) / 1000
+                    x: track.width * Math.max(0, from) / len
+                    width: Math.max(2, track.width * Math.min(seconds + Math.min(0, from), len - Math.max(0, from)) / len)
+                    y: -3; height: 9
+                    Rectangle {
+                      anchors.fill: parent
+                      radius: 3
+                      color: Util.alpha(root.mixTone(root.mixInfo.style), root.mixHeard ? 0.32 : 0.18)
+                      border.width: 1
+                      border.color: Util.alpha(root.mixTone(root.mixInfo.style), 0.55)
+                    }
+                    Rectangle {
+                      visible: mixSpan.swap > 0 && mixSpan.from + mixSpan.swap > 0
+                      x: track.width * (mixSpan.from + mixSpan.swap) / mixSpan.len - mixSpan.x - 1
+                      y: -2; width: 2; height: parent.height + 4
+                      radius: 1
+                      color: root.mixTone(root.mixInfo.style)
+                    }
+                  }
+                }
+                // The mix in words, with a little crossfader moving across as it goes.
+                RowLayout {
+                  Layout.fillWidth: true
+                  visible: root.mixLive
+                  spacing: 10
+                  Label {
+                    text: root.mixGlyph(root.mixInfo.style)
+                    font.family: "Iosevka Nerd Font Propo"
+                    color: root.mixTone(root.mixInfo.style)
+                    SequentialAnimation on opacity {
+                      running: root.mixLive && root.mixInfo.stage === "cueing" && !Style.reduceMotion
+                      loops: Animation.Infinite
+                      NumberAnimation { to: 0.35; duration: Style.duration(700); easing.type: Easing.InOutSine }
+                      NumberAnimation { to: 1; duration: Style.duration(700); easing.type: Easing.InOutSine }
+                    }
+                  }
+                  Label {
+                    Layout.fillWidth: true
+                    text: root.mixLine
+                    font.pixelSize: Style.font.caption
+                    font.letterSpacing: 0.5
+                    color: root.mixTone(root.mixInfo.style)
+                  }
+                  Item {
+                    visible: root.mixTimed
+                    implicitWidth: 72; implicitHeight: 12
+                    Rectangle {
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: parent.width; height: 2; radius: 1
+                      color: Util.alpha(root.ink, 0.18)
+                    }
+                    Rectangle {
+                      width: 6; height: 12; radius: 2
+                      x: (parent.width - width) * (root.mixInfo.stage === "out" ? Math.max(0.5, root.mixShare) : root.mixShare)
+                      color: root.mixTone(root.mixInfo.style)
+                      Behavior on x { NumberAnimation { duration: Style.duration(240); easing.type: Easing.OutCubic } }
+                    }
+                  }
                 }
                 Flow {
                   Layout.topMargin: 4
@@ -2053,6 +2149,18 @@ Item {
                       const on = root.deck.softSkip === false
                       root.deck = Object.assign({}, root.deck, { softSkip: on })
                       root.run(["deck", "soft-skip", on ? "on" : "off"])
+                    }
+                  }
+                  // Mix: one Beatport song into the next, on the beat.
+                  ActionButton {
+                    visible: root.hasBeatport
+                    icon: "󰘭"
+                    text: strings.t("deck.mixes")
+                    tone: root.deck.mixes === false ? root.teal : root.amber
+                    onClicked: {
+                      const on = root.deck.mixes === false
+                      root.deck = Object.assign({}, root.deck, { mixes: on })
+                      root.run(["deck", "mixes", on ? "on" : "off"])
                     }
                   }
                   // Crossfade: Sonos fades one song into the next.
@@ -2644,8 +2752,11 @@ Item {
                   readonly property bool heading: info.opens && root.filter === ""
                   readonly property bool isFolded: heading && !!root.folded[uid]
                   readonly property bool shown: root.matches(title, artist) && !root.hiddenAt(index) && !isFolded
+                  // How it comes in from the song before, when both are Beatport's (a mix).
+                  readonly property var joint: root.filter === "" ? ((root.deck.mixPlan || {})[uid] || null) : null
+                  readonly property int jointBand: joint && shown ? 18 : 0
                   width: setList.width
-                  height: (heading ? 36 : 0) + (shown ? 56 : 0)
+                  height: (heading ? 36 : 0) + (shown ? 56 + jointBand : 0)
                   visible: height > 0
                   clip: true
 
@@ -2729,13 +2840,63 @@ Item {
                     }
                   }
 
+                  // ---- the seam into this song: how the mix goes (blend, filter, cut;
+                  // how many bars), sitting over the key and tempo it's judged by.
+                  // Lit while it's the mix being heard.
+                  Item {
+                    id: seam
+                    visible: slot.jointBand > 0
+                    y: slot.heading ? 36 : 0
+                    width: parent.width
+                    height: slot.jointBand + 2
+                    readonly property bool live: root.mixLive && root.mixInfo.stage !== "out" && root.mixInfo.to === slot.uid
+                    readonly property string style: live && root.mixInfo.style ? root.mixInfo.style : (slot.joint ? slot.joint.style : "blend")
+                    readonly property int bars: live && root.mixInfo.bars ? root.mixInfo.bars : (slot.joint ? slot.joint.bars : 0)
+                    readonly property color tone: root.mixTone(style)
+                    // Centred over the key and tempo columns.
+                    readonly property real middle: width - 6 - root.actionsColumn - 12 - root.timeColumn - 12 - (root.keyColumn + 12 + root.bpmColumn) / 2
+                    Rectangle {
+                      anchors.verticalCenter: parent.verticalCenter
+                      x: 40; width: Math.max(0, pill.x - 8 - 40); height: 1
+                      color: Util.alpha(seam.tone, seam.live ? 0.5 : 0.2)
+                    }
+                    Rectangle {
+                      anchors.verticalCenter: parent.verticalCenter
+                      x: pill.x + pill.width + 8; width: Math.max(0, seam.width - 8 - x); height: 1
+                      color: Util.alpha(seam.tone, seam.live ? 0.5 : 0.2)
+                    }
+                    Rectangle {
+                      id: pill
+                      anchors.verticalCenter: parent.verticalCenter
+                      x: Math.max(48, seam.middle - width / 2)
+                      width: seamText.implicitWidth + 18
+                      height: 16
+                      radius: 8
+                      color: seam.live ? Util.alpha(seam.tone, 0.16) : root.ground
+                      border.width: 1
+                      border.color: Util.alpha(seam.tone, seam.live ? 0.8 : 0.35)
+                      Label {
+                        id: seamText
+                        anchors.centerIn: parent
+                        text: root.mixGlyph(seam.style) + "  " + (seam.live && root.mixHeard
+                              ? strings.t("deck.mixBar").arg(root.mixBar).arg(seam.bars)
+                              : strings.t("deck.mixStyle." + seam.style) + " · " + strings.tn("deck.mixBars", seam.bars).arg(seam.bars)).toUpperCase()
+                        font.family: "Iosevka Nerd Font Propo"
+                        font.pixelSize: 10
+                        font.letterSpacing: 1.2
+                        color: seam.tone
+                        opacity: seam.live ? 1 : 0.8
+                      }
+                    }
+                  }
+
                   Rectangle {
                     id: row
                     readonly property bool isPinned: root.pinned(slot.uid)
                     readonly property bool lifted: root.dragging && root.dragFrom === "set" && root.dragUid === slot.uid
                     readonly property bool picked: !!root.selected[slot.uid]
                     readonly property var warns: slot.warn === "" ? [] : slot.warn.split(",")
-                    y: slot.heading ? 36 : 0
+                    y: (slot.heading ? 36 : 0) + slot.jointBand
                     visible: slot.shown
                     width: parent.width
                     height: 52

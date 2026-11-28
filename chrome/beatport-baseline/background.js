@@ -343,6 +343,38 @@ async function scratchTab(url) {
   return tab;
 }
 
+// ---- Two decks, for mixing one song into the next: deck a is the Beatport
+// app window, deck b a small window of its own (a background tab doesn't
+// get the frames Beatport's player needs to load). Baseline says which deck
+// gets which song, so the one playing is never replaced.
+let deckBId = null;
+let mixingUntil = 0;           // while a mix runs, two songs may play at once
+
+async function deckTab(which, url) {
+  let tab = null;
+  if (which === "a") {
+    for (const t of await chrome.tabs.query({ url: "https://www.beatport.com/*" })) {
+      if (t.id === deckBId || t.id === scratchId) continue;
+      const win = await chrome.windows.get(t.windowId).catch(() => null);
+      if (win && win.type === "app") { tab = t; break; }
+    }
+    if (tab && url) tab = await chrome.tabs.update(tab.id, { url });
+  } else {
+    if (deckBId !== null) tab = await chrome.tabs.get(deckBId).catch(() => null);
+    if (tab && url && tab.url.split("#")[0] !== url.split("#")[0]) tab = await chrome.tabs.update(tab.id, { url });
+    else if (!tab && url) {
+      const win = await chrome.windows.create({ url, type: "popup", focused: false, width: 1280, height: 900 });
+      tab = win.tabs[0];
+      deckBId = tab.id;
+    }
+  }
+  if (tab && url) {
+    await loaded(tab.id);
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  return tab;
+}
+
 // ---- One thing playing at a time: when a Beatport or YouTube tab starts
 // making sound, pause the others.
 const MEDIA = /^https:\/\/(www\.beatport\.com|www\.youtube\.com|music\.youtube\.com|music\.apple\.com)\//;
@@ -417,7 +449,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
       : APPLEMUSIC.test(tab.url) ? "applemusic" : "youtube";
     if (tabId !== scratchId && port) port.postMessage({ type: "source", site });
   }
-  if (info.audible !== true || !MEDIA.test(tab.url || "") || tabId === scratchId) return;
+  if (info.audible !== true || !MEDIA.test(tab.url || "") || tabId === scratchId || Date.now() < mixingUntil) return;
   const others = await chrome.tabs.query({ audible: true });
   for (const other of others) {
     if (other.id !== tabId && MEDIA.test(other.url || "")) pauseIn(other);
@@ -477,6 +509,26 @@ async function handle(message) {
     const tab = await scratchTab(message.url);
     if (!tab) return { ok: false, error: "couldn't open a background tab" };
     return message.op ? await askPage(tab, message.op) : { ok: true };
+  }
+  if (message.type === "deck") {
+    // A deck (a or b) loads a Beatport song and/or runs op on its page.
+    const which = message.deck === "b" ? "b" : "a";
+    if (message.url !== undefined && (typeof message.url !== "string" || !BEATPORT.test(message.url))) return { ok: false };
+    const tab = await deckTab(which, message.url);
+    if (!tab) return { ok: false, error: "no deck " + which };
+    return message.op ? { ...(await askPage(tab, message.op)), tab: tab.id } : { ok: true, tab: tab.id };
+  }
+  if (message.type === "deck-close") {
+    if (deckBId !== null) {
+      const tab = await chrome.tabs.get(deckBId).catch(() => null);
+      if (tab) await chrome.windows.remove(tab.windowId).catch(() => {});
+    }
+    deckBId = null;
+    return { ok: true };
+  }
+  if (message.type === "mixing") {
+    mixingUntil = Date.now() + Math.max(0, Math.min(600, Number(message.seconds) || 0)) * 1000;
+    return { ok: true };
   }
   if (message.type === "scratch-close") {
     if (scratchId !== null) await chrome.tabs.remove(scratchId).catch(() => {});

@@ -58,7 +58,7 @@ The installer:
 5. installs the prompt
 6. runs `afterlight repair`, which links everything in and sets up the bar, plugins, workspaces and services
 7. sets a look, downloads the built-in looks' pictures from their original sites, and installs OmaRelay
-8. asks for your password once, for the battery charge-limit rule
+8. asks for your password once, for the battery charge-limit rule and Chrome's autoplay policy (so the Deck can start a mix's second Beatport window by itself)
 9. ends with a health check
 
 Options:
@@ -94,7 +94,7 @@ It uses the snapshot the installer took:
 - stops Baseline's services and removes its links, hooks and plugin copies
 - puts back every file it replaced (bar, prompt, screensaver, any settings restored from dotfiles) exactly as they were, and takes its line out of `hyprland.lua`
 - switches back to the theme you had and removes the looks from Omarchy's theme list
-- removes the charge-limit rule (asks for your password)
+- removes the charge-limit rule and the autoplay policy (asks for your password)
 
 Nothing is deleted: everything it removes or replaces, including your looks and Baseline's settings, goes to `~/.local/share/baseline-removed-<time>/`. Packages Baseline added stay unless you add `--packages`. Apps it installed are listed with the command that removes them (`omarchy remove ai t3 code`, for example), since that also deletes their data. Afterwards:
 - delete the checkout (`~/Projects/baseline`) when you like

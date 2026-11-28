@@ -795,5 +795,19 @@
   "deck.agentsFitSlow": "slow",
   "deck.agentsFitUnreliable": "unreliable",
   "deck.songsCount": "%1 songs",
-  "deck.fillTo": "Fill to"
+  "deck.fillTo": "Fill to",
+  "deck.mixes": "Mix",
+  "deck.mixStyle.blend": "Blend",
+  "deck.mixStyle.filter": "Filter",
+  "deck.mixStyle.cut": "Cut",
+  "deck.mixBars": { "one": "%1 bar", "other": "%1 bars" },
+  "deck.mixBar": "Bar %1 of %2",
+  "deck.mixCueing": "Lining up %1 · listening for its beats",
+  "deck.mixSoon.blend": "Blends into %1 in %2",
+  "deck.mixSoon.filter": "Filters into %1 in %2",
+  "deck.mixSoon.cut": "Cuts to %1 in %2",
+  "deck.mixNow.blend": "Blending into %1",
+  "deck.mixNow.filter": "Filtering into %1",
+  "deck.mixNow.cut": "Cutting to %1",
+  "deck.mixOut": "Mixing out of %1"
 }

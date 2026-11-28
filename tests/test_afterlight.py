@@ -1816,6 +1816,93 @@ class DeckStreamTests(TempCase):
         self.assertTrue(al.ufw_allows(8766))
 
 
+class MixTests(TempCase):
+    """Mixing one Beatport song into the next: the style, the plan (phrase,
+    tempo, lanes), when the Deck starts one, and the set moving along."""
+
+    def setUp(self):
+        super().setUp()
+        self.patch("DECK", self.tmp / "deck.json")
+        self.patch("DECK_LOCK", self.tmp / "deck.lock")
+        self.patch("DECK_DETAILS", self.tmp / "deck-details.json")
+        self.patch("DECK_DETAILS_LOCK", self.tmp / "details.lock")
+        self.bridge = []
+        self.patch("beatport_bridge", lambda message, timeout=8: self.bridge.append(message) or {"ok": True})
+
+    def song(self, uid, service="beatport", **more):
+        return {"uid": uid, "service": service, "id": uid, "title": uid, "artist": "", **more}
+
+    def test_style_follows_tempo_and_key(self):
+        self.assertEqual(al.mix_style({"bpm": 124, "key": "8A"}, {"bpm": 125, "key": "9A"}), "blend")
+        self.assertEqual(al.mix_style({"bpm": 124, "key": "8A"}, {"bpm": 125, "key": "2B"}), "filter")
+        self.assertEqual(al.mix_style({"bpm": 124, "key": "8A"}, {"bpm": 140, "key": "8A"}), "cut")
+        self.assertEqual(al.mix_style({"bpm": 124}, {}), "cut")          # no tempo known: no blend
+
+    def test_plan_starts_on_a_phrase_and_matches_the_heard_tempo(self):
+        a = {"bpm": 125, "key": "8B", "title": "One (Extended Mix)"}
+        b = {"bpm": 125, "key": "9B", "title": "Two (Extended Mix)"}
+        # The catalogue says 125 for both; heard, a is 123 (0.4878 s a beat).
+        plan = al.mix_plan(a, b, 360, 0.15, 0.08, beat_a=0.4878, beat_b=0.48)
+        self.assertEqual((plan["style"], plan["bars"]), ("blend", 32))
+        self.assertAlmostEqual(plan["rate"], 0.48 / 0.4878, places=4)       # b slowed to a's tempo
+        phrase = 16 * 4 * 0.4878
+        self.assertAlmostEqual(((plan["start"] - 0.15) / phrase) % 1, 0, places=3)
+        self.assertLessEqual(plan["start"] + plan["seconds"], 360 - al.MIX_TAIL)
+        self.assertGreater(plan["start"] + phrase + plan["seconds"], 360 - al.MIX_TAIL)   # the last phrase that fits
+        self.assertEqual(plan["entry"], 0.08)
+        # The bass swaps halfway: a's lows go as b's come in, never both at once.
+        half = plan["seconds"] / 2
+        self.assertAlmostEqual(plan["lanes"]["a"]["low"][-1][0], half, places=2)
+        self.assertEqual(plan["lanes"]["a"]["low"][-1][1], al.MIX_KILL)
+        self.assertEqual(plan["lanes"]["b"]["low"][-1][1], 0)
+        # Not both extended: a shorter blend.
+        self.assertEqual(al.mix_plan({**a, "title": "One"}, b, 360, 0, 0)["bars"], 16)
+
+    def test_unclear_beats_cut_on_the_downbeat_and_short_songs_dont_mix(self):
+        a, b = {"bpm": 125, "key": "8B"}, {"bpm": 125, "key": "8B"}
+        cut = al.mix_plan(a, b, 300, 0, 0, style="cut")
+        self.assertEqual((cut["style"], cut["bars"], cut["rate"]), ("cut", 4, 1.0))
+        self.assertEqual(cut["enter"], cut["seconds"])        # b comes in as a has gone
+        self.assertIsNone(al.mix_plan(a, b, 60, 0, 0))
+
+    def test_wall_times_are_ms_on_the_shared_clock(self):
+        self.assertEqual(al.mix_wall({"gain": [[0, 1], [1.5, 0]]}, 1000), {"gain": [[1000, 1], [2500, 0]]})
+
+    def test_a_mix_starts_near_the_end_of_a_beatport_song_with_one_next(self):
+        self.patch("deck_queue_room", lambda deck: None)
+        deck = {**al.DECK_EMPTY, "now": self.song("a"), "set": [self.song("b")], "playing": True}
+        near = {"playing": True, "length": 360, "time": 360 - 120}
+        self.assertTrue(al.deck_mix_due(deck, near))
+        self.assertFalse(al.deck_mix_due(deck, {**near, "time": 100}))                 # too early
+        self.assertFalse(al.deck_mix_due(deck, {**near, "time": 350}))                 # too late to plan
+        self.assertFalse(al.deck_mix_due({**deck, "mixes": False}, near))
+        self.assertFalse(al.deck_mix_due({**deck, "set": [self.song("b", "applemusic")]}, near))
+        self.assertFalse(al.deck_mix_due({**deck, "sleep": {"song": "a"}}, near))     # stopping after this one
+        self.assertFalse(al.deck_mix_due({**deck, "mixNow": {"from": "a", "stage": "failed"}}, near))   # tried already
+
+    def test_the_set_moves_along_when_the_new_song_takes_over(self):
+        al.deck_update(lambda d: d.update({**al.DECK_EMPTY, "now": self.song("a"), "set": [self.song("b"), self.song("c")], "playing": True,
+                       "mixNow": {"from": "a", "to": "b", "stage": "mixing", "at": time.time()}}))
+        self.assertTrue(al.deck_mixing(al.deck_read()))
+        self.assertTrue(al.deck_update(lambda d: al.deck_mixed_in(d, "a", "b", "b")))
+        d = al.deck_read()
+        self.assertEqual((d["now"]["uid"], [s["uid"] for s in d["set"]], d["mixDeck"]), ("b", ["c"], "b"))
+        self.assertEqual(d["played"][-1]["uid"], "a")
+        self.assertFalse(al.deck_mixing(d))
+        # Next was pressed meanwhile: nothing moves.
+        self.assertFalse(al.deck_update(lambda d: al.deck_mixed_in(d, "a", "b", "b")))
+
+    def test_starting_a_song_goes_back_to_one_deck(self):
+        d = {**al.DECK_EMPTY, "mixDeck": "b", "mixNow": {"from": "a", "stage": "out"}}
+        al.deck_mix_stop(d)
+        self.assertIsNone(d["mixDeck"])
+        self.assertEqual(d["mixNow"]["stage"], "stopped")
+        self.assertIn({"type": "deck-close"}, self.bridge)
+        self.bridge.clear()
+        al.deck_mix_stop({**al.DECK_EMPTY})                    # nothing mixing: the add-on isn't asked
+        self.assertEqual(self.bridge, [])
+
+
 class IsolationTests(TempCase):
     """Tests never touch the real Deck, settings or speakers' state."""
 
@@ -2127,8 +2214,15 @@ class AppTests(TempCase):
 
     def test_none_writes_no_rules(self):
         text = al.apps_lua_text({"apps": {"coding": "none", "chat": "none"}})
-        self.assertNotIn("o.window", text)
+        self.assertNotIn('workspace = "3"', text)
+        self.assertNotIn('workspace = "4"', text)
         self.assertNotIn("o.launch_on_start", text)
+
+    def test_the_second_deck_opens_out_of_sight(self):
+        # The Deck's mixing window: the add-on's own, hidden, never taking focus.
+        text = al.apps_lua_text({})
+        self.assertIn(f'class = "^chrome-{al.chrome_extension_id()}-Default$"', text)
+        self.assertIn('workspace = "special:baseline-deck silent", float = true', text)
 
     def test_custom_app_is_quoted_safely(self):
         settings = {"apps": {"coding": "custom", "custom": {"coding": {
