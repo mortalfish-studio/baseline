@@ -814,7 +814,14 @@ Item {
   readonly property bool mixLive: !!now && ((["cueing", "mixing"].indexOf(mixInfo.stage || "") >= 0 && mixInfo.from === now.uid)
                                             || (mixInfo.stage === "out" && mixInfo.to === now.uid))
   property real mixClock: Date.now()
-  Timer { interval: 250; repeat: true; running: root.seen && root.mixLive; onTriggered: root.mixClock = Date.now() }
+  Timer {
+    interval: 250; repeat: true
+    running: root.seen && (root.mixLive || !!root.zoomHeld)
+    onTriggered: {
+      root.mixClock = Date.now()
+      if (root.zoomHeld && root.mixClock > root.zoomHeld.mix.endMs + 8000) root.zoomHeld = null
+    }
+  }
   readonly property bool mixTimed: mixLive && (mixInfo.startMs || 0) > 0 && (mixInfo.endMs || 0) > mixInfo.startMs
   readonly property real mixShare: mixTimed ? Math.max(0, Math.min(1, (mixClock - mixInfo.startMs) / (mixInfo.endMs - mixInfo.startMs))) : 0
   readonly property bool mixHeard: mixTimed && mixClock >= mixInfo.startMs
@@ -853,11 +860,20 @@ Item {
                                   ? playedLast(mixInfo.from) || null : now
   readonly property var mixSongB: !mixLive ? null : mixInfo.stage === "out"
                                   ? now : (deck.set || []).find(s => s.uid === mixInfo.to) || null
-  // The close-up, from a few seconds before the mix until just after it: both songs
-  // have their loudness known.
-  readonly property bool mixClose: mixTimed && !!mixSongA && !!mixSongB
-                                   && (mixSongA.env || []).length > 1 && (mixSongB.env || []).length > 1
-                                   && mixClock >= mixInfo.startMs - 6000 && mixClock <= mixInfo.endMs + 2500
+  // The close-up, from a few seconds before the mix until just after it, when both
+  // songs' loudness is known. It holds on to the mix (and its songs) a little past
+  // the end, so the old song can drain away and the new one rise before it eases out.
+  property var zoomHeld: null
+  function holdZoom() {
+    if (mixTimed && mixSongA && mixSongB && (mixSongA.env || []).length > 1 && (mixSongB.env || []).length > 1)
+      zoomHeld = { mix: mixInfo, a: mixSongA, b: mixSongB }
+  }
+  onMixInfoChanged: holdZoom()
+  onMixSongAChanged: holdZoom()
+  onMixSongBChanged: holdZoom()
+  readonly property bool mixClose: !!zoomHeld && ["failed", "stopped"].indexOf(mixInfo.stage || "") < 0
+                                   && (mixInfo.from || "") === zoomHeld.mix.from
+                                   && mixClock >= zoomHeld.mix.startMs - 6000 && mixClock <= zoomHeld.mix.endMs + 3000
   readonly property real bandStart: mixTimed ? mixFromHere : plannedStart
   readonly property real bandSeconds: mixTimed ? mixSeconds : plannedStart >= 0 ? plannedSeconds : 0
   readonly property real bandSwap: mixTimed ? mixSwapSeconds : plannedSwap
@@ -1980,31 +1996,44 @@ Item {
                 }
                 // Through a mix, the song going out stays underneath until the new one has covered it.
                 CrossCover { anchors.fill: parent; url: root.mixLive && root.mixSongA ? root.mixSongA.thumb || "" : root.now ? root.now.thumb || "" : ""; size: 176; glyph: "󰎆"; radius: 12 }
-                // In a mix, the new song's cover: in the corner as it's lined up, then
-                // growing and fading in over the old one as the mix goes, until it's all there.
-                Item {
-                  id: mixPip
-                  readonly property real p: root.mixHeard ? root.mixShare : 0
-                  readonly property real eased: p * p * (3 - 2 * p)
-                  readonly property real share: 0.32 + 0.68 * eased
-                  visible: root.mixLive && !!root.mixSongB
+                // In a mix, the new song's cover: a card in the corner while it's lined
+                // up, then blooming in over the old one, a step on each bar (CoverBloom),
+                // until it covers it on the last.
+                CoverBloom {
                   anchors.fill: parent
-                  transformOrigin: Item.BottomRight
-                  // Drawn once at full size and scaled, so the picture never reloads as it grows.
-                  scale: share
-                  opacity: visible ? 0.92 + 0.08 * eased : 0
-                  Behavior on scale { NumberAnimation { duration: Style.duration(400); easing.type: Easing.OutCubic } }
-                  Rectangle {
-                    anchors.fill: parent; anchors.margins: -3 / mixPip.scale
-                    radius: 14
-                    color: root.ground
-                    border.width: 2 / mixPip.scale
-                    border.color: Util.alpha(root.teal, 1 - mixPip.eased)
-                  }
+                  visible: root.mixLive && !!root.mixSongB && root.mixTimed
+                  opacity: root.mixHeard ? 1 : 0
+                  Behavior on opacity { NumberAnimation { duration: Style.duration(500); easing.type: Easing.OutCubic } }
+                  size: 176
+                  startMs: root.mixInfo.startMs || 0
+                  endMs: root.mixInfo.endMs || 0
+                  bars: root.mixInfo.bars || 16
                   Cover {
                     anchors.fill: parent
                     size: 176
                     radius: 12
+                    url: root.mixSongB ? (root.mixSongB.thumb || "") : ""
+                  }
+                }
+                Item {
+                  id: mixPip
+                  visible: opacity > 0.01
+                  opacity: root.mixLive && !!root.mixSongB && !root.mixHeard ? 1 : 0
+                  Behavior on opacity { NumberAnimation { duration: Style.duration(500); easing.type: Easing.OutCubic } }
+                  readonly property real cardSize: 176 * 0.36
+                  width: cardSize; height: cardSize
+                  x: 176 - width - 8; y: 176 - height - 8
+                  Rectangle {
+                    anchors.fill: parent; anchors.margins: -3
+                    radius: 10
+                    color: root.ground
+                    border.width: 2
+                    border.color: root.teal
+                  }
+                  Cover {
+                    anchors.fill: parent
+                    size: Math.round(mixPip.cardSize)
+                    radius: 8
                     url: root.mixSongB ? (root.mixSongB.thumb || "") : ""
                   }
                 }
@@ -2318,12 +2347,11 @@ Item {
                     visible: decks.zoom > 0.001
                     opacity: Math.min(1, decks.zoom * 3)
                     zoom: decks.zoom
-                    mix: root.mixInfo
-                    envA: root.mixSongA ? (root.mixSongA.env || []) : []
-                    envB: root.mixSongB ? (root.mixSongB.env || []) : []
-                    lenA: root.mixSongA ? Math.max(1, root.lengthOf(root.mixSongA)) : 1
-                    lenB: root.mixSongB ? Math.max(1, root.lengthOf(root.mixSongB)) : 1
-                    handedOver: root.mixInfo.stage === "out"
+                    mix: root.zoomHeld ? root.zoomHeld.mix : ({})
+                    envA: root.zoomHeld ? (root.zoomHeld.a.env || []) : []
+                    envB: root.zoomHeld ? (root.zoomHeld.b.env || []) : []
+                    lenA: root.zoomHeld ? Math.max(1, root.lengthOf(root.zoomHeld.a)) : 1
+                    lenB: root.zoomHeld ? Math.max(1, root.lengthOf(root.zoomHeld.b)) : 1
                     outColor: root.amber; inColor: root.teal; ink: root.ink
                     topHeight: progressBox.height; seamHeight: seamStrip.height; bottomHeight: otherLane.height
                   }
@@ -4016,9 +4044,26 @@ Item {
               autoPaddingEnabled: true
             }
             CrossCover { anchors.fill: parent; size: stageView.big; radius: stageCoverShadow.radius; live: stageView.visible
-                         url: root.now ? root.now.thumb || "" : root.setDone ? root.lastPlayed.thumb || "" : ""
+                         url: root.mixLive && root.mixSongA ? root.mixSongA.thumb || "" : root.now ? root.now.thumb || "" : root.setDone ? root.lastPlayed.thumb || "" : ""
                          opacity: root.now ? 1 : 0.55
                          Behavior on opacity { NumberAnimation { duration: Style.duration(400); easing.type: Easing.OutCubic } } }
+            // A mix, as on the Deck: the new song's cover blooming in over the old, a step on each bar.
+            CoverBloom {
+              anchors.fill: parent
+              visible: stageView.visible && root.mixLive && !!root.mixSongB && root.mixTimed
+              opacity: root.mixHeard ? 1 : 0
+              Behavior on opacity { NumberAnimation { duration: Style.duration(500); easing.type: Easing.OutCubic } }
+              size: stageView.big
+              startMs: root.mixInfo.startMs || 0
+              endMs: root.mixInfo.endMs || 0
+              bars: root.mixInfo.bars || 16
+              Cover {
+                anchors.fill: parent
+                size: Math.round(stageView.big)
+                radius: stageCoverShadow.radius
+                url: root.mixSongB ? (root.mixSongB.thumb || "") : ""
+              }
+            }
           }
           // A guest's request playing: their face, big, on the cover's corner,
           // glowing a little and moving with the music.
@@ -4236,15 +4281,23 @@ Item {
                 color: root.mixTone(root.mixInfo.style)
                 elide: Text.ElideRight
               }
-              MixShape {
-                visible: root.mixTimed && !!root.mixInfo.curves
-                Layout.preferredWidth: Math.min(360, stageView.width * 0.2); Layout.preferredHeight: 52
-                labels: false
-                curves: root.mixInfo.curves || null
-                swap: root.mixSwap
-                playhead: root.mixShare
-                outColor: root.amber; inColor: root.teal; ink: root.ink
-              }
+            }
+            // The close-up, as on the Deck: both songs flowing past the needle, their beats lined up.
+            DeckZoom {
+              id: stageZoom
+              Layout.fillWidth: true
+              Layout.topMargin: 10
+              Layout.preferredHeight: visible ? topHeight + seamHeight + bottomHeight : 0
+              visible: stageView.visible && root.mixClose && !!root.zoomHeld && (root.zoomHeld.a.env || []).length > 1
+              zoom: 1
+              span: 32
+              topHeight: 52; seamHeight: 14; bottomHeight: 52
+              mix: root.zoomHeld ? root.zoomHeld.mix : ({})
+              envA: root.zoomHeld ? (root.zoomHeld.a.env || []) : []
+              envB: root.zoomHeld ? (root.zoomHeld.b.env || []) : []
+              lenA: root.zoomHeld ? Math.max(1, root.lengthOf(root.zoomHeld.a)) : 1
+              lenB: root.zoomHeld ? Math.max(1, root.lengthOf(root.zoomHeld.b)) : 1
+              outColor: root.amber; inColor: root.teal; ink: root.ink
             }
           }
         }

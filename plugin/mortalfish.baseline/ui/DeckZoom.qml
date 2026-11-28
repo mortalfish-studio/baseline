@@ -7,8 +7,8 @@ import qs.Commons as Commons
 // the melody and its bottom half the bass, each scaled by what the mix lets
 // through (so a bass swap shows as one song's lower half draining while the
 // other's fills). The beats each song was heard to have tick across it; the
-// two combs line up when the mix is in time. At the takeover the ribbons
-// change places, the new song rising to the top row.
+// two combs line up when the mix is in time. Once the old song has drained
+// away at the mix's end, the new one glides up into the top row.
 //
 // Everything runs off the wall clock and the mix's own plan (deck.mixNow), so
 // it moves smoothly every frame. `zoom` eases it in from the whole song (as the
@@ -22,16 +22,12 @@ Canvas {
   property real lenB: 1
   property real zoom: 0                 // 0: the whole song; 1: close up
   property real span: 24                // seconds across, close up
-  property bool handedOver: false       // the new song has taken over (it's on top)
   property color outColor: Commons.Color.accent
   property color inColor: Commons.Color.foreground
   property color ink: Commons.Color.popups.text
   property real topHeight: 36
   property real seamHeight: 20
   property real bottomHeight: 30
-
-  property real swapT: handedOver ? 1 : 0
-  Behavior on swapT { NumberAnimation { duration: Style.duration(650); easing.type: Easing.OutCubic } }
 
   renderStrategy: Canvas.Cooperative
   FrameAnimation { running: view.visible && view.opacity > 0.01; onTriggered: view.requestPaint() }
@@ -72,11 +68,16 @@ Canvas {
       const w = (1 - Math.cos(k * Math.PI)) / 2
       return env[i] + (env[Math.min(i + 1, env.length - 1)] - env[i]) * w
     }
-    // Rows: the old song on top until the takeover, then they change places.
+    // Rows: the old song on top through the mix; as it ends it fades out, then
+    // the new song glides up into its row.
+    const clamp01 = x => Math.max(0, Math.min(1, x))
+    const gone = clamp01((u - seconds) / 0.8)
+    const rise = clamp01((u - seconds - 0.5) / 1.1)
+    const swapT = rise * rise * (3 - 2 * rise)
     const rowTop = { y: 0, h: view.topHeight }
     const rowBottom = { y: view.topHeight + view.seamHeight, h: view.bottomHeight }
-    const rowA = { y: lerp(rowTop.y, rowBottom.y, view.swapT), h: lerp(rowTop.h, rowBottom.h, view.swapT) }
-    const rowB = { y: lerp(rowBottom.y, rowTop.y, view.swapT), h: lerp(rowBottom.h, rowTop.h, view.swapT) }
+    const rowA = { y: lerp(rowTop.y, rowBottom.y, swapT), h: lerp(rowTop.h, rowBottom.h, swapT) }
+    const rowB = { y: lerp(rowBottom.y, rowTop.y, swapT), h: lerp(rowBottom.h, rowTop.h, swapT) }
 
     // Each song as a function of the window's x: its own time, and whether it's heard.
     const songA = a => ({ t: a, v: a - from, on: a - from <= seconds, deck: "a", env: view.envA, len: view.lenA })
@@ -150,10 +151,14 @@ Canvas {
       g.fillRect(sx - 1, seamY - 3, 2, 6)
     }
 
+    g.globalAlpha = 1 - gone
     ribbon(rowA, view.outColor, view.envA, view.lenA, "a", songA)
+    g.globalAlpha = 1
     ribbon(rowB, view.inColor, view.envB, view.lenB, "b", songB)
     const grids = m.grids || {}
+    g.globalAlpha = 1 - gone
     comb(rowA, view.outColor, grids.a, t => t, a => a, songA)
+    g.globalAlpha = 1
     // The new song's beats, from its own seconds to the window's and back.
     comb(rowB, view.inColor, grids.b, t => from + enter + (t - entry) / rate, a => entry + (a - from - enter) * rate, songB)
 

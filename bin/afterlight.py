@@ -5385,6 +5385,11 @@ def deck_mix(a, b, live="a", url_b=None, log=None, route=None, wanted=None, styl
     return plan
 
 
+def mix_grid_clear(grid):
+    """The beats were heard clearly enough to blend on."""
+    return bool(grid.get("ok")) and grid.get("sure", 0) >= MIX_SURE
+
+
 def deck_mix_cue(a, b, live, idle, url_b, say, route=None, wanted=lambda: True, style=None, bars=0, chosen=False,
                  soon=False):
     """deck_mix's work: hear both songs' beats, cue b silently on the idle
@@ -5395,6 +5400,11 @@ def deck_mix_cue(a, b, live, idle, url_b, say, route=None, wanted=lambda: True, 
         return None
     grid_a = mix_op(live, {"type": "grid", "bpm": a["bpm"], "seconds": MIX_LISTEN}, timeout=MIX_LISTEN + 10)
     say("grid a", grid_a)
+    if not mix_grid_clear(grid_a) and wanted():
+        # A breakdown, most likely: listen again a little further on.
+        again = mix_op(live, {"type": "grid", "bpm": a["bpm"], "seconds": MIX_LISTEN}, timeout=MIX_LISTEN + 10)
+        say("grid a again", again)
+        grid_a = again if again.get("sure", 0) > grid_a.get("sure", 0) else grid_a
     if not wanted():
         say("not wanted any more")
         return None
@@ -5413,6 +5423,10 @@ def deck_mix_cue(a, b, live, idle, url_b, say, route=None, wanted=lambda: True, 
         route()             # streaming to a room: the other deck's sound goes there too
     grid_b = mix_op(idle, {"type": "grid", "bpm": b["bpm"], "seconds": MIX_LISTEN}, timeout=MIX_LISTEN + 10)
     say("grid b", grid_b)
+    if not mix_grid_clear(grid_b) and wanted():
+        again = mix_op(idle, {"type": "grid", "bpm": b["bpm"], "seconds": MIX_LISTEN}, timeout=MIX_LISTEN + 10)
+        say("grid b again", again)
+        grid_b = again if again.get("sure", 0) > grid_b.get("sure", 0) else grid_b
     if not wanted():
         say("not wanted any more")
         return None
@@ -5420,11 +5434,15 @@ def deck_mix_cue(a, b, live, idle, url_b, say, route=None, wanted=lambda: True, 
     length_a = look_a.get("duration") or a.get("length") or 0
     # Mix now: the first phrase from a little after the cueing's done.
     soonest = (look_a.get("time") or 0) + 10 if soon else None
-    clear = lambda g: bool(g.get("ok")) and g.get("sure", 0) >= MIX_SURE
-    # A style picked by hand blends even on a faint beat: then what was heard
-    # is still the best guess at where the beats fall (the re-sync mid-mix
-    # puts it right), far better than assuming the song's first instant.
-    heard = lambda g, key: g.get(key) if clear(g) or (chosen and g.get("ok")) else None
+    clear = mix_grid_clear
+    # A style picked by hand blends even on a faint beat: then where the
+    # beats were heard to fall is still the best guess (the re-syncs through
+    # the mix put it right), but not a tempo heard that faintly: the
+    # catalogue's stands then.
+    def heard(g, key):
+        if clear(g):
+            return g.get(key)
+        return g.get(key) if key == "offset" and chosen and g.get("ok") and g.get("sure", 0) >= MIX_SURE / 2 else None
     # Beats that can't be lined up aren't blended: a cut on the downbeat
     # instead, unless this mix's style was picked by hand.
     plan = mix_plan(a, b, length_a, heard(grid_a, "offset") or 0, heard(grid_b, "offset") or 0,
@@ -5641,6 +5659,8 @@ def mix_gap(env_a, env_b, beat):
 
 
 MIX_SYNC_LISTEN = 10           # seconds both decks are heard together at the start of a mix
+MIX_SYNC_DRIFT = 0.06          # the most the beats can drift between two re-checks (s): more is a mis-hearing
+MIX_SYNC_BEND = 0.005          # the most a re-check bends the new song's tempo (of it)
 MIX_SYNC_SURE = 1.25            # how clearly the two must line up to be nudged
 MIX_SYNC_SMALL = 0.006         # seconds: closer than this is left be
 
@@ -5671,7 +5691,39 @@ def mix_resync(plan, old):
         # b late by gap: it should be that much further on (in its own time).
         mix_op(new, {"type": "shift", "seconds": round(gap * plan["rate"], 4)})
     mix_log("sync", {"gap ms": round(gap * 1000), "sure": round(sure, 2), "nudged": nudge})
-    return gap if nudge else 0.0
+    first = gap if nudge else 0.0
+    # Then again every 8 bars while both are heard, and if the beats keep
+    # drifting the same way, the tempo was a touch off: put it right too.
+    rate, last = plan["rate"], (time.time() if sure >= MIX_SYNC_SURE else None)
+    every = 8 * 4 * plan["beat"]
+    end = plan["endMs"] / 1000 - MIX_SYNC_LISTEN / 2 - 2
+    while time.time() + every / 2 + seconds < end:
+        time.sleep(max(0.0, every - seconds))
+        heard = {}
+        threads = [threading.Thread(target=listen, args=(d,)) for d in (old, new)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        gap, sure = mix_gap(heard.get(old), heard.get(new), plan["beat"])
+        # Once in time, the beats can only drift a little in 8 bars: a big gap
+        # is the listening fooled (often by the old song's off-beat hats once
+        # its kick has gone), never a reason to jump.
+        if sure < MIX_SYNC_SURE or abs(gap) > MIX_SYNC_DRIFT:
+            mix_log("sync again", {"gap ms": round(gap * 1000), "sure": round(sure, 2), "nudged": False})
+            last = None
+            continue
+        op = {"type": "shift", "seconds": round(gap * rate, 4)}
+        if last and abs(gap) >= MIX_SYNC_SMALL:
+            # b fell behind by gap over that time: it plays that much too slowly.
+            # Only ever a hair: a tempo heard right is out by well under 1%.
+            rate = round(max(rate * (1 - MIX_SYNC_BEND), min(rate * (1 + MIX_SYNC_BEND), rate * (1 + gap / (time.time() - last)))), 5)
+            op["rate"] = rate
+        if abs(gap) >= MIX_SYNC_SMALL:
+            mix_op(new, op)
+        last = time.time()
+        mix_log("sync again", {"gap ms": round(gap * 1000), "sure": round(sure, 2), "rate": rate})
+    return first
 
 
 MIX_LOG = STATE.parent / "deck-mix.log"

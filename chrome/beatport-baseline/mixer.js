@@ -245,10 +245,10 @@
     el.preservesPitch = true;
     if (follow) clearInterval(follow.timer);
     follow = { start: Number(op.start), time: Number(op.time), rate, until: Number(op.until), worst: 0, seeks: 0, errors: [], recent: [] };
-    const want = () => follow.time + (wall() - follow.start) / 1000 * rate;
+    const want = () => follow.time + (wall() - follow.start) / 1000 * follow.rate;
     follow.timer = setInterval(() => {
       const now = wall();
-      if (now > follow.until) { el.playbackRate = rate; clearInterval(follow.timer); follow.timer = null; return; }
+      if (now > follow.until) { el.playbackRate = follow.rate; clearInterval(follow.timer); follow.timer = null; return; }
       if (el.paused || el.readyState < 3) return;
       // The element's clock reads a few ms either way each time, so the
       // error is the median of the last few readings.
@@ -272,7 +272,7 @@
       // and leave it be inside 4 ms.
       const most = now < (follow.fastUntil || 0) ? 0.03 : 0.01;
       const nudge = Math.abs(error) < 0.004 ? 0 : Math.max(-most, Math.min(most, error / 4));
-      el.playbackRate = rate * (1 - nudge);
+      el.playbackRate = follow.rate * (1 - nudge);
     }, 200);
   }
 
@@ -366,8 +366,20 @@
       else if (op.type === "envelope") reply = await envelope(op);
       else if (op.type === "shift") {
         // Line the beats up anew: the schedule moves on by `seconds`, and the
-        // tempo may lean a little harder for a few seconds to get there.
-        if (follow) { follow.time += Math.max(-0.3, Math.min(0.3, Number(op.seconds) || 0)); follow.fastUntil = wall() + 6000; follow.recent = []; }
+        // tempo may lean a little harder for a few seconds to get there. With
+        // `rate`, the tempo itself is put right (from where it is now on), when
+        // the beats were drifting apart.
+        if (follow) {
+          follow.time += Math.max(-0.3, Math.min(0.3, Number(op.seconds) || 0));
+          const rate = Number(op.rate);
+          if (rate >= 0.9 && rate <= 1.1) {
+            const now = wall();
+            follow.time += (now - follow.start) / 1000 * follow.rate;
+            follow.start = now;
+            follow.rate = rate;
+          }
+          follow.fastUntil = wall() + 6000; follow.recent = [];
+        }
         reply = { ok: !!follow };
       }
       else if (op.type === "reset") reply = reset(op);

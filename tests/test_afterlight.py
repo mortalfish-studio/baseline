@@ -1965,6 +1965,24 @@ class MixTests(TempCase):
         self.assertEqual({p["land"] for p in picks}, {61.4, None})
         self.assertEqual(al.mix_points({}, "x"), {"out": None, "land": None})
 
+    def test_resync_ignores_a_big_jump_and_bends_tempo_only_a_hair(self):
+        clock = [1000.0]
+        gaps = iter([(0.004, 2.0), (-0.205, 1.9), (0.02, 1.6), (0.03, 1.6)])   # start, then each 8 bars
+        sent = []
+        plan = {"live": "b", "style": "beat", "startMs": 1000_000, "endMs": 1000_000 + 80_000,
+                "enter": 0, "swap": 20, "beat": 0.48, "rate": 1.0}
+        with mock.patch.object(al.time, "time", lambda: clock[0]), \
+             mock.patch.object(al.time, "sleep", lambda t: clock.__setitem__(0, clock[0] + t)), \
+             mock.patch.object(al, "mix_op", lambda deck, op, **k: sent.append((deck, op)) or {}), \
+             mock.patch.object(al, "mix_gap", lambda a, b, beat: next(gaps, (0.0, 0.0))), \
+             mock.patch.object(al, "mix_log", lambda *a: None):
+            al.mix_resync(plan, "a")
+        shifts = [op for deck, op in sent if op.get("type") == "shift"]
+        self.assertFalse(any(abs(op["seconds"]) > al.MIX_SYNC_DRIFT for op in shifts))     # the -205 ms was a mis-hearing
+        rates = [op["rate"] for op in shifts if "rate" in op]
+        self.assertTrue(rates)
+        self.assertTrue(all(abs(r - 1) <= al.MIX_SYNC_BEND + 1e-9 for r in rates))
+
     def test_png_heights_reads_a_waveform(self):
         import struct, zlib
         w, h = 16, 8
